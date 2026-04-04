@@ -42,6 +42,11 @@ body:hover #bar{opacity:1}
 }
 #bar button:hover{background:rgba(72,72,72,0.96);color:#fff}
 #bar button.active{background:rgba(46,58,46,0.95);color:#7dc97d}
+#bar .mode-group{display:flex;border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,0.12);background:rgba(18,18,18,0.6)}
+#bar .mode-group button{border:none;border-radius:0;border-right:1px solid rgba(255,255,255,0.12);margin:0;background:transparent}
+#bar .mode-group button:last-child{border-right:none}
+#bar .mode-group button.active{background:rgba(46,58,46,0.95);color:#7dc97d}
+body.mask-mode-active #wrap{background-image:none;background-color:#000}
 #dims{
     position:fixed;bottom:20px;left:16px;
     font:11px monospace;color:rgba(255,255,255,0.22);
@@ -60,6 +65,24 @@ body:hover #bar{opacity:1}
 </style>
 </head>
 <body>
+<!-- SVG Filters for Mask Display -->
+<svg width="0" height="0" style="position:absolute;pointer-events:none;">
+<filter id="alpha-to-mask" color-interpolation-filters="sRGB">
+  <feColorMatrix type="matrix" values="
+    0 0 0 1 0
+    0 0 0 1 0
+    0 0 0 1 0
+    0 0 0 0 1" />
+</filter>
+<filter id="alpha-overlay" color-interpolation-filters="sRGB">
+  <feColorMatrix type="matrix" in="SourceGraphic" result="tint" values="
+    0 0 0 0 1
+    0 0 0 0 0
+    0 0 0 0 0.33
+    0 0 0 0.6 0" />
+  <feBlend in="tint" in2="SourceGraphic" mode="normal" />
+</filter>
+</svg>
 <div id="wrap">
   <img id="img" alt="" draggable="false">
   <div id="info-panel"><div id="ip-dims">—</div><div id="ip-zoom">Zoom: 100%</div><div id="ip-format">Format: RGB</div></div>
@@ -67,8 +90,15 @@ body:hover #bar{opacity:1}
 <div id="dims"></div>
 <div id="bar">
   <button id="btn-info">&#x2139; Info</button>
-  <button id="btn-adjust" title="Fit window to image size">&#x2921;&nbsp; Fitting View</button>
-  <button id="btn-close">&#x2715;&nbsp; Close</button>
+  <span class="mode-group">
+    <button id="btn-mode-image" class="active">Image</button>
+    <button id="btn-mode-mask">Mask</button>
+    <button id="btn-mode-overlay">Overlay</button>
+  </span>
+  <button id="btn-fit-zoom" title="Fit image to window (0)">&#x26F6; Fit Image</button>
+  <button id="btn-100" title="Actual Size / Real Pixels (1)">1:1 Pixel</button>
+  <button id="btn-adjust" title="Fit window to current zoom level">&#x2921; Fit Window</button>
+  <button id="btn-close">&#x2715; Close</button>
 </div>
 <script>
 (function () {
@@ -114,6 +144,36 @@ body:hover #bar{opacity:1}
     // Refit whenever the window is resized (manual drag or the expand button).
     window.addEventListener("resize", fit);
 
+    const modeImg = document.getElementById("btn-mode-image");
+    const modeMsk = document.getElementById("btn-mode-mask");
+    const modeOvl = document.getElementById("btn-mode-overlay");
+    const modes = ["image", "mask", "overlay"];
+    let viewMode = "image";
+
+    function setViewMode(m) {
+        viewMode = m;
+        modeImg.classList.remove("active");
+        modeMsk.classList.remove("active");
+        modeOvl.classList.remove("active");
+        document.body.classList.remove("mask-mode-active");
+        img.style.filter = "none";
+        
+        if (m === "image") modeImg.classList.add("active");
+        if (m === "mask") {
+            modeMsk.classList.add("active");
+            document.body.classList.add("mask-mode-active");
+            img.style.filter = "url(#alpha-to-mask)";
+        }
+        if (m === "overlay") {
+            modeOvl.classList.add("active");
+            img.style.filter = "url(#alpha-overlay)";
+        }
+    }
+
+    modeImg.addEventListener("click", () => setViewMode("image"));
+    modeMsk.addEventListener("click", () => setViewMode("mask"));
+    modeOvl.addEventListener("click", () => setViewMode("overlay"));
+
     // Info panel toggle
     document.getElementById("btn-info").addEventListener("click", function () {
         panel.classList.toggle("visible");
@@ -126,7 +186,19 @@ body:hover #bar{opacity:1}
     });
 
     // Image load / error
-    img.addEventListener("load",  function () { fit(); img.style.opacity = "1"; });
+    img.addEventListener("load", function () {
+        fit();
+        img.style.opacity = "1";
+        // Detect alpha channel presence via offscreen canvas
+        try {
+            var c = document.createElement("canvas");
+            c.width = 1; c.height = 1;
+            var ctx = c.getContext("2d");
+            ctx.drawImage(img, 0, 0, 1, 1);
+            var a = ctx.getImageData(0, 0, 1, 1).data[3];
+            ipFormat.textContent = "Format: " + (a < 255 ? "RGBA" : "RGB");
+        } catch { ipFormat.textContent = "Format: RGB"; }
+    });
     img.addEventListener("error", function () { img.style.opacity = "0.6"; });
 
     if (initImg) {
@@ -186,20 +258,44 @@ body:hover #bar{opacity:1}
         toggleZoom(e.clientX - rect.left, e.clientY - rect.top);
     });
 
+    // New zoom buttons
+    document.getElementById("btn-fit-zoom").addEventListener("click", fit);
+
+    document.getElementById("btn-100").addEventListener("click", function () {
+        if (Math.abs(scale - 1.0) < 0.001) return;
+        var rect = wrap.getBoundingClientRect();
+        var cx = rect.width / 2, cy = rect.height / 2;
+        var ns = 1.0;
+        var r = ns / scale;
+        tx = cx - (cx - tx) * r;
+        ty = cy - (cy - ty) * r;
+        scale = ns;
+        apply();
+    });
+
     // ── Fit window to image ───────────────────────────────────────────────────
     document.getElementById("btn-adjust").addEventListener("click", function () {
         var nw = img.naturalWidth, nh = img.naturalHeight;
         if (!nw || !nh) return;
         var maxW = Math.round(screen.availWidth  * 0.9);
         var maxH = Math.round(screen.availHeight * 0.9);
-        var s    = Math.min(1, maxW / nw, maxH / nh);
-        var w    = Math.max(320, Math.round(nw * s));
-        var h    = Math.max(240, Math.round(nh * s));
+        
+        // Window UI decorators (borders, titlebar)
+        var dx = window.outerWidth - window.innerWidth;
+        var dy = window.outerHeight - window.innerHeight;
+        if (dx < 0 || isNaN(dx)) dx = 16;
+        if (dy < 0 || isNaN(dy)) dy = 39;
+
+        // Target INNER size matching current zoom
+        var curW = nw * scale;
+        var curH = nh * scale;
+
+        var w    = Math.max(320, Math.min(Math.round(curW + dx), maxW));
+        var h    = Math.max(240, Math.min(Math.round(curH + dy), maxH));
         var left = Math.round((screen.availWidth  - w) / 2) + (screen.availLeft ?? 0);
         var top  = Math.round((screen.availHeight - h) / 2) + (screen.availTop  ?? 0);
         window.resizeTo(w, h);
         window.moveTo(left, top);
-        // fit() is called automatically by the resize event listener.
     });
 
     // Keyboard shortcuts
@@ -209,6 +305,10 @@ body:hover #bar{opacity:1}
         if (e.key === "1") {
             var rect = wrap.getBoundingClientRect();
             toggleZoom(rect.width / 2, rect.height / 2);
+        }
+        if (e.key === "m" || e.key === "M") {
+            const idx = modes.indexOf(viewMode);
+            setViewMode(modes[(idx + 1) % modes.length]);
         }
     });
 }());
