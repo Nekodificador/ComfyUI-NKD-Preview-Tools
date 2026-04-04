@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en" translate="no">
+<head>
+<meta charset="UTF-8">
+<meta name="google" content="notranslate">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NKD Popup Preview</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;background:#080808;overflow:hidden;cursor:grab}
+body.panning{cursor:grabbing}
+#wrap{width:100%;height:100%;position:relative;overflow:hidden}
+#img{
+    position:absolute;top:0;left:0;
+    display:block;transform-origin:0 0;
+    transition:opacity 0.15s;
+    user-select:none;-webkit-user-drag:none;
+}
+#bar{
+    position:fixed;bottom:18px;right:18px;
+    display:flex;gap:8px;
+    opacity:0;transition:opacity 0.25s;
+}
+body:hover #bar{opacity:1}
+#bar button{
+    background:rgba(28,28,28,0.92);
+    border:1px solid rgba(255,255,255,0.12);
+    color:#ccc;padding:6px 15px;
+    border-radius:6px;cursor:pointer;
+    font-size:13px;backdrop-filter:blur(6px);
+    transition:background 0.14s,color 0.14s;
+}
+#bar button:hover{background:rgba(72,72,72,0.96);color:#fff}
+#bar button.active{background:rgba(46,58,46,0.95);color:#7dc97d}
+#dims{
+    position:fixed;bottom:20px;left:16px;
+    font:11px monospace;color:rgba(255,255,255,0.22);
+    pointer-events:none;
+}
+#info-panel{
+    position:absolute;top:10px;left:10px;
+    background:rgba(8,8,8,0.84);
+    border:1px solid rgba(255,255,255,0.09);
+    border-radius:5px;padding:7px 11px;
+    font:11px/1.8 monospace;color:#888;
+    pointer-events:none;backdrop-filter:blur(6px);
+    display:none;z-index:2;
+}
+#info-panel.visible{display:block}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <img id="img" alt="" draggable="false">
+  <div id="info-panel"><div id="ip-dims">—</div><div id="ip-zoom">Zoom: 100%</div></div>
+</div>
+<div id="dims"></div>
+<div id="bar">
+  <button id="btn-info">&#x2139; Info</button>
+  <button id="btn-adjust" title="Ajustar ventana al tamaño de la imagen">&#x2921;&nbsp; Ajustar</button>
+  <button id="btn-close">&#x2715;&nbsp; Cerrar</button>
+</div>
+<script>
+(function () {
+    const params    = new URLSearchParams(location.search);
+    const initImg   = params.get("img")   || "";
+    const initTitle = params.get("title") || "NKD Popup Preview";
+    document.title  = initTitle;
+
+    const img    = document.getElementById("img");
+    const wrap   = document.getElementById("wrap");
+    const dims   = document.getElementById("dims");
+    const panel  = document.getElementById("info-panel");
+    const ipDims = document.getElementById("ip-dims");
+    const ipZoom = document.getElementById("ip-zoom");
+
+    let scale = 1, tx = 0, ty = 0, fitScale = 1;
+    let panning = false, sx = 0, sy = 0, stx = 0, sty = 0;
+
+    function apply() {
+        img.style.transform = "translate("+tx+"px,"+ty+"px) scale("+scale+")";
+        if (fitScale) ipZoom.textContent = "Zoom: " + Math.round((scale / fitScale) * 100) + "%";
+    }
+
+    function fit() {
+        var ww = wrap.clientWidth, wh = wrap.clientHeight;
+        var nw = img.naturalWidth,  nh = img.naturalHeight;
+        if (!nw || !nh) return;
+        fitScale = Math.min(ww / nw, wh / nh);
+        scale = fitScale;
+        tx = (ww - nw * fitScale) / 2;
+        ty = (wh - nh * fitScale) / 2;
+        apply();
+        var label = nw + " \u00d7 " + nh + " px";
+        ipDims.textContent = label;
+        dims.textContent   = label;
+    }
+
+    // Exposed so the parent page can trigger a refit after updating img.src.
+    window.fit = fit;
+
+    // Refit whenever the window is resized (manual drag or the expand button).
+    window.addEventListener("resize", fit);
+
+    // Info panel toggle
+    document.getElementById("btn-info").addEventListener("click", function () {
+        panel.classList.toggle("visible");
+        this.classList.toggle("active", panel.classList.contains("visible"));
+    });
+
+    // Close button
+    document.getElementById("btn-close").addEventListener("click", function () {
+        window.close();
+    });
+
+    // Image load / error
+    img.addEventListener("load",  function () { fit(); img.style.opacity = "1"; });
+    img.addEventListener("error", function () { img.style.opacity = "0.6"; });
+
+    if (initImg) {
+        img.style.opacity = "0.4";
+        img.src = initImg;
+    }
+
+    // Wheel → zoom centered on cursor
+    wrap.addEventListener("wheel", function (e) {
+        e.preventDefault();
+        var rect = wrap.getBoundingClientRect();
+        var cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+        var factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+        var ns = Math.max(fitScale * 0.1, Math.min(scale * factor, fitScale * 32));
+        var r = ns / scale;
+        tx = cx - (cx - tx) * r;
+        ty = cy - (cy - ty) * r;
+        scale = ns;
+        apply();
+    }, { passive: false });
+
+    // Left-click drag → pan
+    wrap.addEventListener("mousedown", function (e) {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        panning = true;
+        sx = e.clientX; sy = e.clientY; stx = tx; sty = ty;
+        document.body.classList.add("panning");
+    });
+    document.addEventListener("mousemove", function (e) {
+        if (!panning) return;
+        tx = stx + (e.clientX - sx);
+        ty = sty + (e.clientY - sy);
+        apply();
+    });
+    document.addEventListener("mouseup", function () {
+        panning = false;
+        document.body.classList.remove("panning");
+    });
+
+    // Double-click → reset to fit
+    wrap.addEventListener("dblclick", function () { fit(); });
+
+    // ── Fit window to image ───────────────────────────────────────────────────
+    document.getElementById("btn-adjust").addEventListener("click", function () {
+        var nw = img.naturalWidth, nh = img.naturalHeight;
+        if (!nw || !nh) return;
+        var maxW = Math.round(screen.availWidth  * 0.9);
+        var maxH = Math.round(screen.availHeight * 0.9);
+        var s    = Math.min(1, maxW / nw, maxH / nh);
+        var w    = Math.max(320, Math.round(nw * s));
+        var h    = Math.max(240, Math.round(nh * s));
+        var left = Math.round((screen.availWidth  - w) / 2) + (screen.availLeft ?? 0);
+        var top  = Math.round((screen.availHeight - h) / 2) + (screen.availTop  ?? 0);
+        window.resizeTo(w, h);
+        window.moveTo(left, top);
+        // fit() is called automatically by the resize event listener.
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") window.close();
+        if (e.key === "0" || e.key === "r") fit();
+    });
+}());
+</script>
+</body>
+</html>
