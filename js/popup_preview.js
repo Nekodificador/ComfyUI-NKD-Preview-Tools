@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const NODE_TYPE = "NKD_PopupPreview";
+const NODE_TYPE = "NKDPopupPreviewNode";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
