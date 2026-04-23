@@ -2,13 +2,13 @@ from comfy_api.latest import ComfyExtension, io, ui
 from typing_extensions import override
 
 
-class NKD_PopupPreview(io.ComfyNode):
+class NKDPopupPreviewNode(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="NKD_PopupPreview",
-            display_name="NKD Popup Preview",
-            category="NKD Nodes/Preview",
+            node_id="NKDPopupPreviewNode",
+            display_name="😺NKD Popup Preview",
+            category="😺NKD Nodes/Preview",
             description=(
                 "Previsualiza una imagen en una ventana flotante sobre el navegador. "
                 "La ventana puede abrirse en una pantalla secundaria a pantalla completa."
@@ -30,7 +30,7 @@ class NKD_PopupPreview(io.ComfyNode):
 class NKDExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [NKD_PopupPreview]
+        return [NKDPopupPreviewNode]
 
 
 async def comfy_entrypoint() -> NKDExtension:
