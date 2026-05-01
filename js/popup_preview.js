@@ -2,6 +2,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const NODE_TYPE = "NKDPopupPreviewNode";
+const LS_PRIMARY = "nkd_primary_node_id";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -28,6 +29,33 @@ function loadImageDimensions(url) {
 
 function viewerHtmlUrl() {
     return new URL("/extensions/ComfyUI-NKD-Popup-Preview/viewer.html", window.location.href).href;
+}
+
+// ── Primary node tracking ─────────────────────────────────────────────────────
+
+// nodeId string of the current primary node, or null.
+let primaryNodeId = localStorage.getItem(LS_PRIMARY) ?? null;
+
+function setPrimary(nodeId) {
+    const prev = primaryNodeId;
+    primaryNodeId = nodeId ? String(nodeId) : null;
+
+    if (primaryNodeId) {
+        localStorage.setItem(LS_PRIMARY, primaryNodeId);
+    } else {
+        localStorage.removeItem(LS_PRIMARY);
+    }
+
+    // Redraw both affected nodes so their button labels refresh.
+    for (const id of new Set([prev, primaryNodeId])) {
+        if (!id) continue;
+        const node = app.graph?.getNodeById(Number(id));
+        if (node) node.setDirtyCanvas(true, false);
+    }
+}
+
+function isPrimary(nodeId) {
+    return String(nodeId) === primaryNodeId;
 }
 
 // ── PopupWin ──────────────────────────────────────────────────────────────────
@@ -166,7 +194,7 @@ class PopupWin {
 
         if (!winW) {
             const dims = await this._calcWindowSize();
-            winW = dims.winW; 
+            winW = dims.winW;
             winH = dims.winH;
             left = Math.round((screen.availWidth  - winW) / 2) + (screen.availLeft ?? 0);
             top  = Math.round((screen.availHeight - winH) / 2) + (screen.availTop  ?? 0);
@@ -206,10 +234,10 @@ class PopupWin {
             else saveState();
         }, 500);
 
-        this.win.addEventListener("beforeunload", () => { 
+        this.win.addEventListener("beforeunload", () => {
             saveState();
             clearInterval(saveInterval);
-            this.win = null; 
+            this.win = null;
         });
     }
 
@@ -274,10 +302,138 @@ function getPopup(nodeId) {
     return popups.get(key);
 }
 
+// ── Queue single node ─────────────────────────────────────────────────────────
+
+async function _queueNode(node) {
+    const origApiQueue = api.queuePrompt.bind(api);
+    try {
+        // Intercept api.queuePrompt for a single call to filter the serialized
+        // graph down to only the target node and its upstream dependencies.
+        api.queuePrompt = async function (index, prompt) {
+            api.queuePrompt = origApiQueue;
+            if (prompt?.output) {
+                const filtered = {};
+                _collectUpstream(String(node.id), prompt.output, filtered);
+                prompt = { ...prompt, output: filtered };
+            }
+            return origApiQueue(index, prompt);
+        };
+        await app.queuePrompt(0, 1);
+    } catch (err) {
+        api.queuePrompt = origApiQueue;
+        console.error("NKD queue node error:", err);
+        app.extensionManager?.toast?.add?.({
+            severity: "error",
+            summary: "Queue Failed",
+            detail: String(err),
+            life: 6000,
+        });
+    }
+}
+
+function _collectUpstream(nodeId, allOutput, result) {
+    if (result[nodeId] || !allOutput[nodeId]) return;
+    result[nodeId] = allOutput[nodeId];
+    for (const inputVal of Object.values(allOutput[nodeId].inputs ?? {})) {
+        if (Array.isArray(inputVal)) _collectUpstream(String(inputVal[0]), allOutput, result);
+    }
+}
+
 app.registerExtension({
     name: "NKD.PopupPreview",
 
+    commands: [
+        {
+            id: "NKD.PopupPreview.QueuePrimary",
+            label: "NKD: Queue Primary Popup Node",
+            icon: "pi pi-play",
+            async function() {
+                if (!primaryNodeId) {
+                    app.extensionManager?.toast?.add?.({
+                        severity: "warn",
+                        summary: "No Primary Node",
+                        detail: "Mark a Popup Preview node as primary first.",
+                        life: 5000,
+                    });
+                    return;
+                }
+                const node = app.graph?.getNodeById(Number(primaryNodeId));
+                if (!node) {
+                    app.extensionManager?.toast?.add?.({
+                        severity: "warn",
+                        summary: "Primary Node Not Found",
+                        detail: "The primary node no longer exists in the graph.",
+                        life: 5000,
+                    });
+                    setPrimary(null);
+                    return;
+                }
+                await _queueNode(node);
+            },
+        },
+        {
+            id: "NKD.PopupPreview.OpenPrimary",
+            label: "NKD: Open Primary Popup Viewer",
+            icon: "pi pi-external-link",
+            function() {
+                if (!primaryNodeId) {
+                    app.extensionManager?.toast?.add?.({
+                        severity: "warn",
+                        summary: "No Primary Node",
+                        detail: "Mark a Popup Preview node as primary first.",
+                        life: 5000,
+                    });
+                    return;
+                }
+                const node = app.graph?.getNodeById(Number(primaryNodeId));
+                if (!node) {
+                    app.extensionManager?.toast?.add?.({
+                        severity: "warn",
+                        summary: "Primary Node Not Found",
+                        detail: "The primary node no longer exists in the graph.",
+                        life: 5000,
+                    });
+                    setPrimary(null);
+                    return;
+                }
+                const p = getPopup(primaryNodeId);
+                if (p.win && !p.win.closed) {
+                    p.destroy();
+                } else {
+                    p.setTitle(node.title || "Preview Window");
+                    p.open();
+                }
+            },
+        },
+    ],
+
+    keybindings: [
+        {
+            commandId: "NKD.PopupPreview.OpenPrimary",
+            combo: { key: "p", ctrl: false, alt: false, shift: true },
+        },
+        {
+            commandId: "NKD.PopupPreview.QueuePrimary",
+            combo: { key: "p", ctrl: true, alt: false, shift: true },
+        },
+    ],
+
     async setup() {
+        // Global keydown so shortcuts work regardless of where focus is.
+        document.addEventListener("keydown", (e) => {
+            if (!e.shiftKey || e.altKey || e.metaKey) return;
+            if (e.key !== "P") return;
+            const tag = document.activeElement?.tagName;
+            if (tag === "INPUT" || tag === "TEXTAREA" || document.activeElement?.isContentEditable) return;
+            if (e.ctrlKey) {
+                e.preventDefault();
+                app.extensionManager?.command?.execute?.("NKD.PopupPreview.QueuePrimary");
+            } else {
+                e.preventDefault();
+                app.extensionManager?.command?.execute?.("NKD.PopupPreview.OpenPrimary");
+            }
+        });
+
         api.addEventListener("executed", ({ detail }) => {
             if (!detail?.output?.images?.length) return;
             const node = app.graph?.getNodeById(detail.node);
@@ -294,7 +450,7 @@ app.registerExtension({
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             origCreated?.apply(this, arguments);
-            this.size = [210, 118];
+            this.size = [210, 148];
 
             // Suppress the default node thumbnail.
             this.onExecuted = function () {};
@@ -309,6 +465,25 @@ app.registerExtension({
                 const p = getPopup(String(this.id));
                 copyImageToClipboard(p.currentUrl);
             }, { serialize: false });
+
+            // Primary toggle button — label updates dynamically on draw.
+            const primaryWidget = this.addWidget("button", _primaryLabel(this.id), null, () => {
+                if (isPrimary(this.id)) {
+                    setPrimary(null);
+                } else {
+                    setPrimary(this.id);
+                }
+                // Refresh the label immediately after state change.
+                primaryWidget.name = _primaryLabel(this.id);
+                this.setDirtyCanvas(true, false);
+            }, { serialize: false });
+
+            // Keep label in sync whenever the canvas redraws this node.
+            const origDraw = this.onDrawForeground?.bind(this);
+            this.onDrawForeground = function (ctx) {
+                primaryWidget.name = _primaryLabel(this.id);
+                origDraw?.(ctx);
+            };
         };
 
         const origTitleChanged = nodeType.prototype.onTitleChanged;
@@ -321,9 +496,21 @@ app.registerExtension({
         nodeType.prototype.onRemoved = function () {
             origRemoved?.apply(this, arguments);
             const key = String(this.id);
+            // Clear primary if this node was the primary one.
+            if (isPrimary(key)) setPrimary(null);
             popups.get(key)?.destroy();
             popups.delete(key);
         };
+    },
+
+    // Restore primary state after graph load (node IDs are now stable).
+    afterConfigureGraph() {
+        if (!primaryNodeId) return;
+        const node = app.graph?.getNodeById(Number(primaryNodeId));
+        if (!node || node.comfyClass !== NODE_TYPE) {
+            // Saved ID no longer maps to a valid popup node — clear it.
+            setPrimary(null);
+        }
     },
 
     getNodeMenuItems(node) {
@@ -344,6 +531,16 @@ app.registerExtension({
                     copyImageToClipboard(p.currentUrl);
                 },
             },
+            {
+                content: isPrimary(node.id) ? "★ Unset Primary" : "☆ Set as Primary",
+                callback: () => {
+                    setPrimary(isPrimary(node.id) ? null : node.id);
+                },
+            },
         ];
     },
 });
+
+function _primaryLabel(nodeId) {
+    return isPrimary(nodeId) ? "★ Primary (Shift+P)" : "☆ Set as Primary";
+}
