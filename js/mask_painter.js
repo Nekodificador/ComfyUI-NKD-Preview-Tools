@@ -59,6 +59,41 @@ async function loadImageFromId(image, v) {
     return false;
 }
 
+// Queue a single node by intercepting api.queuePrompt for one call and
+// filtering the serialised graph down to that node + its upstream deps.
+async function _queueNode(node) {
+    const origApiQueue = api.queuePrompt.bind(api);
+    try {
+        api.queuePrompt = async function (index, prompt) {
+            api.queuePrompt = origApiQueue;
+            if (prompt?.output) {
+                const filtered = {};
+                _collectUpstream(String(node.id), prompt.output, filtered);
+                prompt = { ...prompt, output: filtered };
+            }
+            return origApiQueue(index, prompt);
+        };
+        await app.queuePrompt(0, 1);
+    } catch (err) {
+        api.queuePrompt = origApiQueue;
+        console.error("NKD MaskPainter queue error:", err);
+        app.extensionManager?.toast?.add?.({
+            severity: "error",
+            summary: "Queue Failed",
+            detail: String(err),
+            life: 6000,
+        });
+    }
+}
+
+function _collectUpstream(nodeId, allOutput, result) {
+    if (result[nodeId] || !allOutput[nodeId]) return;
+    result[nodeId] = allOutput[nodeId];
+    for (const inputVal of Object.values(allOutput[nodeId].inputs ?? {})) {
+        if (Array.isArray(inputVal)) _collectUpstream(String(inputVal[0]), allOutput, result);
+    }
+}
+
 function _updateMaskStatus(node, hasMask) {
     node._nkdHasMask = hasMask;
     if (hasMask) {
@@ -191,6 +226,11 @@ function setupMaskPainterNode(node) {
             });
             return;
         }
+        // The mask editor reuses any clipspace-mask/clipspace-paint files left
+        // over from a prior session. Wipe the clipspace before copying so the
+        // editor starts fresh from this node's current image.
+        if (app.constructor) app.constructor.clipspace = null;
+        app.clipspace = null;
         copy(node);
         if (app.constructor) app.constructor.clipspace_return_node = node;
         app.clipspace_return_node = node;
@@ -201,7 +241,6 @@ function setupMaskPainterNode(node) {
         if (node.id == null || node.id < 0) return;
         // Instant visual feedback; thumbnail refreshes once backend responds.
         _updateMaskStatus(node, false);
-        w._value = `$${node.id}-0`;
         node.setDirtyCanvas?.(true, false);
 
         let payload = null;
@@ -212,6 +251,13 @@ function setupMaskPainterNode(node) {
             );
             if (res.ok) payload = await res.json();
         } catch (_) {}
+
+        // Point the widget at the new clean pb_id so the mask editor's loader
+        // resolves it to an alpha-less file and opens with a blank mask.
+        // Bypass the value setter (which would refetch) — _value is the
+        // actual storage and matches what the setter would have written.
+        const newPbId = payload?.pb_id ?? `$${node.id}-0`;
+        w._value = newPbId;
 
         const clean = payload?.clean;
         if (clean?.filename) {
@@ -228,6 +274,11 @@ function setupMaskPainterNode(node) {
             };
             img.src = api.apiURL(`/view?${p}`);
         }
+
+        // Re-execute the node so downstream consumers receive the cleared mask.
+        // Without this, the executor's cache keeps serving the previously
+        // painted output until the user manually queues again.
+        _queueNode(node);
     }
 
     async function actionReseed() {

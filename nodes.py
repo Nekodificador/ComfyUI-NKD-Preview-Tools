@@ -295,7 +295,21 @@ async def _nkd_bridge_clear(request: web.Request) -> web.Response:
     _pb_cache.pop(node_id, None)
     _incoming_mask_fp.pop(node_id, None)
 
-    return web.json_response({"clean": clean_item})
+    # Register the alpha-less thumbnail as the active file for this node so
+    # the next mask-editor open reads a blank alpha instead of the painted PNG
+    # (the editor loader resolves the widget's pb_id → filename → fetches the
+    # alpha channel server-side; pointing it at the clean RGB makes alpha = 255).
+    new_pb_id: str | None = None
+    if clean_item is not None:
+        clean_path = os.path.join(
+            folder_paths.get_temp_directory(),
+            clean_item.get("subfolder", ""),
+            clean_item.get("filename", ""),
+        )
+        if os.path.isfile(clean_path):
+            new_pb_id = _set_pb_image(node_id, clean_path, clean_item)
+
+    return web.json_response({"clean": clean_item, "pb_id": new_pb_id})
 
 
 # ── UI output ─────────────────────────────────────────────────────────────────
