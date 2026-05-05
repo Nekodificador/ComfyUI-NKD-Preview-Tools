@@ -8,6 +8,16 @@ A small set of preview and masking tools for [ComfyUI](https://github.com/comfya
 
 https://github.com/user-attachments/assets/e52f40df-36a2-4027-8f7b-1e987ed2615f
 
+## Updates!
+
+I’ve added a "set primary" state that lets you use multiple popup previews in the same workflow. Once you’ve set one as the primary node, you can trigger its output with a shortcut or call up the preview from anywhere in the UI. This means you can queue only what you're actually previewing on a second monitor or floating window, without having to scroll back and forth from the middle of nowhere.
+
+https://github.com/user-attachments/assets/75a9a3de-9ded-4d41-95f2-3de4421d63ac
+
+And a new node
+
+https://github.com/user-attachments/assets/fea39b77-1e47-4006-ba7f-51197db0f106
+
 
 ## 🌟 Features
 
