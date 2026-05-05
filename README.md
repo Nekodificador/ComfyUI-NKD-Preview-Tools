@@ -41,8 +41,8 @@ https://github.com/user-attachments/assets/fea39b77-1e47-4006-ba7f-51197db0f106
 - **Persistent across restarts**: painted masks are mirrored to `input/nkd_masks/` so they survive temp cleanup and ComfyUI restarts.
 - **Edit / Clear / Reseed** button row:
   - `Edit` opens the native mask editor.
-  - `Clear` wipes the painted mask and refreshes the node preview in place — no requeue needed.
-  - `Reseed` arms the node to re-apply the current `mask_input_mode` operation against the upstream mask on the next Run (useful when you want to re-blend without changing upstream).
+  - `Clear` wipes the painted mask, refreshes the node preview, and re-runs the node so downstream consumers immediately see the cleared mask.
+  - `Reseed` arms the node to re-apply the current `mask_input_mode` operation against the upstream mask on the next Run (useful when you want to re-blend without changing upstream). See the example below.
 - **Visual feedback**: the node turns green when it carries a non-empty mask.
 - **`on_image_change`** combo: choose `clear_mask` (default) to wipe the mask when the upstream image changes, or `keep_mask` to preserve it.
 - **One mask per node**: instantiate multiple Mask Painter nodes from the same image to paint independent masks.
@@ -80,10 +80,27 @@ https://github.com/user-attachments/assets/fea39b77-1e47-4006-ba7f-51197db0f106
 4. Click **Edit** to open the native mask editor. Paint, then **Save & Close**.
 5. Click **Queue Prompt** again — `MASK` and `MASK (inverted)` are now populated.
 6. The node preview shows the image with the painted area as transparency (the same way Preview Bridge does it).
-7. Click **Clear** at any time to wipe the mask (refreshes in place, no requeue).
-8. With a `mask` connected upstream, click **Reseed** then **Run** to re-apply the seed/add/subtract operation without changing upstream.
+7. Click **Clear** at any time to wipe the mask. The node re-runs automatically so any downstream nodes also see the cleared mask.
+8. With a `mask` connected upstream, click **Reseed** then **Run** to re-apply the current `mask_input_mode` operation against the upstream mask without changing upstream.
 
 For multiple independent masks of the same image, instantiate the Mask Painter node several times.
+
+#### Clear vs Reseed — what's the difference?
+
+Both buttons interact with mask state, but they do different things:
+
+| | **Painted mask** | **Upstream `mask` input** | **Use when…** |
+|---|---|---|---|
+| **Clear** | Wiped | Forgotten (re-imported on next Run) | You want to start over from scratch. |
+| **Reseed** | Kept | Forgotten (re-applied on next Run) | You want to re-blend the upstream mask into your current painted mask. |
+
+**Example with `mask_input_mode = Add`:**
+
+1. Connect a face-detector node to `mask`. Run.
+2. The painter shows the detected face mask. You paint over an extra region by hand.
+3. You manually erase the original face area in the editor (Edit → erase → Save).
+4. The next Run will not re-add the face, because the upstream mask hasn't changed (its fingerprint matches the cached one). Your edits are preserved across executions — that is the intended behaviour.
+5. To pull the face back in, click **Reseed** then **Run**: the upstream mask is treated as freshly arrived and re-applied via `Add`, without losing the rest of your painted mask. **Clear** would wipe everything you painted, so it's the wrong tool here.
 
 ## 📝 Troubleshooting
 
