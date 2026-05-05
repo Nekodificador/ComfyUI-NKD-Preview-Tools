@@ -36,6 +36,25 @@ function viewerHtmlUrl() {
 // nodeId string of the current primary node, or null.
 let primaryNodeId = localStorage.getItem(LS_PRIMARY) ?? null;
 
+const PRIMARY_OUTLINE_COLOR = "#4cc9f0";
+const PRIMARY_BG_COLOR      = "#1a2a33";
+const PRIMARY_OUTLINE_WIDTH = 2.5;
+const PRIMARY_DASH          = [8, 4];
+
+function applyPrimaryStyle(node, on) {
+    if (!node) return;
+    // Set node.color/bgcolor for V2 (Vue) frontend, which doesn't call onDrawForeground.
+    // In classic LiteGraph these may be overridden by other extensions (e.g. Jovi
+    // Colorizer), but the dashed overlay drawn in onDrawForeground compensates.
+    if (on) {
+        node.color   = PRIMARY_OUTLINE_COLOR;
+        node.bgcolor = PRIMARY_BG_COLOR;
+    } else {
+        delete node.color;
+        delete node.bgcolor;
+    }
+}
+
 function setPrimary(nodeId) {
     const prev = primaryNodeId;
     primaryNodeId = nodeId ? String(nodeId) : null;
@@ -46,11 +65,13 @@ function setPrimary(nodeId) {
         localStorage.removeItem(LS_PRIMARY);
     }
 
-    // Redraw both affected nodes so their button labels refresh.
+    // Redraw both affected nodes so their button labels and outline refresh.
     for (const id of new Set([prev, primaryNodeId])) {
         if (!id) continue;
         const node = app.graph?.getNodeById(Number(id));
-        if (node) node.setDirtyCanvas(true, false);
+        if (!node) continue;
+        applyPrimaryStyle(node, isPrimary(id));
+        node.setDirtyCanvas(true, true);
     }
 }
 
@@ -466,24 +487,39 @@ app.registerExtension({
                 copyImageToClipboard(p.currentUrl);
             }, { serialize: false });
 
-            // Primary toggle button — label updates dynamically on draw.
+            // Primary toggle button — label reflects state with filled/empty star.
             const primaryWidget = this.addWidget("button", _primaryLabel(this.id), null, () => {
                 if (isPrimary(this.id)) {
                     setPrimary(null);
                 } else {
                     setPrimary(this.id);
                 }
-                // Refresh the label immediately after state change.
-                primaryWidget.name = _primaryLabel(this.id);
-                this.setDirtyCanvas(true, false);
+                _setWidgetLabel(primaryWidget, _primaryLabel(this.id));
+                this.graph?.setDirtyCanvas(true, true);
             }, { serialize: false });
 
-            // Keep label in sync whenever the canvas redraws this node.
+            // Keep label in sync and paint primary outline on each redraw
+            // (canvas / classic LiteGraph only; V2 Vue uses node.color instead).
             const origDraw = this.onDrawForeground?.bind(this);
             this.onDrawForeground = function (ctx) {
-                primaryWidget.name = _primaryLabel(this.id);
+                _setWidgetLabel(primaryWidget, _primaryLabel(this.id));
                 origDraw?.(ctx);
+                if (!isPrimary(this.id)) return;
+                const w = this.size[0];
+                const h = this.size[1];
+                const titleH = (window.LiteGraph?.NODE_TITLE_HEIGHT) ?? 30;
+                ctx.save();
+                ctx.strokeStyle = PRIMARY_OUTLINE_COLOR;
+                ctx.lineWidth   = PRIMARY_OUTLINE_WIDTH;
+                ctx.setLineDash(PRIMARY_DASH);
+                ctx.beginPath();
+                ctx.roundRect(0, -titleH, w, h + titleH, 8);
+                ctx.stroke();
+                ctx.restore();
             };
+
+            // Restore highlight if this node is the saved primary.
+            if (isPrimary(this.id)) applyPrimaryStyle(this, true);
         };
 
         const origTitleChanged = nodeType.prototype.onTitleChanged;
@@ -510,6 +546,9 @@ app.registerExtension({
         if (!node || node.comfyClass !== NODE_TYPE) {
             // Saved ID no longer maps to a valid popup node — clear it.
             setPrimary(null);
+        } else {
+            applyPrimaryStyle(node, true);
+            node.setDirtyCanvas(true, true);
         }
     },
 
@@ -542,5 +581,13 @@ app.registerExtension({
 });
 
 function _primaryLabel(nodeId) {
-    return isPrimary(nodeId) ? "★ Primary (Shift+P)" : "☆ Set as Primary";
+    return isPrimary(nodeId) ? "★ Primary" : "☆ Set as Primary";
+}
+
+// V2 renderer reads widget.displayName, which is `label || name`. Setting only
+// `name` is invisible if `label` was ever assigned. Always set both.
+function _setWidgetLabel(widget, text) {
+    if (!widget) return;
+    widget.label = text;
+    widget.name  = text;
 }
