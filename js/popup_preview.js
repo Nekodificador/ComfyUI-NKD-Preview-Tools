@@ -431,22 +431,22 @@ app.registerExtension({
     keybindings: [
         {
             commandId: "NKD.PopupPreview.OpenPrimary",
-            combo: { key: "p", ctrl: false, alt: false, shift: true },
+            combo: { key: "q", ctrl: false, alt: false, shift: false },
         },
         {
             commandId: "NKD.PopupPreview.QueuePrimary",
-            combo: { key: "p", ctrl: true, alt: false, shift: true },
+            combo: { key: "q", ctrl: false, alt: false, shift: true },
         },
     ],
 
     async setup() {
         // Global keydown so shortcuts work regardless of where focus is.
         document.addEventListener("keydown", (e) => {
-            if (!e.shiftKey || e.altKey || e.metaKey) return;
-            if (e.key !== "P") return;
+            if (e.ctrlKey || e.altKey || e.metaKey) return;
+            if (e.key !== "q" && e.key !== "Q") return;
             const tag = document.activeElement?.tagName;
             if (tag === "INPUT" || tag === "TEXTAREA" || document.activeElement?.isContentEditable) return;
-            if (e.ctrlKey) {
+            if (e.shiftKey) {
                 e.preventDefault();
                 app.extensionManager?.command?.execute?.("NKD.PopupPreview.QueuePrimary");
             } else {
