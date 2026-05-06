@@ -31,6 +31,17 @@ function viewerHtmlUrl() {
     return new URL("/extensions/ComfyUI-NKD-Preview-Tools/viewer.html", window.location.href).href;
 }
 
+async function getReferenceUrl() {
+    try {
+        const r = await fetch(api.apiURL("/nkd/ref/get"));
+        if (!r.ok) return null;
+        const item = await r.json();
+        return buildViewUrl(item);
+    } catch {
+        return null;
+    }
+}
+
 // ── Primary node tracking ─────────────────────────────────────────────────────
 
 // nodeId string of the current primary node, or null.
@@ -89,6 +100,7 @@ class PopupWin {
         this._title     = "Preview Window";
         this._opening   = false;
         this._pipMode   = false; // true when the window is a Document PiP
+        this._refUrl    = null;  // when set, viewer opens in compare mode
     }
 
     setTitle(title) {
@@ -107,14 +119,16 @@ class PopupWin {
         }
     }
 
-    /** Called from node button / context menu. */
-    open() {
+    /** Called from node button / context menu. Picks up any active reference
+     * image automatically so press-and-hold compare is available in the viewer. */
+    async open() {
         if (this.win && !this.win.closed) {
             // PiP windows are always on top; regular windows need a focus call.
             if (!this._pipMode) this.win.focus();
-        } else {
-            this._openViewer();
+            return;
         }
+        this._refUrl = await getReferenceUrl();
+        this._openViewer();
     }
 
     async _openViewer() {
@@ -178,6 +192,12 @@ class PopupWin {
             bodyClone.querySelectorAll("script").forEach(s => s.remove());
             pipWin.document.body.innerHTML = bodyClone.innerHTML;
 
+            // Hand off the compare-mode reference URL BEFORE running the
+            // viewer script — it reads window.__nkd_ref_url at IIFE time.
+            if (this._refUrl) {
+                pipWin.__nkd_ref_url = this._refUrl;
+            }
+
             // Execute scripts in the PiP window's context by appending new elements.
             parsed.querySelectorAll("script").forEach(s => {
                 const ns = pipWin.document.createElement("script");
@@ -223,7 +243,12 @@ class PopupWin {
 
         const opts = `width=${winW},height=${winH},left=${left},top=${top},toolbar=no,menubar=no,location=no,status=no,scrollbars=no`;
 
-        const qp  = new URLSearchParams({ img: this.currentUrl ?? "", title: this._title });
+        const qpInit = { img: this.currentUrl ?? "", title: this._title };
+        if (this._refUrl) {
+            qpInit.ref     = this._refUrl;
+            qpInit.compare = "1";
+        }
+        const qp  = new URLSearchParams(qpInit);
         const url = `${viewerHtmlUrl()}?${qp}`;
 
         this.win      = window.open(url, `nkd_preview_${this.nodeId}`, opts);

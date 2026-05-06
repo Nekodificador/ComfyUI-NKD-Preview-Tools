@@ -54,6 +54,13 @@ _pb_counter = 0
 # user's manual edits aren't overwritten on every queue.
 _incoming_mask_fp: dict[str, tuple] = {}
 
+# Single active reference image for the workflow ("wireless" compare source).
+# (abs_path, item_dict) where item_dict has {filename, subfolder, type} for the
+# /view endpoint. None when no reference has been captured yet. Last
+# NKDReferenceImage to execute wins.
+_ref_image: tuple[str, dict] | None = None
+_REF_PREFIX = "NKDReferenceImage/NRI-"
+
 
 # ── Mask backup helpers ───────────────────────────────────────────────────────
 
@@ -200,6 +207,25 @@ def _resolve_clipspace_path(filename: str, ftype: str, subfolder: str) -> str | 
     return p if os.path.exists(p) else None
 
 
+# ── Reference image helpers ───────────────────────────────────────────────────
+
+def _save_reference_png(image_tensor: torch.Tensor) -> tuple[str, dict, int, int]:
+    """Write the first frame of an IMAGE tensor as an RGB PNG into temp/.
+    Returns (abs_path, item_dict, W, H).
+    """
+    img_np = np.clip(255.0 * image_tensor[0].cpu().numpy(), 0, 255).astype(np.uint8)
+    H, W = img_np.shape[:2]
+    full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+        _REF_PREFIX, folder_paths.get_temp_directory(), W, H
+    )
+    os.makedirs(full_output_folder, exist_ok=True)
+    file = f"{filename}_{counter:05}_.png"
+    path = os.path.join(full_output_folder, file)
+    PILImage.fromarray(img_np, "RGB").save(path, compress_level=4)
+    item = {"filename": file, "subfolder": subfolder, "type": "temp"}
+    return path, item, W, H
+
+
 # ── REST endpoints ────────────────────────────────────────────────────────────
 
 routes = PromptServer.instance.routes
@@ -312,6 +338,17 @@ async def _nkd_bridge_clear(request: web.Request) -> web.Response:
     return web.json_response({"clean": clean_item, "pb_id": new_pb_id})
 
 
+@routes.get("/nkd/ref/get")
+async def _nkd_ref_get(request: web.Request) -> web.Response:
+    """Return the active reference image's /view item, or 404 if unset."""
+    if _ref_image is None:
+        return web.Response(status=404, text="No reference image set")
+    path, item = _ref_image
+    if not os.path.isfile(path):
+        return web.Response(status=404, text="Reference file missing")
+    return web.json_response(item)
+
+
 # ── UI output ─────────────────────────────────────────────────────────────────
 
 class _NKDMaskPainterUI(_UIOutput):
@@ -327,6 +364,42 @@ class _NKDMaskPainterUI(_UIOutput):
             "nkd_pb_id":    [self.pb_id],
             "nkd_has_mask": [self.has_mask],
         }
+
+
+# ── NKDReferenceImage ─────────────────────────────────────────────────────────
+
+class NKDReferenceImage(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="NKDReferenceImage",
+            display_name="😺NKD Reference",
+            category="😺NKD Nodes/Preview",
+            description=(
+                "Captures the connected image as the workflow's active reference. "
+                "Any NKD Popup Preview node can then press-and-hold (Space or the "
+                "viewer button) to flash the reference over the current preview. "
+                "Only one reference is active at a time — the last executed reference "
+                "node wins."
+            ),
+            inputs=[io.Image.Input("image")],
+            outputs=[],
+            is_output_node=True,
+            not_idempotent=True,
+        )
+
+    @classmethod
+    def fingerprint_inputs(cls, image):
+        # not_idempotent alone wasn't reliably forcing re-execution for this
+        # output-only node, so we make the cache invalidate every time.
+        return float("nan")
+
+    @classmethod
+    def execute(cls, image):
+        global _ref_image
+        path, item, _W, _H = _save_reference_png(image)
+        _ref_image = (path, item)
+        return io.NodeOutput()
 
 
 # ── NKDPopupPreviewNode (unchanged) ───────────────────────────────────────────
@@ -594,7 +667,7 @@ class NKDMaskPainter(io.ComfyNode):
 class NKDExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [NKDPopupPreviewNode, NKDMaskPainter]
+        return [NKDPopupPreviewNode, NKDReferenceImage, NKDMaskPainter]
 
 async def comfy_entrypoint() -> NKDExtension:
     return NKDExtension()

@@ -19,12 +19,36 @@ body.panning{cursor:grabbing}
     background-size:20px 20px;
     background-position:0 0, 0 10px, 10px -10px, -10px 0px;
 }
-#img{
+#img,#ref-img{
     position:absolute;top:0;left:0;
     display:block;transform-origin:0 0;
     transition:opacity 0.15s;
     user-select:none;-webkit-user-drag:none;
 }
+#ref-img{display:none;z-index:1}
+body.holding-ref #img{visibility:hidden}
+body.holding-ref #ref-img{display:block}
+#ref-badge{
+    position:fixed;top:14px;left:14px;
+    background:rgba(180,32,48,0.92);
+    color:#fff;font:bold 11px monospace;
+    padding:4px 9px;border-radius:4px;
+    pointer-events:none;display:none;z-index:5;
+    letter-spacing:1px;backdrop-filter:blur(4px);
+}
+body.holding-ref #ref-badge{display:block}
+#btn-hold{
+    position:fixed;top:14px;right:14px;
+    background:rgba(40,28,32,0.92);
+    border:1px solid rgba(255,180,180,0.18);
+    color:#ddd;padding:8px 16px;
+    border-radius:6px;cursor:pointer;
+    font-size:13px;backdrop-filter:blur(6px);
+    transition:background 0.14s,color 0.14s;
+    z-index:6;user-select:none;
+}
+#btn-hold:hover{background:rgba(72,40,48,0.96);color:#fff}
+#btn-hold.active{background:rgba(180,32,48,0.95);color:#fff}
 #bar{
     position:fixed;bottom:18px;right:18px;
     display:flex;gap:8px;
@@ -61,8 +85,11 @@ body:hover #bar{opacity:1}
 <body>
 <div id="wrap">
   <img id="img" alt="" draggable="false">
+  <img id="ref-img" alt="" draggable="false">
   <div id="info-panel"><div id="ip-dims">—</div><div id="ip-zoom">Zoom: 100%</div><div id="ip-format">Format: RGB</div></div>
 </div>
+<div id="ref-badge">REF</div>
+<button id="btn-hold" title="Hold to show reference image (Space)" style="display:none">&#x21C4; Hold for Ref</button>
 <div id="dims"></div>
 <div id="bar">
   <button id="btn-info">&#x2139; Info</button>
@@ -76,22 +103,65 @@ body:hover #bar{opacity:1}
     const params = new URLSearchParams(location.search);
     const initImg = params.get("img") || "";
     const initTitle = params.get("title") || "Preview Window";
+    // PiP path stashes the reference URL on window before this script runs;
+    // popup-window path uses query string. Either source is valid.
+    const refUrl = (typeof window.__nkd_ref_url === "string" && window.__nkd_ref_url)
+                   || params.get("ref") || "";
+    const compareMode = (params.get("compare") === "1" || !!window.__nkd_ref_url) && !!refUrl;
     document.title = initTitle;
 
     const img = document.getElementById("img");
+    const refImg = document.getElementById("ref-img");
     const wrap = document.getElementById("wrap");
     const dims = document.getElementById("dims");
     const panel = document.getElementById("info-panel");
     const ipDims = document.getElementById("ip-dims");
     const ipZoom = document.getElementById("ip-zoom");
+    const btnHold = document.getElementById("btn-hold");
 
     let scale = 1, tx = 0, ty = 0, fitScale = 1;
     let panning = false, sx = 0, sy = 0, stx = 0, sty = 0;
 
     function apply() {
+        const rendering = scale > 1.0 ? "pixelated" : "auto";
         img.style.transform = "translate("+tx+"px,"+ty+"px) scale("+scale+")";
+        img.style.imageRendering = rendering;
+        if (compareMode) applyRefTransform(rendering);
         if (fitScale) ipZoom.textContent = "Zoom: " + Math.round((scale / fitScale) * 100) + "%";
-        img.style.imageRendering = scale > 1.0 ? "pixelated" : "auto";
+    }
+
+    /** Match the reference to the current image's display box.
+     * - Same aspect ratio: ref is scaled to fill the current's box exactly.
+     * - Different aspect ratio: ref is fit (contain) inside that box and centered.
+     * Uses width/height (not transform scale) so refImg's natural size doesn't
+     * leak into the layout — the transform stays in lock-step with #img. */
+    function applyRefTransform(rendering) {
+        const cw = img.naturalWidth, ch = img.naturalHeight;
+        const rw = refImg.naturalWidth, rh = refImg.naturalHeight;
+        if (!cw || !ch || !rw || !rh) {
+            refImg.style.transform = img.style.transform;
+            refImg.style.imageRendering = rendering;
+            return;
+        }
+        const cAR = cw / ch, rAR = rw / rh;
+        let dispW, dispH, offX = 0, offY = 0;
+        if (Math.abs(cAR - rAR) < 1e-3) {
+            // Same aspect — fill.
+            dispW = cw; dispH = ch;
+        } else if (rAR > cAR) {
+            // Ref is wider — fit by width, letterbox vertically.
+            dispW = cw; dispH = cw / rAR;
+            offY = (ch - dispH) / 2;
+        } else {
+            // Ref is taller — fit by height, letterbox horizontally.
+            dispH = ch; dispW = ch * rAR;
+            offX = (cw - dispW) / 2;
+        }
+        refImg.style.width  = dispW + "px";
+        refImg.style.height = dispH + "px";
+        refImg.style.transform =
+            "translate(" + (tx + offX * scale) + "px," + (ty + offY * scale) + "px) scale(" + scale + ")";
+        refImg.style.imageRendering = rendering;
     }
 
     function fit() {
@@ -205,6 +275,52 @@ body:hover #bar{opacity:1}
         if (e.key === "0" || e.key === "r") fit();
         if (e.key === "1") document.getElementById("btn-100").click();
     });
+
+    // ── Press-and-hold compare (mouse on the button OR Space anywhere) ──────
+    if (compareMode) {
+        refImg.src = refUrl;
+        // Mirror current transform once the ref naturally loads.
+        refImg.addEventListener("load", apply);
+        btnHold.style.display = "";
+
+        let holding = false;
+        const showRef = () => {
+            if (holding) return;
+            holding = true;
+            document.body.classList.add("holding-ref");
+            btnHold.classList.add("active");
+        };
+        const showCur = () => {
+            if (!holding) return;
+            holding = false;
+            document.body.classList.remove("holding-ref");
+            btnHold.classList.remove("active");
+        };
+
+        btnHold.addEventListener("mousedown", e => { e.preventDefault(); showRef(); });
+        // Release wherever the cursor ends up — protects against drag-off-button.
+        window.addEventListener("mouseup", showCur);
+        window.addEventListener("blur", showCur);
+
+        // Touch support: same press-and-hold semantics.
+        btnHold.addEventListener("touchstart", e => { e.preventDefault(); showRef(); }, { passive: false });
+        window.addEventListener("touchend", showCur);
+        window.addEventListener("touchcancel", showCur);
+
+        // Space = global hold shortcut (only when not typing in an input).
+        document.addEventListener("keydown", e => {
+            if (e.code !== "Space" || e.repeat) return;
+            const tag = document.activeElement?.tagName;
+            if (tag === "INPUT" || tag === "TEXTAREA") return;
+            e.preventDefault();
+            showRef();
+        });
+        document.addEventListener("keyup", e => {
+            if (e.code !== "Space") return;
+            e.preventDefault();
+            showCur();
+        });
+    }
 }());
 </script>
 </body>
