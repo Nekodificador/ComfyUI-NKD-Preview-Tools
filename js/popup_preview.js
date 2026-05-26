@@ -350,23 +350,14 @@ function getPopup(nodeId) {
 
 // ── Queue single node ─────────────────────────────────────────────────────────
 
+// Uses the frontend's native partial-execution path (added in 1.19.6) so the
+// backend resolves the upstream subgraph itself. This preserves extra_data
+// (including preview_method), which the previous monkey-patch approach dropped
+// — that was why KSampler latent previews stopped firing under Shift+Q.
 async function _queueNode(node) {
-    const origApiQueue = api.queuePrompt.bind(api);
     try {
-        // Intercept api.queuePrompt for a single call to filter the serialized
-        // graph down to only the target node and its upstream dependencies.
-        api.queuePrompt = async function (index, prompt) {
-            api.queuePrompt = origApiQueue;
-            if (prompt?.output) {
-                const filtered = {};
-                _collectUpstream(String(node.id), prompt.output, filtered);
-                prompt = { ...prompt, output: filtered };
-            }
-            return origApiQueue(index, prompt);
-        };
-        await app.queuePrompt(0, 1);
+        await app.queuePrompt(0, 1, [String(node.id)]);
     } catch (err) {
-        api.queuePrompt = origApiQueue;
         console.error("NKD queue node error:", err);
         app.extensionManager?.toast?.add?.({
             severity: "error",
@@ -374,14 +365,6 @@ async function _queueNode(node) {
             detail: String(err),
             life: 6000,
         });
-    }
-}
-
-function _collectUpstream(nodeId, allOutput, result) {
-    if (result[nodeId] || !allOutput[nodeId]) return;
-    result[nodeId] = allOutput[nodeId];
-    for (const inputVal of Object.values(allOutput[nodeId].inputs ?? {})) {
-        if (Array.isArray(inputVal)) _collectUpstream(String(inputVal[0]), allOutput, result);
     }
 }
 
