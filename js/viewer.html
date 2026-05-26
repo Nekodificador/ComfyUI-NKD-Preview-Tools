@@ -38,24 +38,24 @@ body.holding-ref #ref-img{display:block}
 }
 body.holding-ref #ref-badge{display:block}
 #btn-hold{
-    position:fixed;top:14px;right:14px;
-    background:rgba(40,28,32,0.92);
-    border:1px solid rgba(255,180,180,0.18);
-    color:#ddd;padding:8px 16px;
-    border-radius:6px;cursor:pointer;
-    font-size:13px;backdrop-filter:blur(6px);
-    transition:background 0.14s,color 0.14s;
+    position:fixed;bottom:18px;left:18px;
     z-index:6;user-select:none;
+    background:rgba(40,28,32,0.92);
+    border-color:rgba(255,180,180,0.18);
 }
 #btn-hold:hover{background:rgba(72,40,48,0.96);color:#fff}
 #btn-hold.active{background:rgba(180,32,48,0.95);color:#fff}
+#bar,#btn-close,#btn-hold{
+    opacity:0;transition:opacity 0.25s;
+}
+body:hover #bar,
+body:hover #btn-close,
+body:hover #btn-hold{opacity:1}
 #bar{
     position:fixed;bottom:18px;right:18px;
     display:flex;gap:8px;
-    opacity:0;transition:opacity 0.25s;
 }
-body:hover #bar{opacity:1}
-#bar button{
+.vbtn{
     background:rgba(28,28,28,0.92);
     border:1px solid rgba(255,255,255,0.12);
     color:#ccc;padding:6px 15px;
@@ -63,40 +63,32 @@ body:hover #bar{opacity:1}
     font-size:13px;backdrop-filter:blur(6px);
     transition:background 0.14s,color 0.14s;
 }
-#bar button:hover{background:rgba(72,72,72,0.96);color:#fff}
-#bar button.active{background:rgba(46,58,46,0.95);color:#7dc97d}
+.vbtn:hover{background:rgba(72,72,72,0.96);color:#fff}
+.vbtn.active{background:rgba(46,58,46,0.95);color:#7dc97d}
+#btn-close{
+    position:fixed;top:14px;right:14px;
+    z-index:6;
+}
 #dims{
-    position:fixed;bottom:20px;left:16px;
+    position:fixed;bottom:60px;left:18px;
     font:11px monospace;color:rgba(255,255,255,0.22);
     pointer-events:none;
 }
-#info-panel{
-    position:absolute;top:10px;left:10px;
-    background:rgba(8,8,8,0.84);
-    border:1px solid rgba(255,255,255,0.09);
-    border-radius:5px;padding:7px 11px;
-    font:11px/1.8 monospace;color:#888;
-    pointer-events:none;backdrop-filter:blur(6px);
-    display:none;z-index:2;
-}
-#info-panel.visible{display:block}
 </style>
 </head>
 <body>
 <div id="wrap">
   <img id="img" alt="" draggable="false">
   <img id="ref-img" alt="" draggable="false">
-  <div id="info-panel"><div id="ip-dims">—</div><div id="ip-zoom">Zoom: 100%</div><div id="ip-format">Format: RGB</div></div>
 </div>
 <div id="ref-badge">REF</div>
-<button id="btn-hold" title="Hold to show reference image (Space)" style="display:none">&#x21C4; Hold for Ref</button>
+<button id="btn-close" class="vbtn">&#x2715; Close</button>
+<button id="btn-hold" class="vbtn" title="Hold to show reference image (Space)" style="display:none">&#x21C4; Hold for Ref</button>
 <div id="dims"></div>
 <div id="bar">
-  <button id="btn-info">&#x2139; Info</button>
-  <button id="btn-fit-zoom" title="Fit image to window (0)">&#x26F6; Fit Image</button>
-  <button id="btn-100" title="Actual Size (1)">1:1 Pixel</button>
-  <button id="btn-adjust" title="Fit window to image size">&#x2921; Fit Window</button>
-  <button id="btn-close">&#x2715; Close</button>
+  <button id="btn-fit-zoom" class="vbtn" title="Fit image to window (0)">&#x26F6; Fit Image</button>
+  <button id="btn-100" class="vbtn" title="Actual Size (1)">1:1 Pixel</button>
+  <button id="btn-adjust" class="vbtn" title="Fit window to image size">&#x2921; Fit Window</button>
 </div>
 <script>
 (function () {
@@ -114,9 +106,6 @@ body:hover #bar{opacity:1}
     const refImg = document.getElementById("ref-img");
     const wrap = document.getElementById("wrap");
     const dims = document.getElementById("dims");
-    const panel = document.getElementById("info-panel");
-    const ipDims = document.getElementById("ip-dims");
-    const ipZoom = document.getElementById("ip-zoom");
     const btnHold = document.getElementById("btn-hold");
 
     let scale = 1, tx = 0, ty = 0, fitScale = 1;
@@ -127,7 +116,6 @@ body:hover #bar{opacity:1}
         img.style.transform = "translate("+tx+"px,"+ty+"px) scale("+scale+")";
         img.style.imageRendering = rendering;
         if (compareMode) applyRefTransform(rendering);
-        if (fitScale) ipZoom.textContent = "Zoom: " + Math.round((scale / fitScale) * 100) + "%";
     }
 
     /** Match the reference to the current image's display box.
@@ -173,19 +161,11 @@ body:hover #bar{opacity:1}
         tx = (ww - nw * fitScale) / 2;
         ty = (wh - nh * fitScale) / 2;
         apply();
-        var label = nw + " \u00d7 " + nh + " px";
-        ipDims.textContent = label;
-        dims.textContent = label;
+        dims.textContent = nw + " \u00d7 " + nh + " px";
     }
 
     window.fit = fit;
     window.addEventListener("resize", fit);
-
-    // Buttons
-    document.getElementById("btn-info").addEventListener("click", function () {
-        panel.classList.toggle("visible");
-        this.classList.toggle("active", panel.classList.contains("visible"));
-    });
 
     document.getElementById("btn-fit-zoom").addEventListener("click", fit);
 
