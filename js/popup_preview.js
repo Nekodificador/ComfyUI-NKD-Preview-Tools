@@ -97,6 +97,7 @@ class PopupWin {
         this.nodeId     = String(nodeId);
         this.win        = null;
         this.currentUrl = null;
+        this.currentMeta = null; // { filename, type, subfolder }
         this._title     = "Preview Window";
         this._opening   = false;
         this._pipMode   = false; // true when the window is a Document PiP
@@ -112,10 +113,16 @@ class PopupWin {
 
     /** Called on node execution: update existing window or open a new one. */
     showImage(imgData) {
-        this.currentUrl = buildViewUrl(imgData);
+        this.currentUrl  = buildViewUrl(imgData);
+        this.currentMeta = {
+            filename:  imgData.filename,
+            type:      imgData.type,
+            subfolder: imgData.subfolder ?? "",
+        };
         // Only update if already open; never auto-open on execution.
         if (this.win && !this.win.closed) {
             this._updateImage(this.currentUrl);
+            this._pushMeta();
         }
     }
 
@@ -197,6 +204,10 @@ class PopupWin {
             if (this._refUrl) {
                 pipWin.__nkd_ref_url = this._refUrl;
             }
+            // Hand off image metadata for the save panel.
+            if (this.currentMeta) {
+                pipWin.__nkd_img_meta = this.currentMeta;
+            }
 
             // Execute scripts in the PiP window's context by appending new elements.
             parsed.querySelectorAll("script").forEach(s => {
@@ -248,6 +259,11 @@ class PopupWin {
             qpInit.ref     = this._refUrl;
             qpInit.compare = "1";
         }
+        if (this.currentMeta) {
+            qpInit.meta_filename  = this.currentMeta.filename;
+            qpInit.meta_type      = this.currentMeta.type;
+            qpInit.meta_subfolder = this.currentMeta.subfolder;
+        }
         const qp  = new URLSearchParams(qpInit);
         const url = `${viewerHtmlUrl()}?${qp}`;
 
@@ -287,6 +303,11 @@ class PopupWin {
         });
     }
 
+    _pushMeta() {
+        if (!this.win || this.win.closed) return;
+        try { this.win.__nkd_img_meta = this.currentMeta; } catch { /* cross-origin */ }
+    }
+
     _updateImage(url) {
         try {
             const img = this.win.document.getElementById("img");
@@ -304,6 +325,27 @@ class PopupWin {
     destroy() {
         if (this.win && !this.win.closed) this.win.close();
     }
+}
+
+// ── SaveImage ─────────────────────────────────────────────────────────────────
+
+function saveImage(popup) {
+    if (!popup?.currentMeta) {
+        app.extensionManager?.toast?.add?.({
+            severity: "warn",
+            summary: "No Image",
+            detail: "Run the node first to generate an image.",
+            life: 4000,
+        });
+        return;
+    }
+    const { filename, type, subfolder } = popup.currentMeta;
+    const p = new URLSearchParams({ filename, type, subfolder: subfolder ?? "" });
+    const url = api.apiURL(`/view?${p}`);
+    const a = document.createElement("a");
+    a.href     = url;
+    a.download = filename;
+    a.click();
 }
 
 // ── CopyImage ────────────────────────────────────────────────────────────────
@@ -479,7 +521,7 @@ app.registerExtension({
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             origCreated?.apply(this, arguments);
-            this.size = [210, 148];
+            this.size = [210, 172];
 
             // Suppress the default node thumbnail.
             this.onExecuted = function () {};
@@ -493,6 +535,10 @@ app.registerExtension({
             this.addWidget("button", "⧉ Copy Image", null, () => {
                 const p = getPopup(String(this.id));
                 copyImageToClipboard(p.currentUrl);
+            }, { serialize: false });
+
+            this.addWidget("button", "💾 Save Image", null, () => {
+                saveImage(getPopup(String(this.id)));
             }, { serialize: false });
 
             // Primary toggle button — label reflects state with filled/empty star.
@@ -577,6 +623,10 @@ app.registerExtension({
                     const p = getPopup(String(node.id));
                     copyImageToClipboard(p.currentUrl);
                 },
+            },
+            {
+                content: "💾 Save Image",
+                callback: () => saveImage(getPopup(String(node.id))),
             },
             {
                 content: isPrimary(node.id) ? "★ Unset Primary" : "☆ Set as Primary",
