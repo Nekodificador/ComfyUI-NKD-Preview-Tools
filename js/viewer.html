@@ -6,7 +6,7 @@
 <title>Preview Window</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html,body{width:100%;height:100%;background:#080808;overflow:hidden;cursor:grab}
+html,body{width:100%;height:100%;background:#080808;overflow:hidden;cursor:grab;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
 body.panning{cursor:grabbing}
 #wrap{
     width:100%;height:100%;position:relative;overflow:hidden;
@@ -89,6 +89,7 @@ body:hover #btn-hold{opacity:1}
   <button id="btn-fit-zoom" class="vbtn" title="Fit image to window (0)">&#x26F6; Fit Image</button>
   <button id="btn-100" class="vbtn" title="Actual Size (1)">1:1 Pixel</button>
   <button id="btn-adjust" class="vbtn" title="Fit window to image size">&#x2921; Fit Window</button>
+  <button id="btn-save" class="vbtn" title="Save image (S)">&#x1F4BE; Save</button>
 </div>
 <script>
 (function () {
@@ -101,6 +102,16 @@ body:hover #btn-hold{opacity:1}
                    || params.get("ref") || "";
     const compareMode = (params.get("compare") === "1" || !!window.__nkd_ref_url) && !!refUrl;
     document.title = initTitle;
+
+    // Image metadata (filename/type/subfolder) for server-side save.
+    // PiP path sets window.__nkd_img_meta; popup path uses query string.
+    let imgMeta = (typeof window.__nkd_img_meta === "object" && window.__nkd_img_meta) || null;
+    if (!imgMeta) {
+        const mf = params.get("meta_filename");
+        const mt = params.get("meta_type");
+        const ms = params.get("meta_subfolder");
+        if (mf && mt) imgMeta = { filename: mf, type: mt, subfolder: ms || "" };
+    }
 
     const img = document.getElementById("img");
     const refImg = document.getElementById("ref-img");
@@ -215,6 +226,22 @@ body:hover #btn-hold{opacity:1}
     img.addEventListener("load", () => { fit(); img.style.opacity = "1"; });
     if (initImg) img.src = initImg;
 
+    // ── Save (download via <a download>, same as ComfyUI right-click) ─────────
+    function saveImage() {
+        if (!imgMeta) return;
+        const apiBase = window.opener?.location?.origin || window.parent?.location?.origin || location.origin;
+        const viewUrl = new URL(apiBase + "/view");
+        viewUrl.searchParams.set("filename",  imgMeta.filename);
+        viewUrl.searchParams.set("type",      imgMeta.type);
+        viewUrl.searchParams.set("subfolder", imgMeta.subfolder);
+        const a = document.createElement("a");
+        a.href     = viewUrl.href;
+        a.download = imgMeta.filename;
+        a.click();
+    }
+
+    document.getElementById("btn-save").addEventListener("click", saveImage);
+
     // Interaction (Wheel, Drag, DblClick)
     wrap.addEventListener("wheel", e => {
         e.preventDefault();
@@ -251,9 +278,12 @@ body:hover #btn-hold{opacity:1}
     });
 
     document.addEventListener("keydown", e => {
+        const tag = document.activeElement?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
         if (e.key === "Escape") window.close();
         if (e.key === "0" || e.key === "r") fit();
         if (e.key === "1") document.getElementById("btn-100").click();
+        if (e.key === "s" || e.key === "S") saveImage();
     });
 
     // ── Press-and-hold compare (mouse on the button OR Space anywhere) ──────
