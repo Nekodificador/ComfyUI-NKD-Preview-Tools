@@ -28,7 +28,10 @@ function loadImageDimensions(url) {
 }
 
 function viewerHtmlUrl() {
-    return new URL("/extensions/ComfyUI-NKD-Preview-Tools/viewer.html", window.location.href).href;
+    // Derive the base path from this script's own URL so it works regardless of
+    // what folder name the user cloned the repo into.
+    const base = new URL(import.meta.url).pathname.replace(/\/js\/[^/]+$/, "");
+    return new URL(base + "/viewer.html", window.location.href).href;
 }
 
 async function getReferenceUrl() {
