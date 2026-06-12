@@ -112,7 +112,7 @@ function isPrimary(nodeId) {
 // blank window's body — no fetch, no script re-injection needed.
 
 const VIEWER_CSS = `
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+.nkd-viewer-root *,.nkd-viewer-root *::before,.nkd-viewer-root *::after{box-sizing:border-box;margin:0;padding:0}
 .nkd-viewer-root{width:100%;height:100%;background:#080808;overflow:hidden;cursor:grab;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;position:relative;}
 .nkd-viewer-root.panning{cursor:grabbing}
 .nkd-vwrap{width:100%;height:100%;position:relative;overflow:hidden;background-color:#050505;background-image:linear-gradient(45deg,#101010 25%,transparent 25%),linear-gradient(-45deg,#101010 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#101010 75%),linear-gradient(-45deg,transparent 75%,#101010 75%);background-size:20px 20px;background-position:0 0,0 10px,10px -10px,-10px 0;}
@@ -267,6 +267,7 @@ function createViewerDOM(opts = {}) {
         if (!nw || !nh) return;
         const maxW = Math.round(screen.availWidth  * 0.9);
         const maxH = Math.round(screen.availHeight * 0.9);
+        // Resize panel to match the image at current zoom level.
         const w = Math.max(320, Math.min(Math.round(nw * scale), maxW));
         const h = Math.max(240, Math.min(Math.round(nh * scale), maxH));
         if (typeof root._nkdResizeTo === "function") {
@@ -586,10 +587,17 @@ class PopupWin {
             if (center) {
                 panel.style.left = Math.round((window.innerWidth  - w) / 2) + "px";
                 panel.style.top  = Math.round((window.innerHeight - h - TITLEBAR_H) / 2) + "px";
+            } else {
+                // Grow/shrink from the panel's current center, not its top-left corner.
+                const cx = panel.offsetLeft + panel.offsetWidth  / 2;
+                const cy = panel.offsetTop  + panel.offsetHeight / 2;
+                panel.style.left = Math.round(cx - w / 2) + "px";
+                panel.style.top  = Math.round(cy - (h + TITLEBAR_H) / 2) + "px";
             }
             panel.style.width  = w + "px";
             panel.style.height = (h + TITLEBAR_H) + "px";
-            container._nkdFit?.();
+            // Wait for reflow before calling fit() so wrap.clientWidth reflects the new size.
+            requestAnimationFrame(() => container._nkdFit?.());
         };
 
         content.appendChild(container);
