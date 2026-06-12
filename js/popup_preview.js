@@ -28,10 +28,10 @@ function loadImageDimensions(url) {
 }
 
 function viewerHtmlUrl() {
-    // Derive the base path from this script's own URL so it works regardless of
-    // what folder name the user cloned the repo into.
-    const base = new URL(import.meta.url).pathname.replace(/\/js\/[^/]+$/, "");
-    return new URL(base + "/viewer.html", window.location.href).href;
+    // Build the viewer URL relative to this script file:
+    // import.meta.url = .../extensions/<pack>/js/popup_preview.js
+    // viewer.html sits at  .../extensions/<pack>/js/viewer.html
+    return new URL("viewer.html", import.meta.url).href;
 }
 
 async function getReferenceUrl() {

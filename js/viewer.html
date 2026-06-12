@@ -74,12 +74,28 @@ body:hover #btn-hold{opacity:1}
     font:11px monospace;color:rgba(255,255,255,0.22);
     pointer-events:none;
 }
+#empty-state{
+    position:absolute;inset:0;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:16px;color:rgba(255,255,255,0.18);pointer-events:none;
+}
+#empty-state svg{width:64px;height:64px;}
+#empty-state p{font:14px/1.4 monospace;margin:0;letter-spacing:0.02em;}
+#empty-state.hidden{display:none;}
 </style>
 </head>
 <body>
 <div id="wrap">
   <img id="img" alt="" draggable="false">
   <img id="ref-img" alt="" draggable="false">
+  <div id="empty-state">
+    <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="8" y="12" width="48" height="40" rx="4" stroke="currentColor" stroke-width="2.5"/>
+      <circle cx="22" cy="26" r="4" stroke="currentColor" stroke-width="2.5"/>
+      <path d="M8 42 L20 30 L30 40 L40 28 L56 44" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/>
+    </svg>
+    <p>Run the node to preview an image</p>
+  </div>
 </div>
 <div id="ref-badge">REF</div>
 <button id="btn-close" class="vbtn">&#x2715; Close</button>
@@ -223,7 +239,12 @@ body:hover #btn-hold{opacity:1}
 
     document.getElementById("btn-close").addEventListener("click", () => window.close());
 
-    img.addEventListener("load", () => { fit(); img.style.opacity = "1"; });
+    const emptyState = document.getElementById("empty-state");
+    img.addEventListener("load", () => {
+        fit();
+        img.style.opacity = "1";
+        emptyState.classList.add("hidden");
+    });
     if (initImg) img.src = initImg;
 
     // ── Save (download via <a download>, same as ComfyUI right-click) ─────────
