@@ -229,8 +229,22 @@ body:hover #btn-hold{opacity:1}
     // ── Save (download via <a download>, same as ComfyUI right-click) ─────────
     function saveImage() {
         if (!imgMeta) return;
-        const apiBase = window.opener?.location?.origin || window.parent?.location?.origin || location.origin;
-        const viewUrl = new URL(apiBase + "/view");
+        // Derive the API origin from the current image src — it always contains
+        // the correct host:port even in Comfy Desktop where window.opener is null
+        // and location.origin resolves to "about:null".
+        let apiBase;
+        try {
+            apiBase = img.src ? new URL(img.src).origin : null;
+        } catch { apiBase = null; }
+        if (!apiBase || apiBase === "null") {
+            try { apiBase = new URL(initImg).origin; } catch { apiBase = null; }
+        }
+        if (!apiBase || apiBase === "null") {
+            try { apiBase = window.opener?.location?.origin; } catch { apiBase = null; }
+        }
+        if (!apiBase || apiBase === "null") apiBase = location.origin;
+
+        const viewUrl = new URL("/view", apiBase);
         viewUrl.searchParams.set("filename",  imgMeta.filename);
         viewUrl.searchParams.set("type",      imgMeta.type);
         viewUrl.searchParams.set("subfolder", imgMeta.subfolder);
