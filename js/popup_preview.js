@@ -104,6 +104,34 @@ function isPrimary(nodeId) {
     return String(nodeId) === primaryNodeId;
 }
 
+// ── Upstream sampler detection ────────────────────────────────────────────────
+
+const SAMPLER_TYPES = new Set([
+    "KSampler", "KSamplerAdvanced", "KSamplerSelect",
+    "SamplerCustom", "SamplerCustomAdvanced",
+    "KSamplerEfficient", "KSampler (Efficient)",
+]);
+
+function findUpstreamSampler(nkdNode) {
+    const visited = new Set();
+    const queue = [nkdNode];
+    while (queue.length) {
+        const node = queue.shift();
+        if (visited.has(node.id)) continue;
+        visited.add(node.id);
+        if (visited.size > 20) break;
+        if (node !== nkdNode && SAMPLER_TYPES.has(node.type)) return node;
+        for (const input of (node.inputs ?? [])) {
+            if (!input?.link) continue;
+            const link = app.graph.links[input.link];
+            if (!link) continue;
+            const upstream = app.graph.getNodeById(link.origin_id);
+            if (upstream && !visited.has(upstream.id)) queue.push(upstream);
+        }
+    }
+    return null;
+}
+
 // ── PopupWin ──────────────────────────────────────────────────────────────────
 
 // ── Viewer DOM factory ────────────────────────────────────────────────────────
@@ -370,15 +398,16 @@ function createViewerDOM(opts = {}) {
 
 class PopupWin {
     constructor(nodeId) {
-        this.nodeId      = String(nodeId);
-        this.win         = null;
-        this.currentUrl  = null;
-        this.currentMeta = null; // { filename, type, subfolder }
-        this._title      = "Preview Window";
-        this._opening    = false;
-        this._pipMode    = false; // true when the window is a Document PiP
-        this._refUrl     = null;  // when set, viewer opens in compare mode
-        this._container  = null;  // live DOM element (bEpic pattern)
+        this.nodeId             = String(nodeId);
+        this.win                = null;
+        this.currentUrl         = null;
+        this.currentMeta        = null; // { filename, type, subfolder }
+        this._title             = "Preview Window";
+        this._opening           = false;
+        this._pipMode           = false; // true when the window is a Document PiP
+        this._refUrl            = null;  // when set, viewer opens in compare mode
+        this._container         = null;  // live DOM element (bEpic pattern)
+        this._livePreviewHandler = null; // b_preview_with_metadata listener
     }
 
     setTitle(title) {
@@ -607,9 +636,11 @@ class PopupWin {
         if (imgEl && this.currentUrl) { imgEl.style.opacity = "0.4"; imgEl.src = this.currentUrl; }
 
         this._container = container;
+        this._startLivePreview();
 
         // ── Close ──────────────────────────────────────────────────────────────
         const closePanel = () => {
+            this._stopLivePreview();
             panel.remove();
             this._panel     = null;
             this._container = null;
@@ -748,6 +779,7 @@ class PopupWin {
         this.win      = pipWin;
         this._pipMode = true;
         pipWin.addEventListener("pagehide", () => {
+            this._stopLivePreview();
             this.win      = null;
             this._pipMode = false;
         });
@@ -796,6 +828,7 @@ class PopupWin {
                 pipImg.style.opacity = "0.4";
                 pipImg.src = this.currentUrl;
             }
+            this._startLivePreview();
         } catch (err) {
             console.error("NKD PiP viewer load error:", err);
             pipWin.close();
@@ -899,7 +932,46 @@ class PopupWin {
         }
     }
 
+    // ── Live preview (TAESD frames) ───────────────────────────────────────────
+
+    _isOpen() {
+        return (this._panel && document.body.contains(this._panel))
+            || (this.win && !this.win.closed);
+    }
+
+    _setLiveFrame(url) {
+        const img = this._container
+            ? this._container.querySelector(".nkd-vimg")
+            : this.win?.document?.getElementById?.("img");
+        if (!img) return;
+        img.style.opacity = "0.6";
+        img.src = url;
+    }
+
+    _startLivePreview() {
+        if (this._livePreviewHandler) return;
+        this._livePreviewHandler = ({ detail }) => {
+            if (!this._isOpen()) return;
+            const nkdNode = app.graph?.getNodeById(Number(this.nodeId));
+            if (!nkdNode) return;
+            const sampler = findUpstreamSampler(nkdNode);
+            if (!sampler) return;
+            if (String(detail.displayNodeId) !== String(sampler.id)) return;
+            const url = URL.createObjectURL(detail.blob);
+            this._setLiveFrame(url);
+            URL.revokeObjectURL(url);
+        };
+        api.addEventListener("b_preview_with_metadata", this._livePreviewHandler);
+    }
+
+    _stopLivePreview() {
+        if (!this._livePreviewHandler) return;
+        api.removeEventListener("b_preview_with_metadata", this._livePreviewHandler);
+        this._livePreviewHandler = null;
+    }
+
     destroy() {
+        this._stopLivePreview();
         if (this.win && !this.win.closed) this.win.close();
         try { this._container?.remove(); } catch { /* ignore */ }
         this._container = null;
