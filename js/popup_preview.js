@@ -1267,10 +1267,10 @@ app.registerExtension({
 
             // Keep label in sync and paint primary outline on each redraw
             // (canvas / classic LiteGraph only; V2 Vue uses node.color instead).
-            const origDraw = this.onDrawForeground?.bind(this);
+            const origDraw = this.onDrawForeground;
             this.onDrawForeground = function (ctx) {
                 _setWidgetLabel(primaryWidget, _primaryLabel(this.id));
-                origDraw?.(ctx);
+                origDraw?.call(this, ctx);
                 if (!isPrimary(this.id)) return;
                 const w = this.size[0];
                 const h = this.size[1];

@@ -62,7 +62,9 @@ async function loadImageFromId(image, v) {
 // Queue a single node by intercepting api.queuePrompt for one call and
 // filtering the serialised graph down to that node + its upstream deps.
 async function _queueNode(node) {
-    const origApiQueue = api.queuePrompt.bind(api);
+    // Capture the original method reference (not a bound copy) so we can
+    // restore it and still invoke it with the right receiver via .call().
+    const origApiQueue = api.queuePrompt;
     try {
         api.queuePrompt = async function (index, prompt) {
             api.queuePrompt = origApiQueue;
@@ -71,7 +73,7 @@ async function _queueNode(node) {
                 _collectUpstream(String(node.id), prompt.output, filtered);
                 prompt = { ...prompt, output: filtered };
             }
-            return origApiQueue(index, prompt);
+            return origApiQueue.call(api, index, prompt);
         };
         await app.queuePrompt(0, 1);
     } catch (err) {
@@ -125,9 +127,9 @@ function setupMaskPainterNode(node) {
     node.onExecuted = function () {};
 
     // Re-apply mask color on every draw so themes/extensions can't overwrite it
-    const _origDrawBackground = node.onDrawBackground?.bind(node);
+    const _origDrawBackground = node.onDrawBackground;
     node.onDrawBackground = function (ctx, canvas) {
-        _origDrawBackground?.(ctx, canvas);
+        _origDrawBackground?.call(this, ctx, canvas);
         if (node._nkdHasMask) {
             if (node.color   !== _MASK_COLOR)    node.color   = _MASK_COLOR;
             if (node.bgcolor !== _MASK_BG_COLOR) node.bgcolor = _MASK_BG_COLOR;
@@ -215,8 +217,8 @@ function setupMaskPainterNode(node) {
             });
             return;
         }
-        const copy = app.copyToClipspace?.bind(app) ?? app.constructor?.copyToClipspace;
-        const open = app.openMaskeditor?.bind(app) ?? app.constructor?.open_maskeditor;
+        const copy = app.copyToClipspace ? (...a) => app.copyToClipspace(...a) : app.constructor?.copyToClipspace;
+        const open = app.openMaskeditor  ? (...a) => app.openMaskeditor(...a)  : app.constructor?.open_maskeditor;
         if (!copy || !open) {
             app.extensionManager?.toast?.add?.({
                 severity: "error",
