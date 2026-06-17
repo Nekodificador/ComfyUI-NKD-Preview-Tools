@@ -14,7 +14,7 @@ I’ve added a "set primary" state that lets you use multiple popup previews in 
 
 https://github.com/user-attachments/assets/75a9a3de-9ded-4d41-95f2-3de4421d63ac
 
-And a new node
+## The new node: Mask Painter
 
 https://github.com/user-attachments/assets/fea39b77-1e47-4006-ba7f-51197db0f106
 
