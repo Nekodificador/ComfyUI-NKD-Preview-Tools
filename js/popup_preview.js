@@ -917,16 +917,14 @@ class PopupWin {
 
     _updateImage(url) {
         try {
-            // Blank-window mode: img lives inside _container.
             const img = this._container
                 ? this._container.querySelector(".nkd-vimg")
                 : this.win.document.getElementById("img");
             if (!img) { this._openViewer(); return; }
-            img.style.opacity = "0.4";
             img.src = url;
         } catch {
-            this.win      = null;
-            this._pipMode = false;
+            this.win        = null;
+            this._pipMode   = false;
             this._container = null;
             this._openViewer();
         }
@@ -939,36 +937,26 @@ class PopupWin {
             || (this.win && !this.win.closed);
     }
 
-    _setLiveFrame(url) {
-        const img = this._container
-            ? this._container.querySelector(".nkd-vimg")
-            : this.win?.document?.getElementById?.("img");
+    _setLiveFrame(dataUrl) {
+        // dataUrl is a self-contained data: URL (works in any realm, no CSP
+        // blob: dependency, no revocation needed).
+        let img = null;
+        if (this._container) {
+            img = this._container.querySelector(".nkd-vimg");
+        } else if (this.win && !this.win.closed) {
+            try { img = this.win.document.getElementById("img"); } catch { return; }
+        }
         if (!img) return;
-        img.style.opacity = "0.6";
-        img.src = url;
+
+        img.src = dataUrl;
+        img.style.opacity = "1";
+        const doc = img.ownerDocument;
+        const emptyState = doc?.getElementById("empty-state");
+        if (emptyState) emptyState.classList.add("hidden");
     }
 
-    _startLivePreview() {
-        if (this._livePreviewHandler) return;
-        this._livePreviewHandler = ({ detail }) => {
-            if (!this._isOpen()) return;
-            const nkdNode = app.graph?.getNodeById(Number(this.nodeId));
-            if (!nkdNode) return;
-            const sampler = findUpstreamSampler(nkdNode);
-            if (!sampler) return;
-            if (String(detail.displayNodeId) !== String(sampler.id)) return;
-            const url = URL.createObjectURL(detail.blob);
-            this._setLiveFrame(url);
-            URL.revokeObjectURL(url);
-        };
-        api.addEventListener("b_preview_with_metadata", this._livePreviewHandler);
-    }
-
-    _stopLivePreview() {
-        if (!this._livePreviewHandler) return;
-        api.removeEventListener("b_preview_with_metadata", this._livePreviewHandler);
-        this._livePreviewHandler = null;
-    }
+    _startLivePreview() { /* handled globally in setup() via WebSocket intercept */ }
+    _stopLivePreview()  { /* no-op — global listener in setup() manages all popups */ }
 
     destroy() {
         this._stopLivePreview();
@@ -1164,6 +1152,80 @@ app.registerExtension({
             popup.setTitle(node.title || "Preview Window");
             popup.showImage(detail.output.images[0]);
         });
+
+        // b_preview_with_metadata is dispatched on the bundle's internal ComfyApi
+        // instance, not the one exported by /scripts/api.js. Intercept via WebSocket.
+        // The socket is created after setup(), so we wait for it.
+        const attachWsPreview = () => {
+            if (!api.socket || api.socket.readyState !== WebSocket.OPEN) return false;
+            api.socket.addEventListener("message", (e) => {
+                if (!(e.data instanceof ArrayBuffer)) return;
+                const view = new DataView(e.data);
+                const msgType = view.getUint32(0);
+                // Only preview-image events carry pixel data (1 = plain, 4 = metadata).
+                if (msgType !== 1 && msgType !== 4) return;
+
+                const bytes = new Uint8Array(e.data);
+
+                // Locate the embedded image by its magic signature rather than
+                // trusting a fixed header offset: this backend prepends preview
+                // metadata (a length-prefixed node id) before the image, which a
+                // fixed slice(8) would include and corrupt. Scanning for the magic
+                // is robust across ComfyUI preview-format revisions.
+                const findImageStart = (buf) => {
+                    const limit = Math.min(buf.length - 4, 512);
+                    for (let i = 0; i < limit; i++) {
+                        // JPEG SOI: FF D8 FF
+                        if (buf[i] === 0xff && buf[i + 1] === 0xd8 && buf[i + 2] === 0xff) {
+                            return { offset: i, mime: "image/jpeg" };
+                        }
+                        // PNG: 89 50 4E 47
+                        if (buf[i] === 0x89 && buf[i + 1] === 0x50 && buf[i + 2] === 0x4e && buf[i + 3] === 0x47) {
+                            return { offset: i, mime: "image/png" };
+                        }
+                    }
+                    return null;
+                };
+
+                const found = findImageStart(bytes);
+                if (!found) return;
+
+                // The node id (if present) lives in the header that precedes the
+                // image. Decode it as latin1 so we can match it against an
+                // upstream sampler id for per-node filtering.
+                const headerStr = found.offset > 8
+                    ? String.fromCharCode.apply(null, bytes.subarray(8, found.offset))
+                    : "";
+
+                // Build a self-contained data: URL — works in any browsing context
+                // (PiP/popup), unaffected by per-realm blob partitioning or CSP.
+                const imgBytes = bytes.subarray(found.offset);
+                let binary = "";
+                const chunk = 0x8000;
+                for (let i = 0; i < imgBytes.length; i += chunk) {
+                    binary += String.fromCharCode.apply(null, imgBytes.subarray(i, i + chunk));
+                }
+                const dataUrl = `data:${found.mime};base64,${btoa(binary)}`;
+
+                for (const popup of popups.values()) {
+                    if (!popup._isOpen()) continue;
+                    // Filter by upstream sampler when we can identify one and the
+                    // header carries a node id; otherwise show the frame anyway
+                    // (single generation at a time — no ambiguity in practice).
+                    const nkdNode = app.graph?.getNodeById(Number(popup.nodeId));
+                    if (nkdNode && headerStr) {
+                        const sampler = findUpstreamSampler(nkdNode);
+                        if (sampler && !headerStr.includes(String(sampler.id))) continue;
+                    }
+                    popup._setLiveFrame(dataUrl);
+                }
+            });
+            return true;
+        };
+
+        if (!attachWsPreview()) {
+            const poll = setInterval(() => { if (attachWsPreview()) clearInterval(poll); }, 300);
+        }
     },
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
