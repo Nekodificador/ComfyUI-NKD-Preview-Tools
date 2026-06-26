@@ -132,6 +132,28 @@ function findUpstreamSampler(nkdNode) {
     return null;
 }
 
+// Every node feeding into `startNode` (the subgraph a partial queue executes).
+function collectUpstreamNodes(startNode) {
+    const visited = new Set();
+    const out = [];
+    const queue = [startNode];
+    while (queue.length) {
+        const node = queue.shift();
+        if (visited.has(node.id)) continue;
+        visited.add(node.id);
+        if (visited.size > 200) break;
+        out.push(node);
+        for (const input of (node.inputs ?? [])) {
+            if (!input?.link) continue;
+            const link = app.graph.links[input.link];
+            if (!link) continue;
+            const upstream = app.graph.getNodeById(link.origin_id);
+            if (upstream && !visited.has(upstream.id)) queue.push(upstream);
+        }
+    }
+    return out;
+}
+
 // ── PopupWin ──────────────────────────────────────────────────────────────────
 
 // ── Viewer DOM factory ────────────────────────────────────────────────────────
@@ -1037,7 +1059,21 @@ function getPopup(nodeId) {
 // — that was why KSampler latent previews stopped firing under Shift+Q.
 async function _queueNode(node) {
     try {
+        // Partial execution (3rd arg) skips control_after_generate in ComfyUI, so a
+        // randomize/increment seed never advances and the backend keeps returning the
+        // cached image. Mirror a normal queue by firing the control callbacks on the
+        // upstream subgraph ourselves: beforeQueued covers the "before" WidgetControlMode,
+        // afterQueued the default "after" mode. ComfyUI's own partial-execution callbacks
+        // (isPartialExecution:true) stay no-ops, so each widget advances exactly once.
+        const upstream = collectUpstreamNodes(node);
+        const fireControl = (hook) => {
+            for (const n of upstream)
+                for (const w of (n.widgets ?? []))
+                    w[hook]?.({ isPartialExecution: false });
+        };
+        fireControl("beforeQueued");
         await app.queuePrompt(0, 1, [String(node.id)]);
+        fireControl("afterQueued");
     } catch (err) {
         console.error("NKD queue node error:", err);
         app.extensionManager?.toast?.add?.({
