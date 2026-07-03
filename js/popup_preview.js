@@ -176,12 +176,20 @@ const VIEWER_CSS = `
 .nkd-viewer-root *,.nkd-viewer-root *::before,.nkd-viewer-root *::after{box-sizing:border-box;margin:0;padding:0}
 .nkd-viewer-root{width:100%;height:100%;background:#080808;overflow:hidden;cursor:grab;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;position:relative;}
 .nkd-viewer-root.panning{cursor:grabbing}
+.nkd-help{position:absolute;top:14px;left:14px;z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:help;color:rgba(255,255,255,0.55);background:rgba(28,28,28,0.85);border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(6px);opacity:0;transition:opacity 0.25s,color 0.14s;}
+.nkd-viewer-root:hover .nkd-help{opacity:1}
+.nkd-help:hover{color:#fff}
+.nkd-help svg{width:15px;height:15px;}
+.nkd-help-panel{position:absolute;top:32px;left:0;display:none;width:250px;padding:11px 13px;border-radius:8px;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(8px);box-shadow:0 10px 34px rgba(0,0,0,0.55);font:11px/1.75 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:rgba(255,255,255,0.72);}
+.nkd-help:hover .nkd-help-panel{display:block}
+.nkd-help-panel .k{display:inline-block;min-width:80px;color:#9fe09f;font-family:monospace;}
+.nkd-help-panel hr{border:none;border-top:1px solid rgba(255,255,255,0.1);margin:7px 0;}
 .nkd-vwrap{width:100%;height:100%;position:relative;overflow:hidden;background-color:#050505;background-image:linear-gradient(45deg,#101010 25%,transparent 25%),linear-gradient(-45deg,#101010 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#101010 75%),linear-gradient(-45deg,transparent 75%,#101010 75%);background-size:20px 20px;background-position:0 0,0 10px,10px -10px,-10px 0;}
 .nkd-vimg,.nkd-refimg{position:absolute;top:0;left:0;display:block;transform-origin:0 0;transition:opacity 0.15s;user-select:none;-webkit-user-drag:none;}
 .nkd-refimg{display:none;z-index:1}
 .nkd-viewer-root.holding-ref .nkd-vimg{visibility:hidden}
 .nkd-viewer-root.holding-ref .nkd-refimg{display:block}
-.nkd-ref-badge{position:absolute;top:14px;left:14px;background:rgba(180,32,48,0.92);color:#fff;font:bold 11px monospace;padding:4px 9px;border-radius:4px;pointer-events:none;display:none;z-index:5;letter-spacing:1px;backdrop-filter:blur(4px);}
+.nkd-ref-badge{position:absolute;top:38px;left:14px;background:rgba(180,32,48,0.92);color:#fff;font:bold 11px monospace;padding:4px 9px;border-radius:4px;pointer-events:none;display:none;z-index:5;letter-spacing:1px;backdrop-filter:blur(4px);}
 .nkd-viewer-root.holding-ref .nkd-ref-badge{display:block}
 .nkd-mask-ov{position:absolute;top:0;left:0;transform-origin:0 0;pointer-events:none;display:none;z-index:2;-webkit-mask-size:100% 100%;mask-size:100% 100%;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;-webkit-mask-mode:luminance;mask-mode:luminance;}
 .nkd-viewer-root.holding-mask .nkd-mask-ov,.nkd-viewer-root.mask-on .nkd-mask-ov{display:block}
@@ -189,25 +197,47 @@ const VIEWER_CSS = `
 .nkd-btn-mask{user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
 .nkd-btn-mask:hover{background:rgba(72,40,48,0.96);color:#fff}
 .nkd-btn-mask.active{background:rgba(180,32,48,0.95);color:#fff}
-.nkd-mask-color{width:26px;height:26px;padding:0;border:1px solid rgba(255,255,255,0.2);border-radius:6px;background:none;cursor:pointer;}
-.nkd-mask-op{width:80px;cursor:pointer;}
-.nkd-bar,.nkd-btn-close,.nkd-btn-hold{opacity:0;transition:opacity 0.25s;}
-.nkd-viewer-root:hover .nkd-bar,.nkd-viewer-root:hover .nkd-btn-close,.nkd-viewer-root:hover .nkd-btn-hold{opacity:1}
-.nkd-bar{position:absolute;bottom:18px;right:18px;display:flex;gap:8px;z-index:6;}
+.nkd-mask-color{width:30px;height:30px;padding:0;border:1px solid rgba(255,255,255,0.15);border-radius:6px;background:none;cursor:pointer;flex:none;}
+.nkd-mask-color::-webkit-color-swatch-wrapper{padding:0;}
+.nkd-mask-color::-webkit-color-swatch{border:none;border-radius:5px;}
+.nkd-mask-op{width:80px;height:30px;cursor:pointer;accent-color:#7dc97d;}
+.nkd-bar,.nkd-btn-close{opacity:0;transition:opacity 0.25s;}
+.nkd-viewer-root:hover .nkd-bar,.nkd-viewer-root:hover .nkd-btn-close{opacity:1}
+/* One full-width bottom bar split into left (reference) + right (actions)
+   groups; space-between keeps them apart and each wraps on its own so the
+   clusters never overlap on narrow windows. */
+.nkd-bar{position:absolute;left:18px;right:18px;bottom:18px;display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:8px 16px;z-index:6;}
+.nkd-bar-group{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+.nkd-bar-right{margin-left:auto;justify-content:flex-end;}
 .nkd-btn-close{position:absolute;top:14px;right:14px;z-index:6;}
-.nkd-btn-hold{position:absolute;bottom:18px;left:18px;z-index:6;user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
+.nkd-btn-hold{user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
 .nkd-btn-hold:hover{background:rgba(72,40,48,0.96);color:#fff}
 .nkd-btn-hold.active{background:rgba(180,32,48,0.95);color:#fff}
-.nkd-vbtn{background:rgba(28,28,28,0.92);border:1px solid rgba(255,255,255,0.12);color:#ccc;padding:6px 15px;border-radius:6px;cursor:pointer;font-size:13px;backdrop-filter:blur(6px);transition:background 0.14s,color 0.14s;}
+.nkd-vbtn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;line-height:1;white-space:nowrap;background:rgba(28,28,28,0.92);border:1px solid rgba(255,255,255,0.12);color:#ccc;border-radius:6px;cursor:pointer;font-size:13px;backdrop-filter:blur(6px);transition:background 0.14s,color 0.14s;}
+.nkd-vbtn svg{width:15px;height:15px;flex:none;display:block;}
 .nkd-vbtn:hover{background:rgba(72,72,72,0.96);color:#fff}
+.nkd-vbtn:active{transform:scale(0.97)}
 .nkd-btn-run{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
 .nkd-btn-run:hover{background:rgba(60,84,60,0.96);color:#fff}
-.nkd-dims{position:absolute;bottom:60px;left:18px;font:11px monospace;color:rgba(255,255,255,0.22);pointer-events:none;z-index:5;}
+.nkd-dims{position:absolute;top:18px;left:48px;font:11px monospace;color:rgba(255,255,255,0.22);pointer-events:none;z-index:5;}
 .nkd-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:rgba(255,255,255,0.18);pointer-events:none;}
 .nkd-empty svg{width:64px;height:64px;}
 .nkd-empty p{font:14px/1.4 monospace;margin:0;letter-spacing:0.02em;}
 .nkd-empty.hidden{display:none;}
 `;
+
+// Inline SVG icons (consistent stroke, currentColor) — replaces emoji/box glyphs
+// that rendered at inconsistent sizes and baselines across platforms.
+const ICON = {
+    run:   '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
+    fit:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>',
+    win:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
+    save:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>',
+    close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>',
+    swap:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 4l4 4-4 4M21 8H8M7 20l-4-4 4-4M3 16h13"/></svg>',
+    mask:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>',
+    pixel: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="1"/><path d="M9 9h1v6M14 9h1v6"/></svg>',
+};
 
 function createViewerDOM(opts = {}) {
     const { refUrl = null, maskUrl = null, apiBase = null, onQueue = null } = opts;
@@ -244,20 +274,38 @@ function createViewerDOM(opts = {}) {
             </div>
         </div>
         <div class="nkd-ref-badge">REF</div>
-        <button class="nkd-btn-close nkd-vbtn">&#x2715; Close</button>
-        <button class="nkd-btn-hold nkd-vbtn" style="display:${compareMode ? '' : 'none'}">&#x21C4; Hold for Ref</button>
+        <div class="nkd-help" title="Gestures & shortcuts">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.1 9.2a3 3 0 0 1 5.8 1c0 2-3 2.3-3 4"/><path d="M12 17h.01"/></svg>
+            <div class="nkd-help-panel">
+                <div><span class="k">Drag</span> pan image</div>
+                <div><span class="k">Wheel</span> zoom</div>
+                <div><span class="k">Double-click</span> 1:1 / fit</div>
+                <hr>
+                <div><span class="k">Shift+Q</span> run / queue</div>
+                <div><span class="k">Space</span> hold reference</div>
+                <div><span class="k">M</span> mask overlay (peek)</div>
+                <div><span class="k">S</span> save image</div>
+                <div><span class="k">0 / R</span> fit &middot; <span class="k">1</span> 1:1 &middot; <span class="k">Esc</span> close</div>
+            </div>
+        </div>
+        <button class="nkd-btn-close nkd-vbtn" title="Close">${ICON.close}Close</button>
         <div class="nkd-dims"></div>
         <div class="nkd-bar">
-            <button class="nkd-btn-run nkd-vbtn" style="display:${onQueue ? '' : 'none'}">&#x25B6; Run</button>
-            <button class="nkd-btn-fit nkd-vbtn">&#x26F6; Fit Image</button>
-            <button class="nkd-btn-100 nkd-vbtn">1:1 Pixel</button>
-            <button class="nkd-btn-adj nkd-vbtn">&#x2921; Fit Window</button>
-            <button class="nkd-btn-save nkd-vbtn">&#x1F4BE; Save</button>
-            <span class="nkd-mask-ctl" style="display:${maskMode ? '' : 'none'}">
-                <button class="nkd-btn-mask nkd-vbtn" title="Toggle the reference mask overlay — hold M to peek">&#x25A6; Mask</button>
-                <input type="color" class="nkd-mask-color" title="Overlay colour">
-                <input type="range" class="nkd-mask-op" min="5" max="100" title="Overlay opacity">
-            </span>
+            <div class="nkd-bar-group nkd-bar-left">
+                <button class="nkd-btn-hold nkd-vbtn" style="display:${compareMode ? '' : 'none'}">${ICON.swap}Hold for Ref</button>
+                <span class="nkd-mask-ctl" style="display:${maskMode ? '' : 'none'}">
+                    <button class="nkd-btn-mask nkd-vbtn" title="Toggle the reference mask overlay — hold M to peek">${ICON.mask}Mask</button>
+                    <input type="color" class="nkd-mask-color" title="Overlay colour">
+                    <input type="range" class="nkd-mask-op" min="5" max="100" title="Overlay opacity">
+                </span>
+            </div>
+            <div class="nkd-bar-group nkd-bar-right">
+                <button class="nkd-btn-run nkd-vbtn" style="display:${onQueue ? '' : 'none'}">${ICON.run}Run</button>
+                <button class="nkd-btn-fit nkd-vbtn">${ICON.fit}Fit Image</button>
+                <button class="nkd-btn-100 nkd-vbtn">${ICON.pixel}1:1 Pixel</button>
+                <button class="nkd-btn-adj nkd-vbtn">${ICON.win}Fit Window</button>
+                <button class="nkd-btn-save nkd-vbtn">${ICON.save}Save</button>
+            </div>
         </div>`;
 
     const wrap    = root.querySelector(".nkd-vwrap");
@@ -457,8 +505,10 @@ function createViewerDOM(opts = {}) {
         tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = ns; apply();
     }, { passive: false });
 
+    // Left or middle drag pans the image (consistent with the PiP viewer).
     wrap.addEventListener("mousedown", e => {
-        if (e.button !== 0) return;
+        if (e.button !== 0 && e.button !== 1) return;
+        e.preventDefault();
         panning = true; sx = e.clientX; sy = e.clientY; stx = tx; sty = ty;
         root.classList.add("panning");
     });
@@ -836,7 +886,6 @@ class PopupWin {
                 if (opts.center) win.moveTo(Math.round((screen.availWidth - w) / 2), Math.round((screen.availHeight - h) / 2));
                 container._nkdFit?.();
             };
-
             panel.style.display = "none";
             popoutWin = win;
             undockBtn.innerHTML = "&#x2199;";
@@ -1508,3 +1557,68 @@ function _setWidgetLabel(widget, text) {
     widget.label = text;
     widget.name  = text;
 }
+
+// ── NKDReferenceImage tint ──────────────────────────────────────────────────────
+// Colour the Reference node by what's wired into its MultiType input, mirroring
+// the Mask Painter's green-when-masked cue: IMAGE → blue, MASK → green. The type
+// is read from the connected link and cached in _nkdRefKind so onDrawBackground
+// can re-assert it cheaply (themes/other extensions overwrite node.color).
+const _REF_TYPE      = "NKDReferenceImage";
+const _REF_IMG_COLOR = "#1e3a5a", _REF_IMG_BG = "#0f1f30"; // blue  = image
+const _REF_MSK_COLOR = "#1e3a1e", _REF_MSK_BG = "#0f1f0f"; // green = mask
+
+function _refConnectedType(node) {
+    const inp = node.inputs?.[0];
+    if (!inp || inp.link == null) return null;
+    const t = node.graph?.links?.[inp.link]?.type;
+    return typeof t === "string" ? t.toUpperCase() : null;
+}
+
+function _applyRefColor(node) {
+    const t = _refConnectedType(node);
+    if (t === "MASK")       { node.color = _REF_MSK_COLOR; node.bgcolor = _REF_MSK_BG; node._nkdRefKind = "MASK"; }
+    else if (t === "IMAGE") { node.color = _REF_IMG_COLOR; node.bgcolor = _REF_IMG_BG; node._nkdRefKind = "IMAGE"; }
+    else                    { delete node.color; delete node.bgcolor; node._nkdRefKind = null; }
+    node.setDirtyCanvas?.(true, false);
+}
+
+app.registerExtension({
+    name: "NKD.ReferenceColor",
+
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData.name !== _REF_TYPE) return;
+
+        const origCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            origCreated?.apply(this, arguments);
+            _applyRefColor(this);
+        };
+
+        const origConn = nodeType.prototype.onConnectionsChange;
+        nodeType.prototype.onConnectionsChange = function () {
+            origConn?.apply(this, arguments);
+            _applyRefColor(this);
+        };
+
+        // Re-assert the cached tint on draw WITHOUT recomputing or dirtying the
+        // canvas (that would loop) — same pattern as the Mask Painter.
+        const origDrawBg = nodeType.prototype.onDrawBackground;
+        nodeType.prototype.onDrawBackground = function (ctx, canvas) {
+            origDrawBg?.call(this, ctx, canvas);
+            if (this._nkdRefKind === "MASK") {
+                if (this.color   !== _REF_MSK_COLOR) this.color   = _REF_MSK_COLOR;
+                if (this.bgcolor !== _REF_MSK_BG)    this.bgcolor = _REF_MSK_BG;
+            } else if (this._nkdRefKind === "IMAGE") {
+                if (this.color   !== _REF_IMG_COLOR) this.color   = _REF_IMG_COLOR;
+                if (this.bgcolor !== _REF_IMG_BG)    this.bgcolor = _REF_IMG_BG;
+            }
+        };
+    },
+
+    // Colour nodes restored from a saved workflow (links are resolved by now).
+    afterConfigureGraph() {
+        for (const node of app.graph?._nodes ?? []) {
+            if (node.comfyClass === _REF_TYPE) _applyRefColor(node);
+        }
+    },
+});

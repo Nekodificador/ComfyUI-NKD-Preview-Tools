@@ -29,7 +29,7 @@ body.panning{cursor:grabbing}
 body.holding-ref #img{visibility:hidden}
 body.holding-ref #ref-img{display:block}
 #ref-badge{
-    position:fixed;top:14px;left:14px;
+    position:fixed;top:38px;left:14px;
     background:rgba(180,32,48,0.92);
     color:#fff;font:bold 11px monospace;
     padding:4px 9px;border-radius:4px;
@@ -49,35 +49,45 @@ body.holding-mask #mask-ov,body.mask-on #mask-ov{display:block}
 #btn-mask{user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
 #btn-mask:hover{background:rgba(72,40,48,0.96);color:#fff}
 #btn-mask.active{background:rgba(180,32,48,0.95);color:#fff}
-#mask-color{width:26px;height:26px;padding:0;border:1px solid rgba(255,255,255,0.2);border-radius:6px;background:none;cursor:pointer;}
-#mask-op{width:80px;cursor:pointer;}
+#mask-color{width:30px;height:30px;padding:0;border:1px solid rgba(255,255,255,0.15);border-radius:6px;background:none;cursor:pointer;flex:none;}
+#mask-color::-webkit-color-swatch-wrapper{padding:0;}
+#mask-color::-webkit-color-swatch{border:none;border-radius:5px;}
+#mask-op{width:80px;height:30px;cursor:pointer;accent-color:#7dc97d;}
 #btn-hold{
-    position:fixed;bottom:18px;left:18px;
-    z-index:6;user-select:none;
+    user-select:none;
     background:rgba(40,28,32,0.92);
     border-color:rgba(255,180,180,0.18);
 }
 #btn-hold:hover{background:rgba(72,40,48,0.96);color:#fff}
 #btn-hold.active{background:rgba(180,32,48,0.95);color:#fff}
-#bar,#btn-close,#btn-hold{
+#bar,#btn-close{
     opacity:0;transition:opacity 0.25s;
 }
 body:hover #bar,
-body:hover #btn-close,
-body:hover #btn-hold{opacity:1}
+body:hover #btn-close{opacity:1}
+/* One full-width bottom bar, split into a left (reference) and right (actions)
+   group. space-between keeps them apart; each group wraps on its own, so the
+   clusters never overlap on narrow windows. */
 #bar{
-    position:fixed;bottom:18px;right:18px;
-    display:flex;gap:8px;
+    position:fixed;left:18px;right:18px;bottom:18px;
+    display:flex;justify-content:space-between;align-items:flex-end;
+    flex-wrap:wrap;gap:8px 16px;
 }
+.bar-group{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+.bar-right{margin-left:auto;justify-content:flex-end;}
 .vbtn{
+    display:inline-flex;align-items:center;gap:6px;
+    height:30px;padding:0 12px;line-height:1;white-space:nowrap;
     background:rgba(28,28,28,0.92);
     border:1px solid rgba(255,255,255,0.12);
-    color:#ccc;padding:6px 15px;
+    color:#ccc;
     border-radius:6px;cursor:pointer;
     font-size:13px;backdrop-filter:blur(6px);
     transition:background 0.14s,color 0.14s;
 }
+.vbtn svg{width:15px;height:15px;flex:none;display:block;}
 .vbtn:hover{background:rgba(72,72,72,0.96);color:#fff}
+.vbtn:active{transform:scale(0.97)}
 .vbtn.active{background:rgba(46,58,46,0.95);color:#7dc97d}
 #btn-run{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
 #btn-run:hover{background:rgba(60,84,60,0.96);color:#fff}
@@ -86,10 +96,32 @@ body:hover #btn-hold{opacity:1}
     z-index:6;
 }
 #dims{
-    position:fixed;bottom:60px;left:18px;
+    position:fixed;top:18px;left:48px;
     font:11px monospace;color:rgba(255,255,255,0.22);
-    pointer-events:none;
+    pointer-events:none;z-index:5;
 }
+/* Help affordance (top-left): hover reveals a gestures/shortcuts panel. */
+#help{
+    position:fixed;top:14px;left:14px;z-index:8;
+    width:26px;height:26px;display:flex;align-items:center;justify-content:center;
+    border-radius:6px;cursor:help;color:rgba(255,255,255,0.55);
+    background:rgba(28,28,28,0.85);border:1px solid rgba(255,255,255,0.12);
+    backdrop-filter:blur(6px);opacity:0;transition:opacity 0.25s,color 0.14s;
+}
+body:hover #help{opacity:1}
+#help:hover{color:#fff}
+#help svg{width:15px;height:15px;}
+#help-panel{
+    position:absolute;top:32px;left:0;display:none;
+    width:250px;padding:11px 13px;border-radius:8px;
+    background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);
+    backdrop-filter:blur(8px);box-shadow:0 10px 34px rgba(0,0,0,0.55);
+    font:11px/1.75 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+    color:rgba(255,255,255,0.72);
+}
+#help:hover #help-panel{display:block}
+#help-panel .k{display:inline-block;min-width:80px;color:#9fe09f;font-family:monospace;}
+#help-panel hr{border:none;border-top:1px solid rgba(255,255,255,0.1);margin:7px 0;}
 #empty-state{
     position:absolute;inset:0;
     display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -115,20 +147,38 @@ body:hover #btn-hold{opacity:1}
   </div>
 </div>
 <div id="ref-badge">REF</div>
-<button id="btn-close" class="vbtn">&#x2715; Close</button>
-<button id="btn-hold" class="vbtn" title="Hold to show reference image (Space)" style="display:none">&#x21C4; Hold for Ref</button>
+<div id="help" title="Gestures & shortcuts">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.1 9.2a3 3 0 0 1 5.8 1c0 2-3 2.3-3 4"/><path d="M12 17h.01"/></svg>
+  <div id="help-panel">
+    <div><span class="k">Drag</span> pan image</div>
+    <div><span class="k">Wheel</span> zoom</div>
+    <div><span class="k">Double-click</span> 1:1 / fit</div>
+    <hr>
+    <div><span class="k">Shift+Q</span> run / queue</div>
+    <div><span class="k">Space</span> hold reference</div>
+    <div><span class="k">M</span> mask overlay (peek)</div>
+    <div><span class="k">S</span> save image</div>
+    <div><span class="k">0 / R</span> fit &middot; <span class="k">1</span> 1:1 &middot; <span class="k">Esc</span> close</div>
+  </div>
+</div>
+<button id="btn-close" class="vbtn" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>Close</button>
 <div id="dims"></div>
 <div id="bar">
-  <button id="btn-run" class="vbtn" title="Queue this node (Shift+Q)">&#x25B6; Run</button>
-  <button id="btn-fit-zoom" class="vbtn" title="Fit image to window (0)">&#x26F6; Fit Image</button>
-  <button id="btn-100" class="vbtn" title="Actual Size (1)">1:1 Pixel</button>
-  <button id="btn-adjust" class="vbtn" title="Fit window to image size">&#x2921; Fit Window</button>
-  <button id="btn-save" class="vbtn" title="Save image (S)">&#x1F4BE; Save</button>
-  <span id="mask-ctl" style="display:none">
-    <button id="btn-mask" class="vbtn" title="Toggle the reference mask overlay — hold M to peek">&#x25A6; Mask</button>
-    <input type="color" id="mask-color" title="Overlay colour">
-    <input type="range" id="mask-op" min="5" max="100" title="Overlay opacity">
-  </span>
+  <div class="bar-group bar-left">
+    <button id="btn-hold" class="vbtn" title="Hold to show reference image (Space)" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 4l4 4-4 4M21 8H8M7 20l-4-4 4-4M3 16h13"/></svg>Hold for Ref</button>
+    <span id="mask-ctl" style="display:none">
+      <button id="btn-mask" class="vbtn" title="Toggle the reference mask overlay — hold M to peek"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>Mask</button>
+      <input type="color" id="mask-color" title="Overlay colour">
+      <input type="range" id="mask-op" min="5" max="100" title="Overlay opacity">
+    </span>
+  </div>
+  <div class="bar-group bar-right">
+    <button id="btn-run" class="vbtn" title="Queue this node (Shift+Q)"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>Run</button>
+    <button id="btn-fit-zoom" class="vbtn" title="Fit image to window (0)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>Fit Image</button>
+    <button id="btn-100" class="vbtn" title="Actual Size (1)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="1"/><path d="M9 9h1v6M14 9h1v6"/></svg>1:1 Pixel</button>
+    <button id="btn-adjust" class="vbtn" title="Fit window to image size"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>Fit Window</button>
+    <button id="btn-save" class="vbtn" title="Save image (S)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Save</button>
+  </div>
 </div>
 <script>
 (function () {
@@ -332,8 +382,12 @@ body:hover #btn-hold{opacity:1}
         scale = ns; apply();
     }, { passive: false });
 
+    // Left or middle drag pans the image. Kept consistent everywhere: Chrome's
+    // Document PiP can't move its window from the content, so rather than have
+    // the left button behave differently per mode, it always pans.
     wrap.addEventListener("mousedown", e => {
-        if (e.button !== 0) return;
+        if (e.button !== 0 && e.button !== 1) return;
+        e.preventDefault();
         panning = true; sx = e.clientX; sy = e.clientY; stx = tx; sty = ty;
         document.body.classList.add("panning");
     });
