@@ -65,6 +65,8 @@ body:hover #btn-hold{opacity:1}
 }
 .vbtn:hover{background:rgba(72,72,72,0.96);color:#fff}
 .vbtn.active{background:rgba(46,58,46,0.95);color:#7dc97d}
+#btn-run{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
+#btn-run:hover{background:rgba(60,84,60,0.96);color:#fff}
 #btn-close{
     position:fixed;top:14px;right:14px;
     z-index:6;
@@ -102,6 +104,7 @@ body:hover #btn-hold{opacity:1}
 <button id="btn-hold" class="vbtn" title="Hold to show reference image (Space)" style="display:none">&#x21C4; Hold for Ref</button>
 <div id="dims"></div>
 <div id="bar">
+  <button id="btn-run" class="vbtn" title="Queue this node (Shift+Q)">&#x25B6; Run</button>
   <button id="btn-fit-zoom" class="vbtn" title="Fit image to window (0)">&#x26F6; Fit Image</button>
   <button id="btn-100" class="vbtn" title="Actual Size (1)">1:1 Pixel</button>
   <button id="btn-adjust" class="vbtn" title="Fit window to image size">&#x2921; Fit Window</button>
@@ -239,6 +242,10 @@ body:hover #btn-hold{opacity:1}
 
     document.getElementById("btn-close").addEventListener("click", () => window.close());
 
+    // Queue/Run — bridges back to the main ComfyUI realm via __nkd_queue,
+    // injected on this window by the PopupWin that opened us (PiP / popup path).
+    document.getElementById("btn-run").addEventListener("click", () => window.__nkd_queue?.());
+
     const emptyState = document.getElementById("empty-state");
     img.addEventListener("load", () => {
         fit();
@@ -315,6 +322,7 @@ body:hover #btn-hold{opacity:1}
     document.addEventListener("keydown", e => {
         const tag = document.activeElement?.tagName;
         if (tag === "INPUT" || tag === "TEXTAREA") return;
+        if ((e.key === "q" || e.key === "Q") && e.shiftKey) { e.preventDefault(); window.__nkd_queue?.(); return; }
         if (e.key === "Escape") window.close();
         if (e.key === "0" || e.key === "r") fit();
         if (e.key === "1") document.getElementById("btn-100").click();

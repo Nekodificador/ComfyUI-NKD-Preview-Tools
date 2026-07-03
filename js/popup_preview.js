@@ -181,6 +181,8 @@ const VIEWER_CSS = `
 .nkd-btn-hold.active{background:rgba(180,32,48,0.95);color:#fff}
 .nkd-vbtn{background:rgba(28,28,28,0.92);border:1px solid rgba(255,255,255,0.12);color:#ccc;padding:6px 15px;border-radius:6px;cursor:pointer;font-size:13px;backdrop-filter:blur(6px);transition:background 0.14s,color 0.14s;}
 .nkd-vbtn:hover{background:rgba(72,72,72,0.96);color:#fff}
+.nkd-btn-run{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
+.nkd-btn-run:hover{background:rgba(60,84,60,0.96);color:#fff}
 .nkd-dims{position:absolute;bottom:60px;left:18px;font:11px monospace;color:rgba(255,255,255,0.22);pointer-events:none;z-index:5;}
 .nkd-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:rgba(255,255,255,0.18);pointer-events:none;}
 .nkd-empty svg{width:64px;height:64px;}
@@ -189,7 +191,7 @@ const VIEWER_CSS = `
 `;
 
 function createViewerDOM(opts = {}) {
-    const { refUrl = null, apiBase = null } = opts;
+    const { refUrl = null, apiBase = null, onQueue = null } = opts;
     // imgMeta is mutable — caller can update via root._nkdSetMeta(meta)
     let imgMeta = opts.imgMeta || null;
     const compareMode = !!refUrl;
@@ -225,6 +227,7 @@ function createViewerDOM(opts = {}) {
         <button class="nkd-btn-hold nkd-vbtn" style="display:${compareMode ? '' : 'none'}">&#x21C4; Hold for Ref</button>
         <div class="nkd-dims"></div>
         <div class="nkd-bar">
+            <button class="nkd-btn-run nkd-vbtn" style="display:${onQueue ? '' : 'none'}">&#x25B6; Run</button>
             <button class="nkd-btn-fit nkd-vbtn">&#x26F6; Fit Image</button>
             <button class="nkd-btn-100 nkd-vbtn">1:1 Pixel</button>
             <button class="nkd-btn-adj nkd-vbtn">&#x2921; Fit Window</button>
@@ -332,6 +335,8 @@ function createViewerDOM(opts = {}) {
         }
     });
 
+    if (onQueue) root.querySelector(".nkd-btn-run").addEventListener("click", () => onQueue());
+
     root.querySelector(".nkd-btn-fit").addEventListener("click", fit);
     root.querySelector(".nkd-btn-100").addEventListener("click", () => {
         // If in panel mode, resize panel to image size and center it, then fit zoom.
@@ -436,6 +441,21 @@ class PopupWin {
         this._title = title || "Preview Window";
         if (this.win && !this.win.closed) {
             try { this.win.document.title = this._title; } catch { /* cross-origin */ }
+        }
+    }
+
+    /** Queue this window's own node from the viewer (Run button / Shift+Q). */
+    _queueOwnNode() {
+        const node = app.graph?.getNodeById(Number(this.nodeId));
+        if (node) {
+            _queueNode(node);
+        } else {
+            app.extensionManager?.toast?.add?.({
+                severity: "warn",
+                summary: "Node Not Found",
+                detail: "This preview's node no longer exists in the graph.",
+                life: 5000,
+            });
         }
     }
 
@@ -626,6 +646,7 @@ class PopupWin {
             refUrl:  this._refUrl,
             imgMeta: this.currentMeta,
             apiBase: location.origin,
+            onQueue: () => this._queueOwnNode(),
         });
         container.style.cssText = "width:100%;height:100%;";
         // Hide the viewer's own close button — the panel titlebar has one.
@@ -833,6 +854,9 @@ class PopupWin {
             if (this.currentMeta) {
                 pipWin.__nkd_img_meta = this.currentMeta;
             }
+            // Bridge Run button / Shift+Q back to the main realm: queue THIS
+            // window's node (the PiP document can't reach app/api on its own).
+            pipWin.__nkd_queue = () => this._queueOwnNode();
 
             // Execute scripts in the PiP window's context by appending new elements.
             parsed.querySelectorAll("script").forEach(s => {
@@ -905,6 +929,12 @@ class PopupWin {
             });
             return;
         }
+
+        // Same bridge as the PiP path (see _openDirectPiP): the popup runs in a
+        // separate realm, so wire its Run button / Shift+Q back to queue our node.
+        this.win.addEventListener("load", () => {
+            try { this.win.__nkd_queue = () => this._queueOwnNode(); } catch { /* cross-origin */ }
+        });
 
         const saveState = () => {
             if (this.win && !this.win.closed) {
