@@ -86,9 +86,12 @@ body:hover #btn-close{opacity:1}
     transition:background 0.14s,color 0.14s;
 }
 .vbtn svg{width:15px;height:15px;flex:none;display:block;}
+/* Narrow window → collapse buttons to icon-only (names stay in tooltips). */
+@media (max-width:470px){.vbtn .lbl{display:none;}.vbtn{padding:0 9px;}}
 .vbtn:hover{background:rgba(72,72,72,0.96);color:#fff}
 .vbtn:active{transform:scale(0.97)}
 .vbtn.active{background:rgba(46,58,46,0.95);color:#7dc97d}
+.vbtn.err{background:rgba(120,40,46,0.95);color:#ff9a9a}
 #btn-run{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
 #btn-run:hover{background:rgba(60,84,60,0.96);color:#fff}
 #btn-close{
@@ -157,27 +160,28 @@ body:hover #help{opacity:1}
     <div><span class="k">Shift+Q</span> run / queue</div>
     <div><span class="k">Space</span> hold reference</div>
     <div><span class="k">M</span> mask overlay (peek)</div>
-    <div><span class="k">S</span> save image</div>
+    <div><span class="k">S</span> save &middot; <span class="k">C</span> copy image</div>
     <div><span class="k">0 / R</span> fit &middot; <span class="k">1</span> 1:1 &middot; <span class="k">Esc</span> close</div>
   </div>
 </div>
-<button id="btn-close" class="vbtn" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>Close</button>
+<button id="btn-close" class="vbtn" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg><span class="lbl">Close</span></button>
 <div id="dims"></div>
 <div id="bar">
   <div class="bar-group bar-left">
-    <button id="btn-hold" class="vbtn" title="Hold to show reference image (Space)" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 4l4 4-4 4M21 8H8M7 20l-4-4 4-4M3 16h13"/></svg>Hold for Ref</button>
+    <button id="btn-hold" class="vbtn" title="Hold to show reference image (Space)" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 4l4 4-4 4M21 8H8M7 20l-4-4 4-4M3 16h13"/></svg><span class="lbl">Hold for Ref</span></button>
     <span id="mask-ctl" style="display:none">
-      <button id="btn-mask" class="vbtn" title="Toggle the reference mask overlay — hold M to peek"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>Mask</button>
+      <button id="btn-mask" class="vbtn" title="Toggle the reference mask overlay — hold M to peek"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg><span class="lbl">Mask</span></button>
       <input type="color" id="mask-color" title="Overlay colour">
       <input type="range" id="mask-op" min="5" max="100" title="Overlay opacity">
     </span>
   </div>
   <div class="bar-group bar-right">
-    <button id="btn-run" class="vbtn" title="Queue this node (Shift+Q)"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>Run</button>
-    <button id="btn-fit-zoom" class="vbtn" title="Fit image to window (0)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>Fit Image</button>
-    <button id="btn-100" class="vbtn" title="Actual Size (1)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="1"/><path d="M9 9h1v6M14 9h1v6"/></svg>1:1 Pixel</button>
-    <button id="btn-adjust" class="vbtn" title="Fit window to image size"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>Fit Window</button>
-    <button id="btn-save" class="vbtn" title="Save image (S)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Save</button>
+    <button id="btn-run" class="vbtn" title="Queue this node (Shift+Q)"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg><span class="lbl">Run</span></button>
+    <button id="btn-fit-zoom" class="vbtn" title="Fit image to window (0)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg><span class="lbl">Fit Image</span></button>
+    <button id="btn-100" class="vbtn" title="Actual Size (1)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="1"/><path d="M9 9h1v6M14 9h1v6"/></svg><span class="lbl">1:1 Pixel</span></button>
+    <button id="btn-adjust" class="vbtn" title="Fit window to image size"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg><span class="lbl">Fit Window</span></button>
+    <button id="btn-copy" class="vbtn" title="Copy image to clipboard (C)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg><span class="lbl">Copy</span></button>
+    <button id="btn-save" class="vbtn" title="Save image (S)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg><span class="lbl">Save</span></button>
   </div>
 </div>
 <script>
@@ -370,6 +374,25 @@ body:hover #help{opacity:1}
 
     document.getElementById("btn-save").addEventListener("click", saveImage);
 
+    // ── Copy image to clipboard (fetch the shown image → ClipboardItem) ──────
+    async function copyImage() {
+        if (!img.src) return;
+        const btn = document.getElementById("btn-copy");
+        try {
+            const blob = await fetch(img.src).then(r => r.blob());
+            await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+            flashBtn(btn, "active");        // green = copied
+        } catch (e) {
+            console.error("NKD copy image error:", e);
+            flashBtn(btn, "err");           // red = failed (clipboard perms)
+        }
+    }
+    function flashBtn(btn, cls) {
+        btn.classList.add(cls);
+        setTimeout(() => btn.classList.remove(cls), 700);
+    }
+    document.getElementById("btn-copy").addEventListener("click", copyImage);
+
     // Interaction (Wheel, Drag, DblClick)
     wrap.addEventListener("wheel", e => {
         e.preventDefault();
@@ -417,6 +440,7 @@ body:hover #help{opacity:1}
         if (e.key === "0" || e.key === "r") fit();
         if (e.key === "1") document.getElementById("btn-100").click();
         if (e.key === "s" || e.key === "S") saveImage();
+        if (e.key === "c" || e.key === "C") copyImage();
     });
 
 

@@ -174,7 +174,7 @@ function collectUpstreamNodes(startNode) {
 
 const VIEWER_CSS = `
 .nkd-viewer-root *,.nkd-viewer-root *::before,.nkd-viewer-root *::after{box-sizing:border-box;margin:0;padding:0}
-.nkd-viewer-root{width:100%;height:100%;background:#080808;overflow:hidden;cursor:grab;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;position:relative;}
+.nkd-viewer-root{width:100%;height:100%;background:#080808;overflow:hidden;cursor:grab;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;position:relative;container-type:inline-size;}
 .nkd-viewer-root.panning{cursor:grabbing}
 .nkd-help{position:absolute;top:14px;left:14px;z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:help;color:rgba(255,255,255,0.55);background:rgba(28,28,28,0.85);border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(6px);opacity:0;transition:opacity 0.25s,color 0.14s;}
 .nkd-viewer-root:hover .nkd-help{opacity:1}
@@ -215,6 +215,8 @@ const VIEWER_CSS = `
 .nkd-btn-hold.active{background:rgba(180,32,48,0.95);color:#fff}
 .nkd-vbtn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;line-height:1;white-space:nowrap;background:rgba(28,28,28,0.92);border:1px solid rgba(255,255,255,0.12);color:#ccc;border-radius:6px;cursor:pointer;font-size:13px;backdrop-filter:blur(6px);transition:background 0.14s,color 0.14s;}
 .nkd-vbtn svg{width:15px;height:15px;flex:none;display:block;}
+/* Narrow viewer → collapse buttons to icon-only (names stay in tooltips). */
+@container (max-width:470px){.nkd-vbtn .nkd-lbl{display:none;}.nkd-vbtn{padding:0 9px;}}
 .nkd-vbtn:hover{background:rgba(72,72,72,0.96);color:#fff}
 .nkd-vbtn:active{transform:scale(0.97)}
 .nkd-btn-run{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
@@ -233,6 +235,7 @@ const ICON = {
     fit:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>',
     win:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
     save:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>',
+    copy:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
     close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>',
     swap:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 4l4 4-4 4M21 8H8M7 20l-4-4 4-4M3 16h13"/></svg>',
     mask:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>',
@@ -284,27 +287,28 @@ function createViewerDOM(opts = {}) {
                 <div><span class="k">Shift+Q</span> run / queue</div>
                 <div><span class="k">Space</span> hold reference</div>
                 <div><span class="k">M</span> mask overlay (peek)</div>
-                <div><span class="k">S</span> save image</div>
+                <div><span class="k">S</span> save &middot; <span class="k">C</span> copy image</div>
                 <div><span class="k">0 / R</span> fit &middot; <span class="k">1</span> 1:1 &middot; <span class="k">Esc</span> close</div>
             </div>
         </div>
-        <button class="nkd-btn-close nkd-vbtn" title="Close">${ICON.close}Close</button>
+        <button class="nkd-btn-close nkd-vbtn" title="Close">${ICON.close}<span class="nkd-lbl">Close</span></button>
         <div class="nkd-dims"></div>
         <div class="nkd-bar">
             <div class="nkd-bar-group nkd-bar-left">
-                <button class="nkd-btn-hold nkd-vbtn" style="display:${compareMode ? '' : 'none'}">${ICON.swap}Hold for Ref</button>
+                <button class="nkd-btn-hold nkd-vbtn" title="Hold to show reference image (Space)" style="display:${compareMode ? '' : 'none'}">${ICON.swap}<span class="nkd-lbl">Hold for Ref</span></button>
                 <span class="nkd-mask-ctl" style="display:${maskMode ? '' : 'none'}">
-                    <button class="nkd-btn-mask nkd-vbtn" title="Toggle the reference mask overlay — hold M to peek">${ICON.mask}Mask</button>
+                    <button class="nkd-btn-mask nkd-vbtn" title="Toggle the reference mask overlay — hold M to peek">${ICON.mask}<span class="nkd-lbl">Mask</span></button>
                     <input type="color" class="nkd-mask-color" title="Overlay colour">
                     <input type="range" class="nkd-mask-op" min="5" max="100" title="Overlay opacity">
                 </span>
             </div>
             <div class="nkd-bar-group nkd-bar-right">
-                <button class="nkd-btn-run nkd-vbtn" style="display:${onQueue ? '' : 'none'}">${ICON.run}Run</button>
-                <button class="nkd-btn-fit nkd-vbtn">${ICON.fit}Fit Image</button>
-                <button class="nkd-btn-100 nkd-vbtn">${ICON.pixel}1:1 Pixel</button>
-                <button class="nkd-btn-adj nkd-vbtn">${ICON.win}Fit Window</button>
-                <button class="nkd-btn-save nkd-vbtn">${ICON.save}Save</button>
+                <button class="nkd-btn-run nkd-vbtn" title="Queue this node (Shift+Q)" style="display:${onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-lbl">Run</span></button>
+                <button class="nkd-btn-fit nkd-vbtn" title="Fit image to window (0)">${ICON.fit}<span class="nkd-lbl">Fit Image</span></button>
+                <button class="nkd-btn-100 nkd-vbtn" title="Actual size (1)">${ICON.pixel}<span class="nkd-lbl">1:1 Pixel</span></button>
+                <button class="nkd-btn-adj nkd-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-lbl">Fit Window</span></button>
+                <button class="nkd-btn-copy nkd-vbtn" title="Copy image to clipboard (C)">${ICON.copy}<span class="nkd-lbl">Copy</span></button>
+                <button class="nkd-btn-save nkd-vbtn" title="Save image (S)">${ICON.save}<span class="nkd-lbl">Save</span></button>
             </div>
         </div>`;
 
@@ -457,6 +461,8 @@ function createViewerDOM(opts = {}) {
 
     if (onQueue) root.querySelector(".nkd-btn-run").addEventListener("click", () => onQueue());
 
+    root.querySelector(".nkd-btn-copy").addEventListener("click", () => copyImageToClipboard(img.src));
+
     root.querySelector(".nkd-btn-fit").addEventListener("click", fit);
     root.querySelector(".nkd-btn-100").addEventListener("click", () => {
         // If in panel mode, resize panel to image size and center it, then fit zoom.
@@ -538,6 +544,7 @@ function createViewerDOM(opts = {}) {
         if (e.key === "0" || e.key === "r") fit();
         if (e.key === "1") root.querySelector(".nkd-btn-100").click();
         if (e.key === "s" || e.key === "S") root.querySelector(".nkd-btn-save").click();
+        if (e.key === "c" || e.key === "C") root.querySelector(".nkd-btn-copy").click();
     });
 
     return root;
