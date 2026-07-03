@@ -115,6 +115,89 @@ function isPrimary(nodeId) {
     return String(nodeId) === primaryNodeId;
 }
 
+// ── Send-to-LoadImage target ──────────────────────────────────────────────────
+
+const LS_LOAD_TARGET   = "nkd_load_target_id";
+const LOAD_TARGET_COLOR = "#7a4a1e"; // warm amber outline
+const LOAD_TARGET_BG    = "#2a1c10";
+let loadTargetId = localStorage.getItem(LS_LOAD_TARGET) ?? null;
+
+function isLoadTarget(nodeId) { return String(nodeId) === loadTargetId; }
+
+function applyLoadTargetStyle(node, on) {
+    if (!node) return;
+    if (on) { node.color = LOAD_TARGET_COLOR; node.bgcolor = LOAD_TARGET_BG; }
+    else    { delete node.color; delete node.bgcolor; }
+}
+
+function setLoadTarget(nodeId) {
+    const prev = loadTargetId;
+    loadTargetId = nodeId ? String(nodeId) : null;
+    if (loadTargetId) localStorage.setItem(LS_LOAD_TARGET, loadTargetId);
+    else localStorage.removeItem(LS_LOAD_TARGET);
+    for (const id of new Set([prev, loadTargetId])) {
+        if (!id) continue;
+        const node = app.graph?.getNodeById(Number(id));
+        if (!node) continue;
+        applyLoadTargetStyle(node, isLoadTarget(id));
+        node.setDirtyCanvas(true, true);
+    }
+}
+
+// The marked LoadImage node, or the sole one if none is marked, else null.
+function resolveLoadImageNode() {
+    const loads = (app.graph?._nodes ?? []).filter(n => n.comfyClass === "LoadImage");
+    if (loadTargetId) {
+        const n = loads.find(x => String(x.id) === loadTargetId);
+        if (n) return n;
+        setLoadTarget(null); // marked node is gone
+    }
+    return loads.length === 1 ? loads[0] : null;
+}
+
+// Upload the given image URL into input/ and point the target LoadImage at it.
+async function sendImageToLoadImage(url) {
+    if (!url) {
+        app.extensionManager?.toast?.add?.({ severity: "warn", summary: "No Image", detail: "Run the node first to generate an image.", life: 4000 });
+        return;
+    }
+    const node = resolveLoadImageNode();
+    if (!node) {
+        const count = (app.graph?._nodes ?? []).filter(n => n.comfyClass === "LoadImage").length;
+        app.extensionManager?.toast?.add?.({
+            severity: "warn",
+            summary: count === 0 ? "No Load Image Node" : "No Target Selected",
+            detail: count === 0 ? "Add a Load Image node to the graph." : "Right-click a Load Image node → Set as NKD image target.",
+            life: 6000,
+        });
+        return;
+    }
+    try {
+        const blob = await fetch(url).then(r => r.blob());
+        const ext  = blob.type === "image/jpeg" ? "jpg" : blob.type === "image/webp" ? "webp" : "png";
+        const fd = new FormData();
+        // Unique name per send → the widget value changes, so the thumbnail and
+        // the cache both refresh cleanly (prefix makes them easy to prune).
+        fd.append("image", blob, `nkd_send_${Date.now()}.${ext}`);
+        fd.append("type", "input");
+        const resp = await api.fetchApi("/upload/image", { method: "POST", body: fd });
+        if (!resp.ok) throw new Error(`upload ${resp.status}`);
+        const data = await resp.json(); // { name, subfolder, type }
+        const val  = data.subfolder ? `${data.subfolder}/${data.name}` : data.name;
+        const w = node.widgets?.find(x => x.name === "image");
+        if (w) {
+            if (w.options?.values && !w.options.values.includes(val)) w.options.values.push(val);
+            w.value = val;
+            w.callback?.(val);
+        }
+        node.setDirtyCanvas?.(true, true);
+        app.extensionManager?.toast?.add?.({ severity: "success", summary: "Sent to Load Image", detail: `→ ${node.title || "Load Image"} #${node.id}`, life: 3000 });
+    } catch (err) {
+        console.error("NKD send to LoadImage error:", err);
+        app.extensionManager?.toast?.add?.({ severity: "error", summary: "Send Failed", detail: String(err), life: 6000 });
+    }
+}
+
 // ── Upstream sampler detection ────────────────────────────────────────────────
 
 const SAMPLER_TYPES = new Set([
@@ -208,7 +291,8 @@ const VIEWER_CSS = `
    clusters never overlap on narrow windows. */
 .nkd-bar{position:absolute;left:18px;right:18px;bottom:18px;display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:8px 16px;z-index:6;}
 .nkd-bar-group{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
-.nkd-bar-right{margin-left:auto;justify-content:flex-end;}
+.nkd-bar-right{display:flex;flex-direction:column;align-items:flex-end;gap:8px;margin-left:auto;}
+.nkd-bar-row{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;}
 .nkd-btn-close{position:absolute;top:14px;right:14px;z-index:6;}
 .nkd-btn-hold{user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
 .nkd-btn-hold:hover{background:rgba(72,40,48,0.96);color:#fff}
@@ -236,6 +320,7 @@ const ICON = {
     win:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
     save:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>',
     copy:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
+    load:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/></svg>',
     close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>',
     swap:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 4l4 4-4 4M21 8H8M7 20l-4-4 4-4M3 16h13"/></svg>',
     mask:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>',
@@ -243,11 +328,13 @@ const ICON = {
 };
 
 function createViewerDOM(opts = {}) {
-    const { refUrl = null, maskUrl = null, apiBase = null, onQueue = null } = opts;
+    const { refUrl = null, maskUrl = null, apiBase = null, onQueue = null, onSendToLoad = null } = opts;
     // imgMeta is mutable — caller can update via root._nkdSetMeta(meta)
     let imgMeta = opts.imgMeta || null;
-    const compareMode = !!refUrl;
-    const maskMode = !!maskUrl;
+    // Reference/mask availability is dynamic — refreshed via root._nkdSetRefs()
+    // whenever the workflow runs, so Hold/Mask appear as soon as a ref exists.
+    let curRef  = refUrl  || null;
+    let curMask = maskUrl || null;
 
     // Inject CSS once into the host document.
     const styleId = "nkd-viewer-style";
@@ -288,6 +375,7 @@ function createViewerDOM(opts = {}) {
                 <div><span class="k">Space</span> hold reference</div>
                 <div><span class="k">M</span> mask overlay (peek)</div>
                 <div><span class="k">S</span> save &middot; <span class="k">C</span> copy image</div>
+                <div><span class="k">To Load</span> send to Load Image node</div>
                 <div><span class="k">0 / R</span> fit &middot; <span class="k">1</span> 1:1 &middot; <span class="k">Esc</span> close</div>
             </div>
         </div>
@@ -295,20 +383,25 @@ function createViewerDOM(opts = {}) {
         <div class="nkd-dims"></div>
         <div class="nkd-bar">
             <div class="nkd-bar-group nkd-bar-left">
-                <button class="nkd-btn-hold nkd-vbtn" title="Hold to show reference image (Space)" style="display:${compareMode ? '' : 'none'}">${ICON.swap}<span class="nkd-lbl">Hold for Ref</span></button>
-                <span class="nkd-mask-ctl" style="display:${maskMode ? '' : 'none'}">
+                <button class="nkd-btn-hold nkd-vbtn" title="Hold to show reference image (Space)" style="display:${refUrl ? '' : 'none'}">${ICON.swap}<span class="nkd-lbl">Hold for Ref</span></button>
+                <span class="nkd-mask-ctl" style="display:${maskUrl ? '' : 'none'}">
                     <button class="nkd-btn-mask nkd-vbtn" title="Toggle the reference mask overlay — hold M to peek">${ICON.mask}<span class="nkd-lbl">Mask</span></button>
                     <input type="color" class="nkd-mask-color" title="Overlay colour">
                     <input type="range" class="nkd-mask-op" min="5" max="100" title="Overlay opacity">
                 </span>
             </div>
-            <div class="nkd-bar-group nkd-bar-right">
-                <button class="nkd-btn-run nkd-vbtn" title="Queue this node (Shift+Q)" style="display:${onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-lbl">Run</span></button>
-                <button class="nkd-btn-fit nkd-vbtn" title="Fit image to window (0)">${ICON.fit}<span class="nkd-lbl">Fit Image</span></button>
-                <button class="nkd-btn-100 nkd-vbtn" title="Actual size (1)">${ICON.pixel}<span class="nkd-lbl">1:1 Pixel</span></button>
-                <button class="nkd-btn-adj nkd-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-lbl">Fit Window</span></button>
-                <button class="nkd-btn-copy nkd-vbtn" title="Copy image to clipboard (C)">${ICON.copy}<span class="nkd-lbl">Copy</span></button>
-                <button class="nkd-btn-save nkd-vbtn" title="Save image (S)">${ICON.save}<span class="nkd-lbl">Save</span></button>
+            <div class="nkd-bar-right">
+                <div class="nkd-bar-row">
+                    <button class="nkd-btn-fit nkd-vbtn" title="Fit image to window (0)">${ICON.fit}<span class="nkd-lbl">Fit Image</span></button>
+                    <button class="nkd-btn-100 nkd-vbtn" title="Actual size (1)">${ICON.pixel}<span class="nkd-lbl">1:1 Pixel</span></button>
+                    <button class="nkd-btn-adj nkd-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-lbl">Fit Window</span></button>
+                </div>
+                <div class="nkd-bar-row">
+                    <button class="nkd-btn-run nkd-vbtn" title="Queue this node (Shift+Q)" style="display:${onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-lbl">Run</span></button>
+                    <button class="nkd-btn-copy nkd-vbtn" title="Copy image to clipboard (C)">${ICON.copy}<span class="nkd-lbl">Copy</span></button>
+                    <button class="nkd-btn-save nkd-vbtn" title="Save image (S)">${ICON.save}<span class="nkd-lbl">Save</span></button>
+                    <button class="nkd-btn-load nkd-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-lbl">To Load</span></button>
+                </div>
             </div>
         </div>`;
 
@@ -327,8 +420,8 @@ function createViewerDOM(opts = {}) {
         const rendering = scale > 1.0 ? "pixelated" : "auto";
         img.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`;
         img.style.imageRendering = rendering;
-        if (compareMode) applyRefTransform(rendering);
-        if (maskMode) applyMaskTransform();
+        if (curRef) applyRefTransform(rendering);
+        if (curMask) applyMaskTransform();
     }
 
     // Overlay the mask 1:1 over the current image's box (it's expected to match
@@ -385,58 +478,62 @@ function createViewerDOM(opts = {}) {
         empty.classList.add("hidden");
     });
 
-    if (compareMode) {
-        refImg.src = refUrl;
-        refImg.addEventListener("load", apply);
+    // ── Reference compare (Hold) — always wired, gated on curRef at runtime ──
+    refImg.addEventListener("load", apply);
+    let holding = false;
+    const showRef = () => { if (!curRef || holding) return; holding = true; root.classList.add("holding-ref"); btnHold.classList.add("active"); };
+    const showCur = () => { if (!holding) return; holding = false; root.classList.remove("holding-ref"); btnHold.classList.remove("active"); };
+    btnHold.addEventListener("mousedown", e => { e.preventDefault(); showRef(); });
+    root.addEventListener("mouseup", showCur);
+    root.addEventListener("blur", showCur);
+    document.addEventListener("keydown", e => {
+        if (e.code !== "Space" || e.repeat || !curRef) return;
+        const tag = document.activeElement?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        e.preventDefault(); showRef();
+    });
+    document.addEventListener("keyup", e => { if (e.code === "Space") { e.preventDefault(); showCur(); } });
 
-        let holding = false;
-        const showRef = () => { if (holding) return; holding = true; root.classList.add("holding-ref"); btnHold.classList.add("active"); };
-        const showCur = () => { if (!holding) return; holding = false; root.classList.remove("holding-ref"); btnHold.classList.remove("active"); };
-        btnHold.addEventListener("mousedown", e => { e.preventDefault(); showRef(); });
-        root.addEventListener("mouseup", showCur);
-        root.addEventListener("blur", showCur);
-        document.addEventListener("keydown", e => {
-            if (e.code !== "Space" || e.repeat) return;
-            const tag = document.activeElement?.tagName;
-            if (tag === "INPUT" || tag === "TEXTAREA") return;
-            e.preventDefault(); showRef();
-        });
-        document.addEventListener("keyup", e => { if (e.code === "Space") { e.preventDefault(); showCur(); } });
-    }
+    // ── Mask overlay (toggle button + M peek) — always wired, gated on curMask ──
+    const btnMask = root.querySelector(".nkd-btn-mask");
+    const colorIn = root.querySelector(".nkd-mask-color");
+    const opIn    = root.querySelector(".nkd-mask-op");
+    colorIn.value = localStorage.getItem("nkd_mask_color") || "#ff2f38";
+    opIn.value    = localStorage.getItem("nkd_mask_op")    || "50";
+    const styleMask = () => { maskOv.style.backgroundColor = colorIn.value; maskOv.style.opacity = String(opIn.value / 100); };
+    styleMask();
+    colorIn.addEventListener("input", () => { styleMask(); localStorage.setItem("nkd_mask_color", colorIn.value); });
+    opIn.addEventListener("input",    () => { styleMask(); localStorage.setItem("nkd_mask_op",    opIn.value); });
 
-    // Mask overlay: press-and-hold (button or M) to tint the masked region over
-    // the current image, with adjustable colour + opacity (persisted).
-    if (maskMode) {
-        const btnMask   = root.querySelector(".nkd-btn-mask");
-        const colorIn   = root.querySelector(".nkd-mask-color");
-        const opIn      = root.querySelector(".nkd-mask-op");
-        maskOv.style.webkitMaskImage = `url("${maskUrl}")`;
-        maskOv.style.maskImage       = `url("${maskUrl}")`;
+    let maskOn = false;
+    const setToggle = (on) => { maskOn = on && !!curMask; root.classList.toggle("mask-on", maskOn); btnMask.classList.toggle("active", maskOn); if (maskOn) applyMaskTransform(); };
+    btnMask.addEventListener("click", () => setToggle(!maskOn));
+    let peeking = false;
+    const peekOn  = () => { if (peeking || !curMask) return; peeking = true; applyMaskTransform(); root.classList.add("holding-mask"); };
+    const peekOff = () => { if (!peeking) return; peeking = false; root.classList.remove("holding-mask"); };
+    root.addEventListener("blur", peekOff);
+    document.addEventListener("keydown", e => {
+        if ((e.key !== "m" && e.key !== "M") || e.repeat || !curMask) return;
+        const tag = document.activeElement?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        e.preventDefault(); peekOn();
+    });
+    document.addEventListener("keyup", e => { if (e.key === "m" || e.key === "M") { e.preventDefault(); peekOff(); } });
 
-        colorIn.value = localStorage.getItem("nkd_mask_color") || "#ff2f38";
-        opIn.value    = localStorage.getItem("nkd_mask_op")    || "50";
-        const styleMask = () => { maskOv.style.backgroundColor = colorIn.value; maskOv.style.opacity = String(opIn.value / 100); };
-        styleMask();
-        colorIn.addEventListener("input", () => { styleMask(); localStorage.setItem("nkd_mask_color", colorIn.value); });
-        opIn.addEventListener("input",    () => { styleMask(); localStorage.setItem("nkd_mask_op",    opIn.value); });
-
-        // Button = persistent toggle; M = momentary peek (independent of the toggle).
-        let maskOn = false;
-        const setToggle = (on) => { maskOn = on; root.classList.toggle("mask-on", on); btnMask.classList.toggle("active", on); if (on) applyMaskTransform(); };
-        btnMask.addEventListener("click", () => setToggle(!maskOn));
-
-        let peeking = false;
-        const peekOn  = () => { if (peeking) return; peeking = true;  applyMaskTransform(); root.classList.add("holding-mask"); };
-        const peekOff = () => { if (!peeking) return; peeking = false; root.classList.remove("holding-mask"); };
-        root.addEventListener("blur", peekOff);
-        document.addEventListener("keydown", e => {
-            if ((e.key !== "m" && e.key !== "M") || e.repeat) return;
-            const tag = document.activeElement?.tagName;
-            if (tag === "INPUT" || tag === "TEXTAREA") return;
-            e.preventDefault(); peekOn();
-        });
-        document.addEventListener("keyup", e => { if (e.key === "m" || e.key === "M") { e.preventDefault(); peekOff(); } });
-    }
+    // Update reference/mask availability live (called on every workflow run).
+    root._nkdSetRefs = (rUrl, mUrl) => {
+        curRef  = rUrl  || null;
+        curMask = mUrl  || null;
+        btnHold.style.display = curRef ? "" : "none";
+        if (curRef) { if (refImg.src !== curRef) refImg.src = curRef; }
+        else { holding = false; root.classList.remove("holding-ref"); btnHold.classList.remove("active"); }
+        root.querySelector(".nkd-mask-ctl").style.display = curMask ? "" : "none";
+        if (curMask) { maskOv.style.webkitMaskImage = `url("${curMask}")`; maskOv.style.maskImage = `url("${curMask}")`; }
+        else { maskOn = peeking = false; root.classList.remove("holding-mask", "mask-on"); btnMask.classList.remove("active"); }
+        apply();
+    };
+    if (curRef) refImg.src = curRef;
+    if (curMask) { maskOv.style.webkitMaskImage = `url("${curMask}")`; maskOv.style.maskImage = `url("${curMask}")`; }
 
     // Fit Window button — resizes the panel (floating mode) or the OS window (popup mode)
     root.querySelector(".nkd-btn-adj").addEventListener("click", () => {
@@ -462,6 +559,7 @@ function createViewerDOM(opts = {}) {
     if (onQueue) root.querySelector(".nkd-btn-run").addEventListener("click", () => onQueue());
 
     root.querySelector(".nkd-btn-copy").addEventListener("click", () => copyImageToClipboard(img.src));
+    if (onSendToLoad) root.querySelector(".nkd-btn-load").addEventListener("click", () => onSendToLoad());
 
     root.querySelector(".nkd-btn-fit").addEventListener("click", fit);
     root.querySelector(".nkd-btn-100").addEventListener("click", () => {
@@ -589,6 +687,9 @@ class PopupWin {
         }
     }
 
+    /** Send this window's current image to the target Load Image node. */
+    _sendOwnToLoad() { sendImageToLoadImage(this.currentUrl); }
+
     /** Called on node execution: update existing window or open a new one. */
     showImage(imgData) {
         this.currentUrl  = buildViewUrl(imgData);
@@ -603,6 +704,21 @@ class PopupWin {
             if (this._container?._nkdSetMeta) this._container._nkdSetMeta(this.currentMeta);
             this._updateImage(this.currentUrl);
             this._pushMeta();
+            this.refreshRefs();  // a run may have (re)set the reference/mask
+        }
+    }
+
+    /** Re-fetch the active reference image/mask and push to the open viewer so
+     * Hold/Mask appear as soon as a reference exists — no need to reopen. */
+    async refreshRefs() {
+        if (!this.win || this.win.closed) return;
+        const [refUrl, maskUrl] = await Promise.all([getReferenceUrl(), getReferenceMaskUrl()]);
+        this._refUrl = refUrl; this._maskUrl = maskUrl;
+        // Floating panel: live DOM container. PiP / OS window: bridged function.
+        if (this._container?._nkdSetRefs) {
+            this._container._nkdSetRefs(refUrl, maskUrl);
+        } else {
+            try { this.win.__nkd_apply_refs?.(refUrl, maskUrl); } catch { /* cross-origin */ }
         }
     }
 
@@ -778,6 +894,7 @@ class PopupWin {
             imgMeta: this.currentMeta,
             apiBase: location.origin,
             onQueue: () => this._queueOwnNode(),
+            onSendToLoad: () => this._sendOwnToLoad(),
         });
         container.style.cssText = "width:100%;height:100%;";
         // Hide the viewer's own close button — the panel titlebar has one.
@@ -990,6 +1107,7 @@ class PopupWin {
             // Bridge Run button / Shift+Q back to the main realm: queue THIS
             // window's node (the PiP document can't reach app/api on its own).
             pipWin.__nkd_queue = () => this._queueOwnNode();
+            pipWin.__nkd_send_to_load = () => this._sendOwnToLoad();
 
             // Execute scripts in the PiP window's context by appending new elements.
             parsed.querySelectorAll("script").forEach(s => {
@@ -1069,7 +1187,10 @@ class PopupWin {
         // Same bridge as the PiP path (see _openDirectPiP): the popup runs in a
         // separate realm, so wire its Run button / Shift+Q back to queue our node.
         this.win.addEventListener("load", () => {
-            try { this.win.__nkd_queue = () => this._queueOwnNode(); } catch { /* cross-origin */ }
+            try {
+                this.win.__nkd_queue = () => this._queueOwnNode();
+                this.win.__nkd_send_to_load = () => this._sendOwnToLoad();
+            } catch { /* cross-origin */ }
         });
 
         const saveState = () => {
@@ -1355,6 +1476,12 @@ app.registerExtension({
             popup.showImage(detail.output.images[0]);
         });
 
+        // A reference node may finish after the preview node in the same run, so
+        // also refresh references once the whole prompt completes.
+        api.addEventListener("execution_success", () => {
+            for (const p of popups.values()) p.refreshRefs();
+        });
+
         // b_preview_with_metadata is dispatched on the bundle's internal ComfyApi
         // instance, not the one exported by /scripts/api.js. Intercept via WebSocket.
         // The socket is created after setup(), so we wait for it.
@@ -1508,20 +1635,35 @@ app.registerExtension({
         };
     },
 
-    // Restore primary state after graph load (node IDs are now stable).
+    // Restore primary + load-target styles after graph load (IDs are stable now).
     afterConfigureGraph() {
-        if (!primaryNodeId) return;
-        const node = app.graph?.getNodeById(Number(primaryNodeId));
-        if (!node || node.comfyClass !== NODE_TYPE) {
-            // Saved ID no longer maps to a valid popup node — clear it.
-            setPrimary(null);
-        } else {
-            applyPrimaryStyle(node, true);
-            node.setDirtyCanvas(true, true);
+        if (primaryNodeId) {
+            const node = app.graph?.getNodeById(Number(primaryNodeId));
+            if (!node || node.comfyClass !== NODE_TYPE) {
+                setPrimary(null); // saved ID no longer maps to a valid popup node
+            } else {
+                applyPrimaryStyle(node, true);
+                node.setDirtyCanvas(true, true);
+            }
+        }
+        if (loadTargetId) {
+            const t = app.graph?.getNodeById(Number(loadTargetId));
+            if (!t || t.comfyClass !== "LoadImage") {
+                setLoadTarget(null);
+            } else {
+                applyLoadTargetStyle(t, true);
+                t.setDirtyCanvas(true, true);
+            }
         }
     },
 
     getNodeMenuItems(node) {
+        if (node.comfyClass === "LoadImage") {
+            return [{
+                content: isLoadTarget(node.id) ? "◎ Unset NKD image target" : "◎ Set as NKD image target",
+                callback: () => setLoadTarget(isLoadTarget(node.id) ? null : node.id),
+            }];
+        }
         if (node.comfyClass !== NODE_TYPE) return [];
         return [
             {
