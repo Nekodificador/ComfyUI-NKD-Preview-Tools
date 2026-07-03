@@ -61,6 +61,12 @@ _incoming_mask_fp: dict[str, tuple] = {}
 _ref_image: tuple[str, dict] | None = None
 _REF_PREFIX = "NKDReferenceImage/NRI-"
 
+# Single active reference MASK, independent of the reference image. Saved as a
+# grayscale PNG (white = masked region) so the viewer can tint it any colour and
+# opacity client-side. Same last-wins semantics as _ref_image.
+_ref_mask: tuple[str, dict] | None = None
+_REF_MASK_PREFIX = "NKDReferenceImage/NRM-"
+
 
 # ── Mask backup helpers ───────────────────────────────────────────────────────
 
@@ -226,6 +232,24 @@ def _save_reference_png(image_tensor: torch.Tensor) -> tuple[str, dict, int, int
     return path, item, W, H
 
 
+def _save_reference_mask_png(mask_tensor: torch.Tensor) -> tuple[str, dict, int, int]:
+    """Write the first frame of a MASK tensor (B,H,W) as a grayscale L PNG into
+    temp/. White (255) = masked region; the viewer tints it client-side.
+    Returns (abs_path, item_dict, W, H).
+    """
+    mask_np = np.clip(255.0 * mask_tensor[0].cpu().numpy(), 0, 255).astype(np.uint8)
+    H, W = mask_np.shape[:2]
+    full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+        _REF_MASK_PREFIX, folder_paths.get_temp_directory(), W, H
+    )
+    os.makedirs(full_output_folder, exist_ok=True)
+    file = f"{filename}_{counter:05}_.png"
+    path = os.path.join(full_output_folder, file)
+    PILImage.fromarray(mask_np, "L").save(path, compress_level=4)
+    item = {"filename": file, "subfolder": subfolder, "type": "temp"}
+    return path, item, W, H
+
+
 # ── REST endpoints ────────────────────────────────────────────────────────────
 
 routes = PromptServer.instance.routes
@@ -349,6 +373,17 @@ async def _nkd_ref_get(request: web.Request) -> web.Response:
     return web.json_response(item)
 
 
+@routes.get("/nkd/ref/get_mask")
+async def _nkd_ref_get_mask(request: web.Request) -> web.Response:
+    """Return the active reference mask's /view item, or 404 if unset."""
+    if _ref_mask is None:
+        return web.Response(status=404, text="No reference mask set")
+    path, item = _ref_mask
+    if not os.path.isfile(path):
+        return web.Response(status=404, text="Reference mask file missing")
+    return web.json_response(item)
+
+
 # ── UI output ─────────────────────────────────────────────────────────────────
 
 class _NKDMaskPainterUI(_UIOutput):
@@ -376,13 +411,17 @@ class NKDReferenceImage(io.ComfyNode):
             display_name="😺NKD Reference",
             category="😺NKD Nodes/Preview",
             description=(
-                "Captures the connected image as the workflow's active reference. "
-                "Any NKD Popup Preview node can then press-and-hold (Space or the "
-                "viewer button) to flash the reference over the current preview. "
-                "Only one reference is active at a time — the last executed reference "
-                "node wins."
+                "Captures the connected IMAGE or MASK as the workflow's active "
+                "reference. Any NKD Popup Preview node can then press-and-hold to "
+                "flash a reference image over the current preview, or overlay a "
+                "reference mask (tinted, adjustable) on top of it. Image and mask "
+                "are separate slots — wire two Reference nodes to have both. Within "
+                "each slot the last executed node wins."
             ),
-            inputs=[io.Image.Input("image")],
+            # MultiType accepts IMAGE or MASK on one wildcard input, disambiguated
+            # at runtime by ndim (mask=3, image=4) — same pattern as KJNodes'
+            # "Preview Image Or Mask" and Comfy's official Resize Image/Mask.
+            inputs=[io.MultiType.Input("image", [io.Image, io.Mask])],
             outputs=[],
             is_output_node=True,
             not_idempotent=True,
@@ -396,9 +435,14 @@ class NKDReferenceImage(io.ComfyNode):
 
     @classmethod
     def execute(cls, image):
-        global _ref_image
-        path, item, _W, _H = _save_reference_png(image)
-        _ref_image = (path, item)
+        global _ref_image, _ref_mask
+        # MASK tensors are (B,H,W) → ndim 3; IMAGE tensors are (B,H,W,C) → ndim 4.
+        if image.ndim == 3:
+            path, item, _W, _H = _save_reference_mask_png(image)
+            _ref_mask = (path, item)
+        else:
+            path, item, _W, _H = _save_reference_png(image)
+            _ref_image = (path, item)
         return io.NodeOutput()
 
 

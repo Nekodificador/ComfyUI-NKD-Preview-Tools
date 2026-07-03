@@ -56,6 +56,17 @@ async function getReferenceUrl() {
     }
 }
 
+async function getReferenceMaskUrl() {
+    try {
+        const r = await fetch(api.apiURL("/nkd/ref/get_mask"));
+        if (!r.ok) return null;
+        const item = await r.json();
+        return buildViewUrl(item);
+    } catch {
+        return null;
+    }
+}
+
 // ── Primary node tracking ─────────────────────────────────────────────────────
 
 // nodeId string of the current primary node, or null.
@@ -172,6 +183,14 @@ const VIEWER_CSS = `
 .nkd-viewer-root.holding-ref .nkd-refimg{display:block}
 .nkd-ref-badge{position:absolute;top:14px;left:14px;background:rgba(180,32,48,0.92);color:#fff;font:bold 11px monospace;padding:4px 9px;border-radius:4px;pointer-events:none;display:none;z-index:5;letter-spacing:1px;backdrop-filter:blur(4px);}
 .nkd-viewer-root.holding-ref .nkd-ref-badge{display:block}
+.nkd-mask-ov{position:absolute;top:0;left:0;transform-origin:0 0;pointer-events:none;display:none;z-index:2;-webkit-mask-size:100% 100%;mask-size:100% 100%;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;-webkit-mask-mode:luminance;mask-mode:luminance;}
+.nkd-viewer-root.holding-mask .nkd-mask-ov,.nkd-viewer-root.mask-on .nkd-mask-ov{display:block}
+.nkd-mask-ctl{display:flex;gap:6px;align-items:center;}
+.nkd-btn-mask{user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
+.nkd-btn-mask:hover{background:rgba(72,40,48,0.96);color:#fff}
+.nkd-btn-mask.active{background:rgba(180,32,48,0.95);color:#fff}
+.nkd-mask-color{width:26px;height:26px;padding:0;border:1px solid rgba(255,255,255,0.2);border-radius:6px;background:none;cursor:pointer;}
+.nkd-mask-op{width:80px;cursor:pointer;}
 .nkd-bar,.nkd-btn-close,.nkd-btn-hold{opacity:0;transition:opacity 0.25s;}
 .nkd-viewer-root:hover .nkd-bar,.nkd-viewer-root:hover .nkd-btn-close,.nkd-viewer-root:hover .nkd-btn-hold{opacity:1}
 .nkd-bar{position:absolute;bottom:18px;right:18px;display:flex;gap:8px;z-index:6;}
@@ -191,10 +210,11 @@ const VIEWER_CSS = `
 `;
 
 function createViewerDOM(opts = {}) {
-    const { refUrl = null, apiBase = null, onQueue = null } = opts;
+    const { refUrl = null, maskUrl = null, apiBase = null, onQueue = null } = opts;
     // imgMeta is mutable — caller can update via root._nkdSetMeta(meta)
     let imgMeta = opts.imgMeta || null;
     const compareMode = !!refUrl;
+    const maskMode = !!maskUrl;
 
     // Inject CSS once into the host document.
     const styleId = "nkd-viewer-style";
@@ -213,6 +233,7 @@ function createViewerDOM(opts = {}) {
         <div class="nkd-vwrap">
             <img class="nkd-vimg" alt="" draggable="false">
             <img class="nkd-refimg" alt="" draggable="false">
+            <div class="nkd-mask-ov"></div>
             <div class="nkd-empty">
                 <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <rect x="8" y="12" width="48" height="40" rx="4" stroke="currentColor" stroke-width="2.5"/>
@@ -232,6 +253,11 @@ function createViewerDOM(opts = {}) {
             <button class="nkd-btn-100 nkd-vbtn">1:1 Pixel</button>
             <button class="nkd-btn-adj nkd-vbtn">&#x2921; Fit Window</button>
             <button class="nkd-btn-save nkd-vbtn">&#x1F4BE; Save</button>
+            <span class="nkd-mask-ctl" style="display:${maskMode ? '' : 'none'}">
+                <button class="nkd-btn-mask nkd-vbtn" title="Toggle the reference mask overlay — hold M to peek">&#x25A6; Mask</button>
+                <input type="color" class="nkd-mask-color" title="Overlay colour">
+                <input type="range" class="nkd-mask-op" min="5" max="100" title="Overlay opacity">
+            </span>
         </div>`;
 
     const wrap    = root.querySelector(".nkd-vwrap");
@@ -240,6 +266,7 @@ function createViewerDOM(opts = {}) {
     const empty   = root.querySelector(".nkd-empty");
     const dims    = root.querySelector(".nkd-dims");
     const btnHold = root.querySelector(".nkd-btn-hold");
+    const maskOv  = root.querySelector(".nkd-mask-ov");
 
     let scale = 1, tx = 0, ty = 0, fitScale = 1;
     let panning = false, sx = 0, sy = 0, stx = 0, sty = 0;
@@ -249,6 +276,17 @@ function createViewerDOM(opts = {}) {
         img.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`;
         img.style.imageRendering = rendering;
         if (compareMode) applyRefTransform(rendering);
+        if (maskMode) applyMaskTransform();
+    }
+
+    // Overlay the mask 1:1 over the current image's box (it's expected to match
+    // the image resolution; mask-size:100% stretches to fit if it doesn't).
+    function applyMaskTransform() {
+        const nw = img.naturalWidth, nh = img.naturalHeight;
+        if (!nw || !nh) return;
+        maskOv.style.width  = nw + "px";
+        maskOv.style.height = nh + "px";
+        maskOv.style.transform = img.style.transform;
     }
 
     function applyRefTransform(rendering) {
@@ -312,6 +350,40 @@ function createViewerDOM(opts = {}) {
             e.preventDefault(); showRef();
         });
         document.addEventListener("keyup", e => { if (e.code === "Space") { e.preventDefault(); showCur(); } });
+    }
+
+    // Mask overlay: press-and-hold (button or M) to tint the masked region over
+    // the current image, with adjustable colour + opacity (persisted).
+    if (maskMode) {
+        const btnMask   = root.querySelector(".nkd-btn-mask");
+        const colorIn   = root.querySelector(".nkd-mask-color");
+        const opIn      = root.querySelector(".nkd-mask-op");
+        maskOv.style.webkitMaskImage = `url("${maskUrl}")`;
+        maskOv.style.maskImage       = `url("${maskUrl}")`;
+
+        colorIn.value = localStorage.getItem("nkd_mask_color") || "#ff2f38";
+        opIn.value    = localStorage.getItem("nkd_mask_op")    || "50";
+        const styleMask = () => { maskOv.style.backgroundColor = colorIn.value; maskOv.style.opacity = String(opIn.value / 100); };
+        styleMask();
+        colorIn.addEventListener("input", () => { styleMask(); localStorage.setItem("nkd_mask_color", colorIn.value); });
+        opIn.addEventListener("input",    () => { styleMask(); localStorage.setItem("nkd_mask_op",    opIn.value); });
+
+        // Button = persistent toggle; M = momentary peek (independent of the toggle).
+        let maskOn = false;
+        const setToggle = (on) => { maskOn = on; root.classList.toggle("mask-on", on); btnMask.classList.toggle("active", on); if (on) applyMaskTransform(); };
+        btnMask.addEventListener("click", () => setToggle(!maskOn));
+
+        let peeking = false;
+        const peekOn  = () => { if (peeking) return; peeking = true;  applyMaskTransform(); root.classList.add("holding-mask"); };
+        const peekOff = () => { if (!peeking) return; peeking = false; root.classList.remove("holding-mask"); };
+        root.addEventListener("blur", peekOff);
+        document.addEventListener("keydown", e => {
+            if ((e.key !== "m" && e.key !== "M") || e.repeat) return;
+            const tag = document.activeElement?.tagName;
+            if (tag === "INPUT" || tag === "TEXTAREA") return;
+            e.preventDefault(); peekOn();
+        });
+        document.addEventListener("keyup", e => { if (e.key === "m" || e.key === "M") { e.preventDefault(); peekOff(); } });
     }
 
     // Fit Window button — resizes the panel (floating mode) or the OS window (popup mode)
@@ -433,6 +505,7 @@ class PopupWin {
         this._opening           = false;
         this._pipMode           = false; // true when the window is a Document PiP
         this._refUrl            = null;  // when set, viewer opens in compare mode
+        this._maskUrl           = null;  // when set, viewer offers mask overlay
         this._container         = null;  // live DOM element (bEpic pattern)
         this._livePreviewHandler = null; // b_preview_with_metadata listener
     }
@@ -484,7 +557,7 @@ class PopupWin {
             if (!this._pipMode) this.win.focus();
             return;
         }
-        this._refUrl = await getReferenceUrl();
+        [this._refUrl, this._maskUrl] = await Promise.all([getReferenceUrl(), getReferenceMaskUrl()]);
         this._openViewer();
     }
 
@@ -644,6 +717,7 @@ class PopupWin {
         // ── Viewer DOM (pan/zoom/save/etc.) ───────────────────────────────────
         const container = createViewerDOM({
             refUrl:  this._refUrl,
+            maskUrl: this._maskUrl,
             imgMeta: this.currentMeta,
             apiBase: location.origin,
             onQueue: () => this._queueOwnNode(),
@@ -850,6 +924,9 @@ class PopupWin {
             if (this._refUrl) {
                 pipWin.__nkd_ref_url = this._refUrl;
             }
+            if (this._maskUrl) {
+                pipWin.__nkd_mask_url = this._maskUrl;
+            }
             // Hand off image metadata for the save panel.
             if (this.currentMeta) {
                 pipWin.__nkd_img_meta = this.currentMeta;
@@ -908,6 +985,9 @@ class PopupWin {
         if (this._refUrl) {
             qpInit.ref     = this._refUrl;
             qpInit.compare = "1";
+        }
+        if (this._maskUrl) {
+            qpInit.mask = this._maskUrl;
         }
         if (this.currentMeta) {
             qpInit.meta_filename  = this.currentMeta.filename;

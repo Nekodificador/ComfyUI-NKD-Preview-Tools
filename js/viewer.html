@@ -37,6 +37,20 @@ body.holding-ref #ref-img{display:block}
     letter-spacing:1px;backdrop-filter:blur(4px);
 }
 body.holding-ref #ref-badge{display:block}
+#mask-ov{
+    position:absolute;top:0;left:0;transform-origin:0 0;
+    pointer-events:none;display:none;z-index:2;
+    -webkit-mask-size:100% 100%;mask-size:100% 100%;
+    -webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
+    -webkit-mask-mode:luminance;mask-mode:luminance;
+}
+body.holding-mask #mask-ov,body.mask-on #mask-ov{display:block}
+#mask-ctl{display:flex;gap:6px;align-items:center;}
+#btn-mask{user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
+#btn-mask:hover{background:rgba(72,40,48,0.96);color:#fff}
+#btn-mask.active{background:rgba(180,32,48,0.95);color:#fff}
+#mask-color{width:26px;height:26px;padding:0;border:1px solid rgba(255,255,255,0.2);border-radius:6px;background:none;cursor:pointer;}
+#mask-op{width:80px;cursor:pointer;}
 #btn-hold{
     position:fixed;bottom:18px;left:18px;
     z-index:6;user-select:none;
@@ -90,6 +104,7 @@ body:hover #btn-hold{opacity:1}
 <div id="wrap">
   <img id="img" alt="" draggable="false">
   <img id="ref-img" alt="" draggable="false">
+  <div id="mask-ov"></div>
   <div id="empty-state">
     <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
       <rect x="8" y="12" width="48" height="40" rx="4" stroke="currentColor" stroke-width="2.5"/>
@@ -109,6 +124,11 @@ body:hover #btn-hold{opacity:1}
   <button id="btn-100" class="vbtn" title="Actual Size (1)">1:1 Pixel</button>
   <button id="btn-adjust" class="vbtn" title="Fit window to image size">&#x2921; Fit Window</button>
   <button id="btn-save" class="vbtn" title="Save image (S)">&#x1F4BE; Save</button>
+  <span id="mask-ctl" style="display:none">
+    <button id="btn-mask" class="vbtn" title="Toggle the reference mask overlay — hold M to peek">&#x25A6; Mask</button>
+    <input type="color" id="mask-color" title="Overlay colour">
+    <input type="range" id="mask-op" min="5" max="100" title="Overlay opacity">
+  </span>
 </div>
 <script>
 (function () {
@@ -120,6 +140,10 @@ body:hover #btn-hold{opacity:1}
     const refUrl = (typeof window.__nkd_ref_url === "string" && window.__nkd_ref_url)
                    || params.get("ref") || "";
     const compareMode = (params.get("compare") === "1" || !!window.__nkd_ref_url) && !!refUrl;
+    // Reference mask overlay: PiP path stashes the URL on window; popup path uses query.
+    const maskUrl = (typeof window.__nkd_mask_url === "string" && window.__nkd_mask_url)
+                    || params.get("mask") || "";
+    const maskMode = !!maskUrl;
     document.title = initTitle;
 
     // Image metadata (filename/type/subfolder) for server-side save.
@@ -137,6 +161,7 @@ body:hover #btn-hold{opacity:1}
     const wrap = document.getElementById("wrap");
     const dims = document.getElementById("dims");
     const btnHold = document.getElementById("btn-hold");
+    const maskOv = document.getElementById("mask-ov");
 
     let scale = 1, tx = 0, ty = 0, fitScale = 1;
     let panning = false, sx = 0, sy = 0, stx = 0, sty = 0;
@@ -146,6 +171,17 @@ body:hover #btn-hold{opacity:1}
         img.style.transform = "translate("+tx+"px,"+ty+"px) scale("+scale+")";
         img.style.imageRendering = rendering;
         if (compareMode) applyRefTransform(rendering);
+        if (maskMode) applyMaskTransform();
+    }
+
+    // Overlay the mask 1:1 over the current image's box (mask-size:100% stretches
+    // to fit if its resolution differs from the image).
+    function applyMaskTransform() {
+        var nw = img.naturalWidth, nh = img.naturalHeight;
+        if (!nw || !nh) return;
+        maskOv.style.width  = nw + "px";
+        maskOv.style.height = nh + "px";
+        maskOv.style.transform = img.style.transform;
     }
 
     /** Match the reference to the current image's display box.
@@ -373,6 +409,47 @@ body:hover #btn-hold{opacity:1}
             if (e.code !== "Space") return;
             e.preventDefault();
             showCur();
+        });
+    }
+
+    // ── Mask overlay (press-and-hold M / button; colour + opacity) ───────────
+    if (maskMode) {
+        const maskCtl = document.getElementById("mask-ctl");
+        const btnMask = document.getElementById("btn-mask");
+        const colorIn = document.getElementById("mask-color");
+        const opIn    = document.getElementById("mask-op");
+        maskCtl.style.display = "";
+        maskOv.style.webkitMaskImage = 'url("' + maskUrl + '")';
+        maskOv.style.maskImage       = 'url("' + maskUrl + '")';
+
+        colorIn.value = localStorage.getItem("nkd_mask_color") || "#ff2f38";
+        opIn.value    = localStorage.getItem("nkd_mask_op")    || "50";
+        const styleMask = () => { maskOv.style.backgroundColor = colorIn.value; maskOv.style.opacity = String(opIn.value / 100); };
+        styleMask();
+        colorIn.addEventListener("input", () => { styleMask(); localStorage.setItem("nkd_mask_color", colorIn.value); });
+        opIn.addEventListener("input",    () => { styleMask(); localStorage.setItem("nkd_mask_op",    opIn.value); });
+
+        // Button = persistent toggle; M = momentary peek (independent of the toggle).
+        let maskOn = false;
+        const setToggle = (on) => { maskOn = on; document.body.classList.toggle("mask-on", on); btnMask.classList.toggle("active", on); if (on) applyMaskTransform(); };
+        btnMask.addEventListener("click", () => setToggle(!maskOn));
+
+        let peeking = false;
+        const peekOn  = () => { if (peeking) return; peeking = true;  applyMaskTransform(); document.body.classList.add("holding-mask"); };
+        const peekOff = () => { if (!peeking) return; peeking = false; document.body.classList.remove("holding-mask"); };
+        window.addEventListener("blur", peekOff);
+
+        document.addEventListener("keydown", e => {
+            if ((e.key !== "m" && e.key !== "M") || e.repeat) return;
+            const tag = document.activeElement?.tagName;
+            if (tag === "INPUT" || tag === "TEXTAREA") return;
+            e.preventDefault();
+            peekOn();
+        });
+        document.addEventListener("keyup", e => {
+            if (e.key !== "m" && e.key !== "M") return;
+            e.preventDefault();
+            peekOff();
         });
     }
 }());
