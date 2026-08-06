@@ -1,23 +1,24 @@
 # ComfyUI NKD Preview Tools
 
-A small set of preview and masking tools for [ComfyUI](https://github.com/comfyanonymous/ComfyUI):
+Preview tools for [ComfyUI](https://github.com/comfyanonymous/ComfyUI):
 
 - **NKD Popup Preview** — preview generated images in a persistent floating popup window, ideal for multi-monitor setups.
-- **NKD Mask Painter** — paint a mask on top of any procedural image and pipe both the image and the mask downstream. Drop-in replacement for Impact Pack's Preview Bridge with a few extras.
 
 
 https://github.com/user-attachments/assets/e52f40df-36a2-4027-8f7b-1e987ed2615f
+
+## Mask Painter has moved
+
+**NKD Mask Painter now lives in [NKD Basic Tools](https://github.com/Nekodificador/ComfyUI-NKD-Basic-Tools)**,
+next to the other mask nodes. Install that pack and the node comes back exactly where your
+workflows expect it — same node, same painted masks, nothing to redo. This pack is for
+viewing from now on.
 
 ## Updates!
 
 I’ve added a "set primary" state that lets you use multiple popup previews in the same workflow. Once you’ve set one as the primary node, you can trigger its output with a shortcut or call up the preview from anywhere in the UI. This means you can queue only what you're actually previewing on a second monitor or floating window, without having to scroll back and forth from the middle of nowhere.
 
 https://github.com/user-attachments/assets/75a9a3de-9ded-4d41-95f2-3de4421d63ac
-
-## The new node: Mask Painter
-
-https://github.com/user-attachments/assets/fea39b77-1e47-4006-ba7f-51197db0f106
-
 
 ## 🌟 Features
 
@@ -26,26 +27,6 @@ https://github.com/user-attachments/assets/fea39b77-1e47-4006-ba7f-51197db0f106
 - **Multi-Monitor Support**: Drag the preview popup to any monitor you prefer.
 - **Fullscreen Mode**: Maximize the popup to preview images without any UI distractions.
 - **Unobtrusive**: Cleanly integrates into your workflow without taking up space on your main ComfyUI canvas.
-
-### NKD Mask Painter
-- **Bridge node**: accepts any `IMAGE` upstream — no need to duplicate `Load Image` to paint a mask.
-- **Native mask editor integration**: opens the same painting UI as Preview Bridge / Load Image.
-- **Three outputs**: `IMAGE` (passthrough), `MASK` and `MASK (inverted)`.
-- **Optional `mask` input**: feed any mask from upstream as a starting point — it is fused into the editor canvas so you can refine it by adding or erasing parts. All blend modes only act when the upstream mask content actually changes, so a noisy queue never disturbs your edits. The `mask_input_mode` combo uses VFX/compositing vocabulary:
-  - `Use as start` (default): import only if the node has no painted mask yet. After that, your manual edits stick even if the upstream mask changes.
-  - `Replace`: overwrite your painted mask with upstream every time it changes.
-  - `Add`: union — adds the upstream mask to whatever you painted.
-  - `Subtract`: removes the upstream mask from yours. Useful for excluding regions marked by upstream.
-  - `Intersect`: keeps only the area where painted and upstream masks overlap.
-  - `Disconnected`: input connected but ignored.
-- **Persistent across restarts**: painted masks are mirrored to `input/nkd_masks/` so they survive temp cleanup and ComfyUI restarts.
-- **Edit / Clear / Reseed** button row:
-  - `Edit` opens the native mask editor.
-  - `Clear` wipes the painted mask, refreshes the node preview, and re-runs the node so downstream consumers immediately see the cleared mask.
-  - `Reseed` arms the node to re-apply the current `mask_input_mode` operation against the upstream mask on the next Run (useful when you want to re-blend without changing upstream). See the example below.
-- **Visual feedback**: the node turns green when it carries a non-empty mask.
-- **`on_image_change`** combo: choose `clear_mask` (default) to wipe the mask when the upstream image changes, or `keep_mask` to preserve it.
-- **One mask per node**: instantiate multiple Mask Painter nodes from the same image to paint independent masks.
 
 ## 🛠️ Installation
 
@@ -72,38 +53,6 @@ https://github.com/user-attachments/assets/fea39b77-1e47-4006-ba7f-51197db0f106
 4. Connect any valid `IMAGE` output (for example, from a *VAE Decode* node) to the `image` input socket.
 5. Click **Queue Prompt**. The pop-up window will open automatically and display the generated image.
 
-### NKD Mask Painter
-
-1. Add the node under **`NKD Nodes/Masking` -> `NKD Mask Painter`**.
-2. Connect any `IMAGE` source (procedural or `Load Image`) to the `images` input.
-3. Click **Queue Prompt** once so the node loads the image.
-4. Click **Edit** to open the native mask editor. Paint, then **Save & Close**.
-5. Click **Queue Prompt** again — `MASK` and `MASK (inverted)` are now populated.
-6. The node preview shows the image with the painted area as transparency (the same way Preview Bridge does it).
-7. Click **Clear** at any time to wipe the mask. The node re-runs automatically so any downstream nodes also see the cleared mask.
-8. With a `mask` connected upstream, click **Reseed** then **Run** to re-apply the current `mask_input_mode` operation against the upstream mask without changing upstream.
-
-For multiple independent masks of the same image, instantiate the Mask Painter node several times.
-
-#### Clear vs Reseed — what's the difference?
-
-Both buttons interact with mask state, but they do different things:
-
-| | **Painted mask** | **Upstream `mask` input** | **Use when…** |
-|---|---|---|---|
-| **Clear** | Wiped | Forgotten (re-imported on next Run) | You want to start over from scratch. |
-| **Reseed** | Kept | Forgotten (re-applied on next Run) | You want to re-blend the upstream mask into your current painted mask. |
-
-**Example with `mask_input_mode = Add`:**
-
-1. Connect a face-detector node to `mask`. Run.
-2. The painter shows the detected face mask. You paint over an extra region by hand.
-3. You manually erase the original face area in the editor (Edit → erase → Save).
-4. The next Run will not re-add the face, because the upstream mask hasn't changed (its fingerprint matches the cached one). Your edits are preserved across executions — that is the intended behaviour.
-5. To pull the face back in, click **Reseed** then **Run**: the upstream mask is treated as freshly arrived and re-applied via `Add`, without losing the rest of your painted mask. **Clear** would wipe everything you painted, so it's the wrong tool here.
-
 ## 📝 Troubleshooting
 
 - **Pop-up Blocker** (Popup Preview): Your web browser might block the window from opening the first time you use this node. If this happens, please check your browser's address bar and make sure to **allow pop-ups** for the URL or localhost where ComfyUI is running.
-- **Mask not appearing in preview** (Mask Painter): the node thumbnail uses transparency (checkerboard) to represent the mask. If you only see the RGB image, the mask is empty.
-- **Mask seems to disappear after a restart** (Mask Painter): masks are restored from `input/nkd_masks/<node_id>_mask.png` on the first queue after restart. Hit **Queue Prompt** to refresh.
