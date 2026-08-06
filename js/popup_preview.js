@@ -1485,8 +1485,13 @@ app.registerExtension({
         // b_preview_with_metadata is dispatched on the bundle's internal ComfyApi
         // instance, not the one exported by /scripts/api.js. Intercept via WebSocket.
         // The socket is created after setup(), so we wait for it.
+        let attachedSocket = null;
         const attachWsPreview = () => {
             if (!api.socket || api.socket.readyState !== WebSocket.OPEN) return false;
+            // Bind once per socket instance. ComfyUI swaps api.socket for a fresh
+            // object on every reconnect, so the guard lets us re-bind to the new one.
+            if (api.socket === attachedSocket) return true;
+            attachedSocket = api.socket;
             api.socket.addEventListener("message", (e) => {
                 if (!(e.data instanceof ArrayBuffer)) return;
                 const view = new DataView(e.data);
@@ -1555,6 +1560,9 @@ app.registerExtension({
         if (!attachWsPreview()) {
             const poll = setInterval(() => { if (attachWsPreview()) clearInterval(poll); }, 300);
         }
+        // On reconnect api.socket is replaced and our message listener dies with
+        // the old socket — re-bind so live preview survives dropped connections.
+        api.addEventListener("reconnected", () => attachWsPreview());
     },
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
