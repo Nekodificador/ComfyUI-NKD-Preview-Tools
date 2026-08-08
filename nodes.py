@@ -14,7 +14,7 @@ from typing_extensions import override
 # Import a nivel de MÓDULO, no dentro de get_node_list: nkd_timeline registra su ruta
 # aiohttp al importarse, y get_node_list se ejecuta cuando la tabla de rutas ya está
 # cerrada — la ruta se perdía en silencio.
-from .nkd_timeline import NKDTimeline  # noqa: E402
+from .nkd_timeline import NKDFreezeFrames, NKDTimeline  # noqa: E402
 
 
 # Single active reference image for the workflow ("wireless" compare source).
@@ -169,7 +169,8 @@ class NKDPopupPreviewNode(io.ComfyNode):
 class NKDExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [NKDPopupPreviewNode, NKDReferenceImage, NKDTimeline]
+        return [NKDPopupPreviewNode, NKDReferenceImage, NKDTimeline,
+                NKDFreezeFrames]
 
 async def comfy_entrypoint() -> NKDExtension:
     return NKDExtension()

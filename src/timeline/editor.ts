@@ -20,7 +20,7 @@ import {
   clampClipsToSources, clipExtent, nativeFpsFor, newId, slotInUse, trimToPlayhead,
   placementFor, quantizeStops, setTrackBlend, slipClip, snap, snapCandidates,
   MAX_ZOOM, snapFrameToGrid, sortClips, sourceFrame, timelineSpan, trackBlend, trimEnd,
-  trimStart, viewWindow,
+  trimStart, viewWindow, markerFrames, toggleMarker,
 } from "./model";
 import {
   type MediaInfo, type MediaRef,
@@ -90,6 +90,10 @@ const C = {
   maskFill: "#3a3f45",
   maskHead: "#565d66",
   clipName: "#e8f2f8",
+  // Freeze-frame markers. Green, because every other signal on a clip is already blue
+  // (selection), amber (hover/gaps) or red (active drag).
+  marker: "#7bd88f",
+  markerLine: "rgba(123,216,143,0.55)",
   outside: "rgba(0,0,0,0.55)",
   gap: "rgba(255,209,102,0.07)",
 } as const;
@@ -126,7 +130,7 @@ type Lane = "video" | "mask" | "audio";
 /** Actions whose key can be rebound in ComfyUI settings. The transport (space, J/K/L)
  *  and the in/out marks (I/O) are the same in every editor, so they stay fixed. */
 export type KeyAction =
-  | "trimHead" | "trimTail" | "markIn" | "markOut" | "markClip" | "zoomFit";
+  | "trimHead" | "trimTail" | "markIn" | "markOut" | "markClip" | "zoomFit" | "marker";
 
 type Hit =
   | { kind: "none" }
@@ -730,6 +734,17 @@ export class TimelineEditor {
           },
         });
       }
+      if (c.markers?.length) {
+        // A stray marker on a long clip is hard to find and therefore hard to un-toggle.
+        items.push({
+          label: `Clear ${c.markers.length} marker${c.markers.length > 1 ? "s" : ""}`,
+          on: () => {
+            this.pushUndo();
+            delete c.markers;
+            this.host.commit();
+          },
+        });
+      }
       items.push({ label: "Delete", on: () => { this.select(c); this.deleteSelected(); } });
     }
 
@@ -821,7 +836,11 @@ export class TimelineEditor {
     const bound = (action: KeyAction, fallback: string) =>
       key === this.host.getKey(action, fallback);
     let handled = true;
-    if (bound("trimHead", "q")) this.trimEdgeToPlayhead("start");
+    // Shift+M first: M is the marker key in every NLE, so the marker gets the bare letter
+    // and the mask overlay - which also has a button - moves up a modifier.
+    if (key === "m" && e.shiftKey) this.toggleMaskOverlay();
+    else if (bound("marker", "m")) this.toggleMarkerAtPlayhead();
+    else if (bound("trimHead", "q")) this.trimEdgeToPlayhead("start");
     else if (bound("trimTail", "e")) this.trimEdgeToPlayhead("end");
     else if (bound("markIn", "i")) this.setIn(this.playhead);
     else if (bound("markOut", "o")) this.setOut(this.playhead);
@@ -835,7 +854,6 @@ export class TimelineEditor {
       case "l": this.transport.shuttle(1); break;
       case "delete":
       case "backspace": this.deleteSelected(); break;
-      case "m": this.toggleMaskOverlay(); break;
       case "=":
       case "+": this.zoomBy(1.6, this.playhead); break;
       case "-": this.zoomBy(1 / 1.6, this.playhead); break;
@@ -912,6 +930,34 @@ export class TimelineEditor {
     this.host.setStartFrame(at.start);
     this.host.setFrameCount(Math.max(1, at.end - at.start));
     this.host.commit();
+  }
+
+  /**
+   * Drop or lift a freeze-frame marker at the playhead - Resolve's M.
+   *
+   * With a selection it marks those clips, so a marker can be put on a mask or an audio
+   * clip too; with nothing selected it takes the TOPMOST picture clip, which is the one
+   * whose frame the monitor is actually showing. Marking every layer under the playhead
+   * would be pointless: they all resolve to the same output frame anyway.
+   */
+  private toggleMarkerAtPlayhead(): void {
+    const f = this.playhead;
+    let targets: Clip[];
+    if (this.selection.size) {
+      targets = [this.tl.clips, this.tl.masks, this.tl.audio as unknown as Clip[]]
+        .flat().filter((c) => this.selection.has(c.id));
+    } else {
+      targets = clipsAt(this.tl, f).slice(0, 1);
+    }
+    this.pushUndo();
+    let changed = false;
+    for (const c of targets) changed = toggleMarker(c, f) || changed;
+    if (!changed) {
+      this.undoStack.pop();       // playhead off the clip: leave no empty undo behind
+      return;
+    }
+    this.host.commit();
+    this.requestRender();
   }
 
   private setIn(frame: number): void {
@@ -1453,6 +1499,7 @@ export class TimelineEditor {
     if (lane !== "mask" && w > 44 && h > CLIP_HEAD_H) {
       this.drawSpeaker(ctx, x + w - MUTE_BOX, y, !!c.muted, isHover);
     }
+    this.drawMarkers(ctx, c, y, h);
     // Plus a wash over the body, the way an NLE marks a selection.
     if (selected) {
       ctx.fillStyle = "rgba(74,180,255,0.16)";
@@ -1476,6 +1523,29 @@ export class TimelineEditor {
       : isHover ? C.hover : C.clipEdge;
     ctx.lineWidth = isDrag || selected || isHover ? 2 : 1;
     ctx.stroke();
+  }
+
+  /**
+   * Freeze-frame markers: a pennant on the clip's head band plus a hairline down the body,
+   * so a marked frame is findable at any zoom without hunting for a 1px tick.
+   *
+   * Called from inside `drawClip`'s clip region, so a marker never bleeds past its clip.
+   */
+  private drawMarkers(ctx: CanvasRenderingContext2D, c: Clip, y: number, h: number): void {
+    if (!c.markers?.length) return;
+    const head = h > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : h;
+    for (const m of c.markers) {
+      const mx = Math.round(this.xOf(c.start + m)) + 0.5;
+      ctx.fillStyle = C.markerLine;
+      ctx.fillRect(mx, y + head, 1, h - head);
+      ctx.fillStyle = C.marker;
+      ctx.beginPath();
+      ctx.moveTo(mx - 4, y);
+      ctx.lineTo(mx + 4, y);
+      ctx.lineTo(mx, y + Math.min(7, head));
+      ctx.closePath();
+      ctx.fill();
+    }
   }
 
   /**
@@ -1745,8 +1815,14 @@ export class TimelineEditor {
     const q = mode !== QUANTIZE_FREE && raw !== count ? ` (${raw}→${count})` : "";
     const shuttle = Math.abs(rate) > 1 || rate < 0 ? ` · ${rate > 0 ? "" : "-"}${Math.abs(rate)}x` : "";
     const sel = this.selection.size ? ` · ${this.selection.size} selected` : "";
+    // Markers only count once they land inside the rendered range - the same filter the
+    // backend applies - so the readout matches the string that comes out of the node.
+    const start = this.host.getStartFrame();
+    const marks = markerFrames(this.tl)
+      .filter((f) => f >= start && f < start + count).length;
+    const mk = marks ? ` · ${marks} marker${marks > 1 ? "s" : ""}` : "";
     this.status.textContent =
-      `f ${this.playhead}${shuttle}${sel} · ${count} frames${q} · ${secs.toFixed(2)}s @ ${fps} fps`;
+      `f ${this.playhead}${shuttle}${sel}${mk} · ${count} frames${q} · ${secs.toFixed(2)}s @ ${fps} fps`;
   }
 
   destroy(): void {

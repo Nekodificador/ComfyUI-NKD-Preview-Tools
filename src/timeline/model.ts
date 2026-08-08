@@ -21,6 +21,15 @@ export type Clip = {
   length: number;   // duration in timeline frames
   /** Silences this clip's own audio. Only meaningful where there is any. */
   muted?: boolean;
+  /**
+   * Freeze-frame markers, as offsets from `start` in TIMELINE frames, sorted and unique.
+   *
+   * Anchored to the CLIP, not to the timeline: the point of a marker is "this exact frame
+   * of this material", so moving the clip carries them along and the frozen picture does
+   * not change. Trimming and slipping adjust them for the same reason - see
+   * `shiftMarkers`/`pruneMarkers`.
+   */
+  markers?: number[];
 };
 
 export type AudioClip = {
@@ -194,6 +203,62 @@ export function quantizeStops(max: number, mode: QuantizeMode, k = 8): number[] 
   return stops;
 }
 
+// ── Freeze-frame markers ──────────────────────────────────────────────────────
+
+/** Sorted, unique, inside `[0, length)`. The single gatekeeper: everything that touches
+ *  markers goes through here, so no other code has to remember the invariant. */
+function cleanMarkers(raw: unknown, length: number): number[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<number>();
+  for (const m of raw) {
+    const v = int(m, -1);
+    if (v >= 0 && v < length) seen.add(v);
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+
+/** Drop markers that a trim or a source change pushed outside the clip. */
+export function pruneMarkers(clip: Clip): void {
+  if (!clip.markers) return;
+  const kept = cleanMarkers(clip.markers, clip.length);
+  if (kept.length) clip.markers = kept;
+  else delete clip.markers;
+}
+
+/** Slide markers by `delta` clip-local frames, then prune. Used wherever the content
+ *  moves under a fixed clip window (head trim, slip) so a marker keeps pointing at the
+ *  picture it was put on rather than at a position. */
+export function shiftMarkers(clip: Clip, delta: number): void {
+  if (!clip.markers || !delta) return;
+  clip.markers = clip.markers.map((m) => m - Math.round(delta));
+  pruneMarkers(clip);
+}
+
+/** Add or remove a marker at absolute timeline frame `f`. False if `f` is off the clip. */
+export function toggleMarker(clip: Clip, f: number): boolean {
+  const off = Math.round(f) - clip.start;
+  if (off < 0 || off >= clip.length) return false;
+  const next = (clip.markers ?? []).filter((m) => m !== off);
+  if (next.length === (clip.markers?.length ?? 0)) next.push(off);
+  clip.markers = next.sort((a, b) => a - b);
+  if (!clip.markers.length) delete clip.markers;
+  return true;
+}
+
+/**
+ * Every marker as an ABSOLUTE timeline frame, sorted and deduplicated.
+ *
+ * Across every lane: a clip reinterpreted as a mask keeps the markers it was given, and
+ * two stacked clips marked at the same instant are one output frame, not two.
+ */
+export function markerFrames(t: Timeline): number[] {
+  const out = new Set<number>();
+  for (const lane of allLanes(t)) {
+    for (const c of lane) for (const m of c.markers ?? []) out.add(c.start + m);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
 // ── Defensive parsing ─────────────────────────────────────────────────────────
 
 function parseClipList(raw: any): Clip[] {
@@ -203,6 +268,7 @@ function parseClipList(raw: any): Clip[] {
     if (!c || typeof c !== "object" || !c.src) continue;
     const length = int(c.length);
     if (length <= 0) continue;
+    const markers = cleanMarkers(c.markers, length);
     out.push({
       id: typeof c.id === "string" && c.id ? c.id : newId(),
       src: String(c.src),
@@ -211,6 +277,7 @@ function parseClipList(raw: any): Clip[] {
       trimIn: Math.max(0, int(c.trimIn)),
       length,
       ...(c.muted ? { muted: true } : {}),
+      ...(markers.length ? { markers } : {}),
     });
   }
   return out;
@@ -269,6 +336,7 @@ export function serialiseTimeline(t: Timeline): string {
     id: c.id, src: c.src, track: c.track,
     start: c.start, trimIn: c.trimIn, length: c.length,
     ...(c.muted ? { muted: true } : {}),   // omitted when false: keeps the JSON small
+    ...(c.markers?.length ? { markers: c.markers } : {}),
   });
   return JSON.stringify({
     v: 1,
@@ -422,6 +490,10 @@ export function trimStart(clip: Clip, newStart: number, srcFps: number, fps: num
   clip.trimIn = Math.max(0, clip.trimIn + Math.round(delta * ratio));
   clip.start = s;
   clip.length = end - s;
+  // The clip's origin moved but its content did not, so every marker is now `delta`
+  // frames closer to the head. Without this a head trim would silently slide the freeze
+  // frames onto different pictures.
+  shiftMarkers(clip, delta);
 }
 
 /** Trim the right edge: only the duration changes. */
@@ -432,6 +504,7 @@ export function trimEnd(clip: Clip, newEnd: number, srcFrames: number,
     ? Math.max(1, Math.floor((srcFrames - clip.trimIn) / (ratio || 1)))
     : Number.MAX_SAFE_INTEGER;
   clip.length = Math.max(1, Math.min(Math.round(newEnd) - clip.start, maxLen));
+  pruneMarkers(clip);   // whatever fell off the tail is gone with it
 }
 
 /** Slip: move the content INSIDE the clip without touching position or duration.
@@ -441,7 +514,11 @@ export function slipClip(clip: Clip, deltaFrames: number, srcFrames: number,
   const ratio = fps > 0 ? srcFps / fps : 1;
   const used = Math.ceil(clip.length * ratio);
   const maxTrim = srcFrames > 0 ? Math.max(0, srcFrames - used) : Number.MAX_SAFE_INTEGER;
+  const before = clip.trimIn;
   clip.trimIn = Math.max(0, Math.min(maxTrim, clip.trimIn + Math.round(deltaFrames * ratio)));
+  // Content slid under a stationary window, so a content-anchored marker slides with it -
+  // by the trim actually APPLIED, which the clamps above may have cut short.
+  shiftMarkers(clip, (clip.trimIn - before) / (ratio || 1));
 }
 
 /**
@@ -565,6 +642,7 @@ export function clampClipsToSources(t: Timeline, fps: number,
       const maxLen = Math.max(1, Math.floor((srcFrames - c.trimIn) / (ratio || 1)));
       if (c.length > maxLen) {
         c.length = maxLen;
+        pruneMarkers(c);
         changed = true;
       }
     }

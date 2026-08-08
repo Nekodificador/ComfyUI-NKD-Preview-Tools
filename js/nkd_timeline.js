@@ -7,16 +7,16 @@ const int = (v, d = 0) => {
   const n = Math.round(Number(v));
   return Number.isFinite(n) ? n : d;
 };
-const num = (v, d = 0) => {
+const num$1 = (v, d = 0) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
 };
 const MAX_ZOOM = 400;
 function viewWindow(ui, contentFrames) {
-  const zoom = Math.min(MAX_ZOOM, Math.max(1, num(ui.zoom, 1)));
-  const content = Math.max(2, num(contentFrames, 2));
+  const zoom = Math.min(MAX_ZOOM, Math.max(1, num$1(ui.zoom, 1)));
+  const content = Math.max(2, num$1(contentFrames, 2));
   const frames = Math.max(2, content / zoom);
-  const start = Math.max(0, Math.min(num(ui.scroll, 0), content - frames));
+  const start = Math.max(0, Math.min(num$1(ui.scroll, 0), content - frames));
   return { start, frames };
 }
 const BLEND_MODES = ["normal", "screen", "multiply", "difference"];
@@ -91,6 +91,43 @@ function quantizeStops(max, mode, k = 8) {
   for (let s = firstStop(step, offset); s <= max; s += step) stops.push(s);
   return stops;
 }
+function cleanMarkers(raw, length) {
+  if (!Array.isArray(raw)) return [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const m of raw) {
+    const v = int(m, -1);
+    if (v >= 0 && v < length) seen.add(v);
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+function pruneMarkers(clip) {
+  if (!clip.markers) return;
+  const kept = cleanMarkers(clip.markers, clip.length);
+  if (kept.length) clip.markers = kept;
+  else delete clip.markers;
+}
+function shiftMarkers(clip, delta) {
+  if (!clip.markers || !delta) return;
+  clip.markers = clip.markers.map((m) => m - Math.round(delta));
+  pruneMarkers(clip);
+}
+function toggleMarker(clip, f) {
+  var _a;
+  const off = Math.round(f) - clip.start;
+  if (off < 0 || off >= clip.length) return false;
+  const next = (clip.markers ?? []).filter((m) => m !== off);
+  if (next.length === (((_a = clip.markers) == null ? void 0 : _a.length) ?? 0)) next.push(off);
+  clip.markers = next.sort((a, b) => a - b);
+  if (!clip.markers.length) delete clip.markers;
+  return true;
+}
+function markerFrames(t) {
+  const out = /* @__PURE__ */ new Set();
+  for (const lane of allLanes(t)) {
+    for (const c of lane) for (const m of c.markers ?? []) out.add(c.start + m);
+  }
+  return [...out].sort((a, b) => a - b);
+}
 function parseClipList(raw) {
   const out = [];
   if (!Array.isArray(raw)) return out;
@@ -98,6 +135,7 @@ function parseClipList(raw) {
     if (!c || typeof c !== "object" || !c.src) continue;
     const length = int(c.length);
     if (length <= 0) continue;
+    const markers = cleanMarkers(c.markers, length);
     out.push({
       id: typeof c.id === "string" && c.id ? c.id : newId(),
       src: String(c.src),
@@ -105,7 +143,8 @@ function parseClipList(raw) {
       start: Math.max(0, int(c.start)),
       trimIn: Math.max(0, int(c.trimIn)),
       length,
-      ...c.muted ? { muted: true } : {}
+      ...c.muted ? { muted: true } : {},
+      ...markers.length ? { markers } : {}
     });
   }
   return out;
@@ -138,30 +177,34 @@ function parseTimeline(raw) {
         start: Math.max(0, int(a.start)),
         trimIn: Math.max(0, int(a.trimIn)),
         length,
-        gain: num(a.gain, 1),
+        gain: num$1(a.gain, 1),
         ...a.muted ? { muted: true } : {}
       });
     }
   }
   if (data.ui && typeof data.ui === "object") {
-    out.ui.zoom = Math.min(MAX_ZOOM, Math.max(1, num(data.ui.zoom, 1)));
-    out.ui.scroll = Math.max(0, num(data.ui.scroll, 0));
+    out.ui.zoom = Math.min(MAX_ZOOM, Math.max(1, num$1(data.ui.zoom, 1)));
+    out.ui.scroll = Math.max(0, num$1(data.ui.scroll, 0));
     out.ui.playhead = Math.max(0, int(data.ui.playhead));
   }
   sortClips(out);
   return out;
 }
 function serialiseTimeline(t) {
-  const plain = (c) => ({
-    id: c.id,
-    src: c.src,
-    track: c.track,
-    start: c.start,
-    trimIn: c.trimIn,
-    length: c.length,
-    ...c.muted ? { muted: true } : {}
-    // omitted when false: keeps the JSON small
-  });
+  const plain = (c) => {
+    var _a;
+    return {
+      id: c.id,
+      src: c.src,
+      track: c.track,
+      start: c.start,
+      trimIn: c.trimIn,
+      length: c.length,
+      ...c.muted ? { muted: true } : {},
+      // omitted when false: keeps the JSON small
+      ...((_a = c.markers) == null ? void 0 : _a.length) ? { markers: c.markers } : {}
+    };
+  };
   return JSON.stringify({
     v: 1,
     clips: t.clips.map(plain),
@@ -261,17 +304,21 @@ function trimStart(clip, newStart, srcFps, fps) {
   clip.trimIn = Math.max(0, clip.trimIn + Math.round(delta * ratio));
   clip.start = s;
   clip.length = end - s;
+  shiftMarkers(clip, delta);
 }
 function trimEnd(clip, newEnd, srcFrames, srcFps, fps) {
   const ratio = fps > 0 ? srcFps / fps : 1;
   const maxLen = srcFrames > 0 ? Math.max(1, Math.floor((srcFrames - clip.trimIn) / (ratio || 1))) : Number.MAX_SAFE_INTEGER;
   clip.length = Math.max(1, Math.min(Math.round(newEnd) - clip.start, maxLen));
+  pruneMarkers(clip);
 }
 function slipClip(clip, deltaFrames, srcFrames, srcFps, fps) {
   const ratio = fps > 0 ? srcFps / fps : 1;
   const used = Math.ceil(clip.length * ratio);
   const maxTrim = srcFrames > 0 ? Math.max(0, srcFrames - used) : Number.MAX_SAFE_INTEGER;
+  const before = clip.trimIn;
   clip.trimIn = Math.max(0, Math.min(maxTrim, clip.trimIn + Math.round(deltaFrames * ratio)));
+  shiftMarkers(clip, (clip.trimIn - before) / (ratio || 1));
 }
 function moveClipToLane(t, clip, toMask) {
   const from = toMask ? t.clips : t.masks;
@@ -338,6 +385,7 @@ function clampClipsToSources(t, fps, srcFramesFor, rateFor) {
       const maxLen = Math.max(1, Math.floor((srcFrames - c.trimIn) / (ratio || 1)));
       if (c.length > maxLen) {
         c.length = maxLen;
+        pruneMarkers(c);
         changed = true;
       }
     }
@@ -889,6 +937,10 @@ const C = {
   maskFill: "#3a3f45",
   maskHead: "#565d66",
   clipName: "#e8f2f8",
+  // Freeze-frame markers. Green, because every other signal on a clip is already blue
+  // (selection), amber (hover/gaps) or red (active drag).
+  marker: "#7bd88f",
+  markerLine: "rgba(123,216,143,0.55)",
   outside: "rgba(0,0,0,0.55)",
   gap: "rgba(255,209,102,0.07)"
 };
@@ -1152,6 +1204,7 @@ class TimelineEditor {
      * reinterpreting a black-and-white video as a mask, and setting how its track composites.
      */
     __publicField(this, "onContextMenu", (e) => {
+      var _a;
       e.preventDefault();
       e.stopPropagation();
       const { x, y } = this.localPos(e);
@@ -1166,6 +1219,16 @@ class TimelineEditor {
             on: () => {
               this.pushUndo();
               moveClipToLane(this.tl, c, toMask);
+              this.host.commit();
+            }
+          });
+        }
+        if ((_a = c.markers) == null ? void 0 : _a.length) {
+          items.push({
+            label: `Clear ${c.markers.length} marker${c.markers.length > 1 ? "s" : ""}`,
+            on: () => {
+              this.pushUndo();
+              delete c.markers;
               this.host.commit();
             }
           });
@@ -1213,7 +1276,9 @@ class TimelineEditor {
       const key = e.key.toLowerCase();
       const bound = (action, fallback) => key === this.host.getKey(action, fallback);
       let handled = true;
-      if (bound("trimHead", "q")) this.trimEdgeToPlayhead("start");
+      if (key === "m" && e.shiftKey) this.toggleMaskOverlay();
+      else if (bound("marker", "m")) this.toggleMarkerAtPlayhead();
+      else if (bound("trimHead", "q")) this.trimEdgeToPlayhead("start");
       else if (bound("trimTail", "e")) this.trimEdgeToPlayhead("end");
       else if (bound("markIn", "i")) this.setIn(this.playhead);
       else if (bound("markOut", "o")) this.setOut(this.playhead);
@@ -1236,9 +1301,6 @@ class TimelineEditor {
         case "delete":
         case "backspace":
           this.deleteSelected();
-          break;
-        case "m":
-          this.toggleMaskOverlay();
           break;
         case "=":
         case "+":
@@ -1654,6 +1716,32 @@ class TimelineEditor {
     this.host.setStartFrame(at.start);
     this.host.setFrameCount(Math.max(1, at.end - at.start));
     this.host.commit();
+  }
+  /**
+   * Drop or lift a freeze-frame marker at the playhead - Resolve's M.
+   *
+   * With a selection it marks those clips, so a marker can be put on a mask or an audio
+   * clip too; with nothing selected it takes the TOPMOST picture clip, which is the one
+   * whose frame the monitor is actually showing. Marking every layer under the playhead
+   * would be pointless: they all resolve to the same output frame anyway.
+   */
+  toggleMarkerAtPlayhead() {
+    const f = this.playhead;
+    let targets;
+    if (this.selection.size) {
+      targets = [this.tl.clips, this.tl.masks, this.tl.audio].flat().filter((c) => this.selection.has(c.id));
+    } else {
+      targets = clipsAt(this.tl, f).slice(0, 1);
+    }
+    this.pushUndo();
+    let changed = false;
+    for (const c of targets) changed = toggleMarker(c, f) || changed;
+    if (!changed) {
+      this.undoStack.pop();
+      return;
+    }
+    this.host.commit();
+    this.requestRender();
   }
   setIn(frame) {
     this.pushUndo();
@@ -2135,6 +2223,7 @@ class TimelineEditor {
     if (lane !== "mask" && w > 44 && h > CLIP_HEAD_H) {
       this.drawSpeaker(ctx, x + w - MUTE_BOX, y, !!c.muted, isHover);
     }
+    this.drawMarkers(ctx, c, y, h);
     if (selected) {
       ctx.fillStyle = "rgba(74,180,255,0.16)";
       ctx.fillRect(x, y, w, h);
@@ -2150,6 +2239,29 @@ class TimelineEditor {
     ctx.strokeStyle = isDrag ? C.active : selected ? C.accent : isHover ? C.hover : C.clipEdge;
     ctx.lineWidth = isDrag || selected || isHover ? 2 : 1;
     ctx.stroke();
+  }
+  /**
+   * Freeze-frame markers: a pennant on the clip's head band plus a hairline down the body,
+   * so a marked frame is findable at any zoom without hunting for a 1px tick.
+   *
+   * Called from inside `drawClip`'s clip region, so a marker never bleeds past its clip.
+   */
+  drawMarkers(ctx, c, y, h) {
+    var _a;
+    if (!((_a = c.markers) == null ? void 0 : _a.length)) return;
+    const head = h > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : h;
+    for (const m of c.markers) {
+      const mx = Math.round(this.xOf(c.start + m)) + 0.5;
+      ctx.fillStyle = C.markerLine;
+      ctx.fillRect(mx, y + head, 1, h - head);
+      ctx.fillStyle = C.marker;
+      ctx.beginPath();
+      ctx.moveTo(mx - 4, y);
+      ctx.lineTo(mx + 4, y);
+      ctx.lineTo(mx, y + Math.min(7, head));
+      ctx.closePath();
+      ctx.fill();
+    }
   }
   /**
    * Tile stills along the clip so you can read the shot without playing it.
@@ -2385,7 +2497,10 @@ class TimelineEditor {
     const q = mode !== QUANTIZE_FREE && raw !== count ? ` (${raw}→${count})` : "";
     const shuttle = Math.abs(rate) > 1 || rate < 0 ? ` · ${rate > 0 ? "" : "-"}${Math.abs(rate)}x` : "";
     const sel = this.selection.size ? ` · ${this.selection.size} selected` : "";
-    this.status.textContent = `f ${this.playhead}${shuttle}${sel} · ${count} frames${q} · ${secs.toFixed(2)}s @ ${fps} fps`;
+    const start = this.host.getStartFrame();
+    const marks = markerFrames(this.tl).filter((f) => f >= start && f < start + count).length;
+    const mk = marks ? ` · ${marks} marker${marks > 1 ? "s" : ""}` : "";
+    this.status.textContent = `f ${this.playhead}${shuttle}${sel}${mk} · ${count} frames${q} · ${secs.toFixed(2)}s @ ${fps} fps`;
   }
   destroy() {
     this.disposed = true;
@@ -2481,6 +2596,126 @@ function ensureStyles() {
   el.textContent = CSS;
   document.head.appendChild(el);
 }
+const FREEZE_NODE = "NKDFreezeFrames";
+const FIXED_OUTPUTS = 2;
+const MAX_FRAME_OUTPUTS = 16;
+const widgetValue = (node, name) => {
+  var _a, _b;
+  return (_b = (_a = node == null ? void 0 : node.widgets) == null ? void 0 : _a.find((w) => w.name === name)) == null ? void 0 : _b.value;
+};
+const num = (v, d) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};
+function markerCountOf(timelineNode) {
+  const tl = parseTimeline(widgetValue(timelineNode, "timeline"));
+  const start = Math.max(0, num(widgetValue(timelineNode, "start_frame"), 0));
+  const count = effectiveCount(
+    tl,
+    start,
+    Math.max(0, num(widgetValue(timelineNode, "frame_count"), 0)),
+    String(widgetValue(timelineNode, "quantize") ?? ""),
+    num(widgetValue(timelineNode, "quantize_n"), 8)
+  );
+  return markerFrames(tl).filter((f) => f >= start && f < start + count).length;
+}
+const TIMELINE_NODE = "NKDTimeline";
+function findMarkerSource(node, slotName, depth = 0) {
+  var _a, _b, _c, _d, _e, _f;
+  if (!node || depth > 4) return null;
+  const slot = (_a = node.inputs) == null ? void 0 : _a.find((i) => i.name === slotName);
+  if (!slot || slot.link == null) return null;
+  const link = (_c = (_b = node.graph) == null ? void 0 : _b.links) == null ? void 0 : _c[slot.link];
+  const origin = link && ((_d = node.graph) == null ? void 0 : _d.getNodeById(link.origin_id));
+  if (!origin) return null;
+  if (origin.type === TIMELINE_NODE && ((_f = (_e = origin.outputs) == null ? void 0 : _e[link.origin_slot]) == null ? void 0 : _f.name) === "markers") {
+    return origin;
+  }
+  for (const inp of origin.inputs ?? []) {
+    if (inp.link == null) continue;
+    const up = findMarkerSource(origin, inp.name, depth + 1);
+    if (up) return up;
+  }
+  return null;
+}
+function wantedFrames(node) {
+  var _a;
+  const slot = (_a = node.inputs) == null ? void 0 : _a.find((i) => i.name === "frames");
+  if ((slot == null ? void 0 : slot.link) != null) {
+    const timeline = findMarkerSource(node, "frames");
+    return timeline ? markerCountOf(timeline) : null;
+  }
+  const text = widgetValue(node, "frames");
+  if (typeof text !== "string") return null;
+  return (text.match(/-?\d+/g) ?? []).length;
+}
+function linkedDepth(node) {
+  var _a;
+  let depth = 0;
+  (_a = node.outputs) == null ? void 0 : _a.forEach((o, i) => {
+    var _a2;
+    if (i >= FIXED_OUTPUTS && ((_a2 = o == null ? void 0 : o.links) == null ? void 0 : _a2.length)) depth = Math.max(depth, i + 1);
+  });
+  return depth;
+}
+function syncFreezeOutputs(node) {
+  var _a;
+  if (!(node == null ? void 0 : node.outputs)) return;
+  const n = wantedFrames(node);
+  if (n === null) return;
+  const want = FIXED_OUTPUTS + Math.min(MAX_FRAME_OUTPUTS, Math.max(1, n));
+  const target = Math.max(want, linkedDepth(node));
+  if (node.outputs.length === target) return;
+  while (node.outputs.length > target) node.removeOutput(node.outputs.length - 1);
+  while (node.outputs.length < target) {
+    node.addOutput(`frame_${node.outputs.length - FIXED_OUTPUTS + 1}`, "IMAGE");
+  }
+  (_a = node.setDirtyCanvas) == null ? void 0 : _a.call(node, true, true);
+}
+function syncAllFreezeNodes() {
+  var _a;
+  for (const n of ((_a = app.graph) == null ? void 0 : _a._nodes) ?? []) {
+    if (n.type === FREEZE_NODE) syncFreezeOutputs(n);
+  }
+}
+function registerFreezeFrames() {
+  app.registerExtension({
+    name: "NKD.FreezeFrames",
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+      if ((nodeData == null ? void 0 : nodeData.name) !== FREEZE_NODE) return;
+      if (nodeType.prototype.__nkdFreezeWrapped) return;
+      nodeType.prototype.__nkdFreezeWrapped = true;
+      const origCreated = nodeType.prototype.onNodeCreated;
+      nodeType.prototype.onNodeCreated = function() {
+        var _a;
+        const r = origCreated == null ? void 0 : origCreated.apply(this, arguments);
+        const w = (_a = this.widgets) == null ? void 0 : _a.find((x) => x.name === "frames");
+        if (w) {
+          const origCb = w.callback;
+          w.callback = (...args) => {
+            const out = origCb == null ? void 0 : origCb.apply(w, args);
+            syncFreezeOutputs(this);
+            return out;
+          };
+        }
+        setTimeout(() => syncFreezeOutputs(this), 0);
+        return r;
+      };
+      const origConn = nodeType.prototype.onConnectionsChange;
+      nodeType.prototype.onConnectionsChange = function() {
+        const r = origConn == null ? void 0 : origConn.apply(this, arguments);
+        syncFreezeOutputs(this);
+        return r;
+      };
+      const origConfigure = nodeType.prototype.onConfigure;
+      nodeType.prototype.onConfigure = function() {
+        const r = origConfigure == null ? void 0 : origConfigure.apply(this, arguments);
+        setTimeout(() => syncFreezeOutputs(this), 0);
+        return r;
+      };
+    }
+  });
+}
 const NODE_NAME = "NKDTimeline";
 const EXT_NAME = "NKD.PreviewTools.Timeline";
 const MIN_W = 380;
@@ -2507,6 +2742,12 @@ const KEY_SETTINGS = [
     label: "Mark clip (fit in/out to the clip)",
     def: "x"
   },
+  {
+    action: "marker",
+    id: "NKD.Timeline.Key.Marker",
+    label: "Freeze-frame marker at playhead (Shift+M toggles the mask overlay)",
+    def: "m"
+  },
   { action: "zoomFit", id: "NKD.Timeline.Key.ZoomFit", label: "Fit timeline", def: "f" }
 ];
 const KEY_SETTING_BY_ACTION = new Map(KEY_SETTINGS.map((k) => [k.action, k.id]));
@@ -2521,7 +2762,7 @@ function readSetting(id, fallback) {
 }
 const ROW_SAFETY = 8;
 const MAX_INSET = 48;
-console.log("[NKD Timeline] rev 3.0.0");
+console.log("[NKD Timeline] rev 3.1.0");
 const findW = (node, name) => {
   var _a;
   return (_a = node.widgets) == null ? void 0 : _a.find((w) => w.name === name);
@@ -2613,6 +2854,7 @@ function makeHost(node, state) {
       const w = findW(node, "timeline");
       if (w) w.value = serialiseTimeline(state.tl);
       node.setDirtyCanvas(true, true);
+      syncAllFreezeNodes();
     },
     getFps: () => numW("fps", 24),
     getStartFrame: () => Math.max(0, Math.round(numW("start_frame", 0))),
@@ -2940,3 +3182,4 @@ app.registerExtension({
     };
   }
 });
+registerFreezeFrames();

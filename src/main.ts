@@ -19,6 +19,7 @@ import {
   resolveSource, slotKind,
 } from "./timeline/media";
 import { ensureStyles } from "./timeline/styles";
+import { registerFreezeFrames, syncAllFreezeNodes } from "./freezeFrames";
 
 const NODE_NAME = "NKDTimeline";
 const EXT_NAME = "NKD.PreviewTools.Timeline";
@@ -45,6 +46,8 @@ const KEY_SETTINGS: { action: KeyAction; id: string; label: string; def: string 
   { action: "markOut", id: "NKD.Timeline.Key.MarkOut", label: "Mark out", def: "o" },
   { action: "markClip", id: "NKD.Timeline.Key.MarkClip",
     label: "Mark clip (fit in/out to the clip)", def: "x" },
+  { action: "marker", id: "NKD.Timeline.Key.Marker",
+    label: "Freeze-frame marker at playhead (Shift+M toggles the mask overlay)", def: "m" },
   { action: "zoomFit", id: "NKD.Timeline.Key.ZoomFit", label: "Fit timeline", def: "f" },
 ];
 const KEY_SETTING_BY_ACTION = new Map(KEY_SETTINGS.map((k) => [k.action, k.id]));
@@ -65,7 +68,7 @@ const MAX_INSET = 48;
 
 // A console version stamp: a cached bundle is the number one confounder when debugging
 // frontend behaviour that "should" already be fixed.
-console.log("[NKD Timeline] rev 3.0.0");
+console.log("[NKD Timeline] rev 3.1.0");
 
 // ── Widget helpers ────────────────────────────────────────────────────────────
 
@@ -176,6 +179,10 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
       const w = findW(node, "timeline");
       if (w) w.value = serialiseTimeline(state.tl);
       node.setDirtyCanvas(true, true);
+      // A downstream Freeze Frames draws one socket per marker, and it can only learn the
+      // count by reading THIS widget. Pushing from here is what makes pressing M grow the
+      // sockets straight away instead of after a run.
+      syncAllFreezeNodes();
     },
     getFps: () => numW("fps", 24),
     getStartFrame: () => Math.max(0, Math.round(numW("start_frame", 0))),
@@ -544,3 +551,6 @@ comfyApp.registerExtension({
     };
   },
 });
+
+// The Freeze Frames companion: its own extension, registered from the same bundle.
+registerFreezeFrames();

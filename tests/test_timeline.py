@@ -20,7 +20,8 @@ import torch  # noqa: E402
 from nkd_timeline import (  # noqa: E402
     BLEND_MODES, QUANTIZE_MODES, NKDTimeline, _to_mask, _to_rgb, blend_pixels,
     build_sources, classify,
-    fit_frames, gather_window, mix_audio, parse_timeline, quantize_count, quantize_stops,
+    fit_frames, gather_window, marker_indices, mix_audio, parse_frame_list,
+    parse_timeline, quantize_count, quantize_stops,
     source_frame, source_meta, timeline_span, track_blend,
 )
 
@@ -186,9 +187,32 @@ def test_fit_frames():
     contained = fit_frames(torch.ones((1, 100, 200, 3)), 64, 64, "contain")
     assert float(contained[0, 0, 32, 0]) == 0.0    # top edge, padding
     assert float(contained[0, 32, 32, 0]) == 1.0   # centre, image
-    # Already matching: passes through untouched (no needless resample).
+    # Already matching: passes through untouched (no needless resample). Masks too - the
+    # early-out sits BEFORE the 3-channel expansion, which is a 3x copy for nothing.
     same = torch.rand((2, 32, 32, 3))
     assert fit_frames(same, 32, 32, "contain") is same
+    same_mask = torch.rand((2, 32, 32))
+    assert fit_frames(same_mask, 32, 32, "contain") is same_mask
+
+    # `cover` fills the frame from the CENTRE of the source: a 2:1 image squeezed into a
+    # square keeps the middle half and loses the sides. Hand-cropping before the resize
+    # replaced common_upscale's own "center" crop, so pin the geometry down.
+    wide = torch.zeros((1, 100, 200, 3))
+    wide[:, :, 50:150, :] = 1.0                 # exactly the central square
+    covered = fit_frames(wide, 64, 64, "cover")
+    assert covered.shape == (1, 64, 64, 3)
+    assert float(covered.min()) > 0.99, "the cropped-away sides must not survive"
+
+    tall = torch.zeros((1, 200, 100, 3))        # the other axis
+    tall[:, 50:150, :, :] = 1.0
+    assert float(fit_frames(tall, 64, 64, "cover").min()) > 0.99
+
+    # A large reduction takes the `area` path and a small one takes bicubic; both must
+    # still land on the requested size and stay in range.
+    for src_wh, dst in (((3, 2160, 3840, 3), (832, 480)), ((3, 520, 900, 3), (832, 480))):
+        out = fit_frames(torch.rand(src_wh), dst[0], dst[1], "stretch")
+        assert out.shape == (3, dst[1], dst[0], 3)
+        assert 0.0 <= float(out.min()) and float(out.max()) <= 1.0
 
 
 def test_mix_audio():
@@ -282,7 +306,8 @@ def test_current_image_is_the_composited_frame():
             media={"media_0": seq}, timeline=tl,
             import_mode="stack", fps=24.0, start_frame=0, frame_count=0, width=8,
             height=8, fit="stretch", quantize="free", quantize_n=8, clip_audio=False)
-        images, _mask, _cov, _aud, _vid, _fps, n, _w, _h, cur, cur_img, dur = r.result
+        (images, _mask, _cov, _aud, _vid, _fps, n, _w, _h, cur, cur_img, dur,
+         _marks) = r.result
         # Duration must be the QUANTISED count in seconds, matching what was rendered.
         assert abs(dur - n / 24.0) < 1e-9, (dur, n)
         assert images.shape[0] == n
@@ -327,6 +352,136 @@ def test_classify():
     })
     assert sorted(visual) == ["media_0", "media_1"]
     assert sorted(audio) == ["media_2"]
+
+
+def test_markers_parse_within_the_clip():
+    """Offsets from the clip start, sorted and unique. Out-of-range ones are DROPPED,
+    not clamped: clamping would pile several markers onto the same frame."""
+    tl = parse_timeline({
+        "clips": [{"src": "media_0", "start": 100, "length": 10,
+                   "markers": [7, 3, 3, -1, 10, "nope"]}],
+        "audio": [{"src": "media_1", "start": 0, "length": 5, "markers": [2]}],
+    })
+    assert tl["clips"][0]["markers"] == [3, 7]
+    assert tl["audio"][0]["markers"] == [2]
+    # A clip that never had any still exposes the key, so callers need no getattr dance.
+    assert parse_timeline({"clips": [{"src": "a", "length": 3}]})["clips"][0]["markers"] == []
+
+
+def test_marker_indices_are_relative_to_the_rendered_batch():
+    """The whole point: `images` starts at start_frame, so a marker at timeline frame 103
+    of a range starting at 100 is index 3 of the batch - not 103."""
+    clips = [{"src": "media_0", "start": 100, "length": 10, "markers": [3, 7]}]
+    assert marker_indices([clips], 100, 10) == [3, 7]
+    assert marker_indices([clips], 95, 20) == [8, 12]
+    # Outside the rendered range there is no frame to freeze, so they drop out entirely.
+    assert marker_indices([clips], 105, 5) == [2]
+    assert marker_indices([clips], 200, 10) == []
+    # Two lanes marked at the same instant are ONE output frame.
+    masks = [{"src": "media_1", "start": 0, "length": 200, "markers": [103]}]
+    assert marker_indices([clips, masks], 100, 10) == [3, 7]
+
+
+def test_marker_indices_survive_a_timeline_with_no_markers():
+    assert marker_indices([[{"src": "a", "start": 0, "length": 5}]], 0, 5) == []
+
+
+def test_parse_frame_list():
+    """Separator-agnostic, duplicates kept, order preserved - repeating an index is how
+    you hold a freeze for longer."""
+    assert parse_frame_list("0, 12, 47", 50) == [0, 12, 47]
+    assert parse_frame_list("3 3\n9", 10) == [3, 3, 9]
+    assert parse_frame_list("[4; 5]", 10) == [4, 5]
+    assert parse_frame_list("-1", 10) == [9]           # negatives count from the end
+    for bad in ("", "   ", "no numbers here"):
+        try:
+            parse_frame_list(bad, 10)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"empty input must raise: {bad!r}")
+    # Out of range RAISES rather than clamping: the timeline never emits one, so a bad
+    # index was typed and silently freezing a different frame is worse than saying so.
+    for bad in ("10", "-11"):
+        try:
+            parse_frame_list(bad, 10)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"out-of-range index must raise: {bad!r}")
+
+
+def test_markers_output_feeds_freeze_frames():
+    """End to end: a marker placed in the editor comes out of NKD Timeline as an index
+    that NKD Freeze Frames can use directly against the same `images` batch."""
+    import json
+
+    from nkd_timeline import NKDFreezeFrames
+
+    seq = torch.zeros((20, 4, 4, 3))
+    for i in range(20):
+        seq[i] = i / 100.0
+    tl = json.dumps({
+        # Clip starts at 5, so its marker at offset 7 is timeline frame 12.
+        "clips": [{"src": "media_0", "track": 0, "start": 5, "trimIn": 0, "length": 15,
+                   "markers": [7, 1]}],
+        "ui": {"playhead": 0}})
+    r = NKDTimeline.execute(
+        media={"media_0": seq}, timeline=tl, import_mode="stack", fps=24.0,
+        start_frame=4, frame_count=0, width=4, height=4, fit="stretch",
+        quantize="free", quantize_n=8, clip_audio=False)
+    images, marks = r.result[0], r.result[12]
+    assert marks == "2, 8"                              # 5+1-4 and 5+7-4
+    frozen = NKDFreezeFrames.execute(images, marks).result
+    assert frozen[1] == 2                                # count
+    # Timeline frame 12 shows source frame 7 of the clip, i.e. 0.07. Same picture whether
+    # it is read off the batch or off its own socket.
+    assert abs(float(frozen[0][1, 0, 0, 0]) - 0.07) < 1e-6
+    assert abs(float(frozen[3][0, 0, 0, 0]) - 0.07) < 1e-6   # frame_2 socket
+
+
+def test_freeze_frames_picks_the_right_pictures():
+    from nkd_timeline import MAX_FREEZE_OUTPUTS, NKDFreezeFrames
+    batch = torch.arange(6, dtype=torch.float32).view(6, 1, 1, 1).repeat(1, 8, 8, 3)
+    res = NKDFreezeFrames.execute(batch, "4, 1, 1").result
+    out, count, singles = res[0], res[1], res[2:]
+    assert count == 3
+    assert out.shape == (3, 8, 8, 3)
+    assert [float(f[0, 0, 0]) for f in out] == [4.0, 1.0, 1.0]
+
+    # One socket per frame, then None for the sockets the editor hides. The tuple must
+    # ALWAYS be the full width: the runtime indexes it by slot number.
+    assert len(singles) == MAX_FREEZE_OUTPUTS
+    assert [s.shape for s in singles[:3]] == [(1, 8, 8, 3)] * 3
+    assert [float(s[0, 0, 0, 0]) for s in singles[:3]] == [4.0, 1.0, 1.0]
+    assert all(s is None for s in singles[3:])
+
+    # A copy, so an in-place op downstream cannot reach back into the timeline's batch.
+    out[0] += 100.0
+    assert float(batch[4, 0, 0, 0]) == 4.0
+
+    # More markers than sockets is refused with a message, not silently truncated.
+    try:
+        NKDFreezeFrames.execute(torch.zeros((40, 8, 8, 3)),
+                                ",".join(str(i) for i in range(MAX_FREEZE_OUTPUTS + 1)))
+    except ValueError as e:
+        assert "sockets" in str(e)
+    else:
+        raise AssertionError("overflowing the sockets must raise")
+
+
+def test_freeze_frame_previews_are_labelled_copies():
+    """The badge is burned into the PREVIEW only - the tensors that leave the outputs must
+    come out clean."""
+    from nkd_timeline import _badge_previews
+    batch = torch.zeros((2, 64, 96, 3))
+    prev = _badge_previews(batch, [7, 12])
+    assert prev.shape == (2, 64, 96, 3)                 # under PREVIEW_MAX_W: not resized
+    assert float(prev.max()) > 0.1, "nothing was drawn on the black frames"
+    assert float(batch.max()) == 0.0, "the source batch was written on"
+    # A big frame is scaled down for the preview, keeping its aspect.
+    small = _badge_previews(torch.zeros((1, 1080, 1920, 3)), [0])
+    assert small.shape[2] == 256 and small.shape[1] == 144
 
 
 if __name__ == "__main__":

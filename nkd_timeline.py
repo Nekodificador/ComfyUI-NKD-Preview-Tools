@@ -19,16 +19,17 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import os
 from fractions import Fraction
 from typing import Any, Optional
 
 import folder_paths
+import numpy as np
 import torch
-from typing_extensions import override
 
 import comfy.utils
-from comfy_api.latest import ComfyExtension, InputImpl, Types, io
+from comfy_api.latest import InputImpl, Types, io, ui
 
 # ── Frame-count quantisation ──────────────────────────────────────────────────
 # Video models only accept certain frame counts. Getting this wrong looks fine while
@@ -136,6 +137,11 @@ def _parse_clips(raw_list: Any) -> list[dict]:
         length = _int(c.get("length"))
         if length <= 0:
             continue
+        # Freeze-frame markers: offsets from `start`, in timeline frames. Anchored to the
+        # clip so they ride along when it moves; out-of-range ones are dropped rather than
+        # clamped, which would silently pile several markers onto the same frame.
+        markers = sorted({m for m in (_int(v, -1) for v in c.get("markers") or [])
+                          if 0 <= m < length})
         out.append({
             "src": str(c["src"]),
             "track": _int(c.get("track")),
@@ -143,6 +149,7 @@ def _parse_clips(raw_list: Any) -> list[dict]:
             "trimIn": max(0, _int(c.get("trimIn"))),
             "length": length,
             "muted": bool(c.get("muted")),
+            "markers": markers,
         })
     out.sort(key=lambda c: (c["track"], c["start"]))
     return out
@@ -187,12 +194,30 @@ def parse_timeline(raw: Any) -> dict:
             "length": length,
             "gain": _float(a.get("gain"), 1.0),
             "muted": bool(a.get("muted")),
+            "markers": sorted({m for m in (_int(v, -1) for v in a.get("markers") or [])
+                               if 0 <= m < length}),
         })
 
     ui_state = data.get("ui")
     if isinstance(ui_state, dict):
         out["playhead"] = max(0, _int(ui_state.get("playhead")))
     return out
+
+
+def marker_indices(lanes: list[list[dict]], start_frame: int, count: int) -> list[int]:
+    """Every freeze-frame marker as an index INTO THE RENDERED BATCH.
+
+    Not as an absolute timeline frame: `images` starts at `start_frame` and its length is
+    quantised, so a marker at timeline frame 300 of a range starting at 200 is index 100 of
+    the batch. Emitting absolute frames would make NKD Freeze Frames read the wrong picture
+    - the same trap `duration` avoids by counting off the quantised length.
+
+    Markers outside the rendered range are dropped: they exist on the timeline but there is
+    no frame to freeze.
+    """
+    out = {c["start"] + m - start_frame
+           for lane in lanes for c in lane for m in c.get("markers") or ()}
+    return sorted(i for i in out if 0 <= i < count)
 
 
 def timeline_span(*lanes: list[dict]) -> int:
@@ -343,13 +368,53 @@ def gather_window(kind: str, obj: Any, clip: dict, a: int, b: int,
 
     if frames is None or frames.shape[0] == 0:
         return None, None
-    idx = torch.tensor(
-        [min(max(source_frame(clip, f, src_fps, fps) - lo, 0), frames.shape[0] - 1)
-         for f in range(a, b)], dtype=torch.long)
-    return frames.index_select(0, idx), audio
+    have = frames.shape[0]
+    picks = [min(max(source_frame(clip, f, src_fps, fps) - lo, 0), have - 1)
+             for f in range(a, b)]
+    # Same cadence and no repeats is the ordinary case, and there the gather is the
+    # identity: a slice is a VIEW, while index_select copies the whole decoded window -
+    # 7.5 GiB and 2s for 81 frames of 4K. Only fall back to the gather when frames really
+    # are being dropped or repeated.
+    if picks == list(range(picks[0], picks[0] + len(picks))):
+        return frames[picks[0]:picks[-1] + 1], audio
+    return frames.index_select(0, torch.tensor(picks, dtype=torch.long)), audio
 
 
 # ── Resolution fitting ────────────────────────────────────────────────────────
+
+def _resize(chw: torch.Tensor, width: int, height: int) -> torch.Tensor:
+    """Resize [N,C,H,W], picking the filter by direction.
+
+    NOT `comfy.utils.common_upscale(..., "lanczos")` on the way down. That helper's lanczos
+    is not a tensor op at all: it loops in PYTHON converting every frame to a PIL image and
+    back (comfy/utils.py:1059). On a timeline that is per-frame work over a whole clip, and
+    with a 4K source it costs more than decoding the video did - measured at 11.0s for 81
+    4K frames, against 8.7s to decode them.
+
+    Downscaling is what a timeline actually does (a camera source into a model-sized
+    output), and antialiased bicubic is 3.6x faster than that loop while matching it to
+    ~0.7% mean error on noise, the worst case for comparing resamplers. Plain bilinear
+    WITHOUT antialias is not the alternative: on a 4.6:1 reduction it aliases badly
+    (20x the error) and is still slower than area.
+
+    Upscaling keeps lanczos: there is no aliasing to fight, it is the sharper filter, and
+    at output sizes it is the faster of the two anyway.
+    """
+    src_h, src_w = chw.shape[-2], chw.shape[-1]
+    if width * 2 <= src_w and height * 2 <= src_h:
+        # Halved or more - a camera source landing on a model-sized output. Averaging every
+        # source pixel that falls in the target one IS the right filter here (it is
+        # supersampling), it cannot ring the way bicubic and lanczos do, and it is another
+        # 3x faster again: 1.9s where antialiased bicubic takes 4.9s.
+        return torch.nn.functional.interpolate(chw, size=(height, width), mode="area")
+    if width * height < src_w * src_h:
+        # Mild reduction: too few source pixels per target one for averaging to look good,
+        # so bicubic - WITH antialias, or it aliases. It can overshoot, and every caller
+        # clamps; so did lanczos.
+        return torch.nn.functional.interpolate(
+            chw, size=(height, width), mode="bicubic", antialias=True, align_corners=False)
+    return comfy.utils.common_upscale(chw, width, height, "lanczos", "disabled")
+
 
 def fit_frames(t: torch.Tensor, width: int, height: int, mode: str) -> torch.Tensor:
     """`t` is [N,H,W,C] (or [N,H,W] for a mask) in 0..1. Returns the same rank, resized.
@@ -357,6 +422,9 @@ def fit_frames(t: torch.Tensor, width: int, height: int, mode: str) -> torch.Ten
     The editor's preview mirrors these three modes exactly, so what you scrub is what
     gets rendered.
     """
+    if t.shape[1] == height and t.shape[2] == width:
+        return t                     # BEFORE the mask branch: a mask that already fits
+                                     # must not pay for a 3x channel copy to learn that.
     if t.ndim == 3:
         # Mask: fit it as a THREE-channel image and take one channel back. Not as a
         # single-channel one - `comfy.utils.lanczos` deliberately squeezes grayscale
@@ -364,19 +432,24 @@ def fit_frames(t: torch.Tensor, width: int, height: int, mode: str) -> torch.Ten
         # and every shape downstream breaks. The RGB path is the well-trodden one and the
         # extra channels cost nothing measurable at mask sizes.
         return fit_frames(t.unsqueeze(-1).repeat(1, 1, 1, 3), width, height, mode)[..., 0]
-    if t.shape[1] == height and t.shape[2] == width:
-        return t
-    chw = t.movedim(-1, 1)  # common_upscale wants [N,C,H,W]
+    chw = t.movedim(-1, 1)  # the resizers want [N,C,H,W]
     if mode == "cover":
-        out = comfy.utils.common_upscale(chw, width, height, "lanczos", "center")
+        # Crop to the output aspect first, then resize once. Going through
+        # common_upscale's "center" crop would put the whole thing back on the lanczos
+        # path for the resize itself.
+        src_h, src_w = chw.shape[-2], chw.shape[-1]
+        keep_w = min(src_w, int(round(src_h * width / height)))
+        keep_h = min(src_h, int(round(src_w * height / width)))
+        x, y = (src_w - keep_w) // 2, (src_h - keep_h) // 2
+        out = _resize(chw[:, :, y:y + keep_h, x:x + keep_w], width, height)
     elif mode == "stretch":
-        out = comfy.utils.common_upscale(chw, width, height, "lanczos", "disabled")
+        out = _resize(chw, width, height)
     else:  # contain - scale to fit whole, pad the remainder with black
         src_h, src_w = chw.shape[-2], chw.shape[-1]
         scale = min(width / src_w, height / src_h)
         inner_w = max(1, int(round(src_w * scale)))
         inner_h = max(1, int(round(src_h * scale)))
-        inner = comfy.utils.common_upscale(chw, inner_w, inner_h, "lanczos", "disabled")
+        inner = _resize(chw, inner_w, inner_h)
         out = torch.zeros((chw.shape[0], chw.shape[1], height, width), dtype=chw.dtype)
         y = (height - inner_h) // 2
         x = (width - inner_w) // 2
@@ -588,6 +661,10 @@ class NKDTimeline(io.ComfyNode):
                 io.Image.Output(display_name="current_image"),
                 io.Float.Output(display_name="duration",
                                 tooltip="Length of the output range in seconds."),
+                io.String.Output(display_name="markers",
+                                 tooltip="Comma-separated indices of the freeze-frame "
+                                         "markers (press M on a clip), counted INTO the "
+                                         "'images' batch. Feed it to NKD Freeze Frames."),
             ],
         )
 
@@ -743,16 +820,136 @@ class NKDTimeline(io.ComfyNode):
         # moment a model grid is in play.
         duration = count / fps
 
+        markers = ", ".join(str(i) for i in marker_indices(
+            [clips, maskclips, auclips], start_frame, count))
+
         return io.NodeOutput(out, mask_out, coverage, audio_out, video_out,
                              float(fps), int(count), int(width), int(height), int(current),
-                             current_image, float(duration))
+                             current_image, float(duration), markers)
 
 
-class NKDTimelineExtension(ComfyExtension):
-    @override
-    async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [NKDTimeline]
+def parse_frame_list(raw: str, total: int) -> list[int]:
+    """Frame indices out of a human-written string.
+
+    Separator-agnostic on purpose - commas, spaces and newlines all work - because this
+    field gets typed by hand as often as it gets wired up. Duplicates are KEPT and order is
+    preserved: repeating an index is a legitimate way to hold a freeze for longer.
+
+    Out-of-range indices raise instead of being clamped or dropped. The timeline never
+    emits one, so if it happens the number was typed and quietly turning it into a
+    different frame is worse than saying so.
+    """
+    picks = [int(m) for m in re.findall(r"-?\d+", raw or "")]
+    if not picks:
+        raise ValueError(
+            "NKD Freeze Frames: no frame numbers in 'frames'. Mark some frames with M in "
+            "NKD Timeline and connect its 'markers' output, or type indices by hand.")
+    for i in picks:
+        # Negative indices count from the end, like Python's own.
+        if not -total <= i < total:
+            raise ValueError(
+                f"NKD Freeze Frames: frame {i} is outside the batch (0..{total - 1}).")
+    return [i if i >= 0 else total + i for i in picks]
 
 
-NODE_CLASS_MAPPINGS = {"NKDTimeline": NKDTimeline}
-NODE_DISPLAY_NAME_MAPPINGS = {"NKDTimeline": "😺NKD Timeline"}
+# Hard cap on the per-frame sockets.
+#
+# There is no such thing as a truly dynamic OUTPUT in this API: `Autogrow` is a
+# `ComfyTypeI` (inputs only) and `DynamicOutput` (comfy_api/latest/_io.py:1007) is an empty
+# abstract placeholder. The runtime indexes the returned tuple by slot number, so a socket
+# the frontend invents beyond the schema fails with an IndexError at execution.
+#
+# So the schema declares the ceiling and the editor hides the tail it is not using. That is
+# ALSO why `images` and `count` come first: the frontend can only truncate from the end, and
+# trimming a socket in the middle would slide every later index down and silently rewire a
+# saved workflow to a different frame.
+MAX_FREEZE_OUTPUTS = 16
+PREVIEW_MAX_W = 256
+
+
+def _badge_previews(frames: torch.Tensor, picks: list[int]) -> torch.Tensor:
+    """Thumbnails of the frozen frames with their ordinal and source index burned in.
+
+    Burned in rather than drawn as a widget: `ui.PreviewImage` is a plain gallery with no
+    captions, and a row of stills with no way to tell which is which is exactly the thing
+    this node exists to avoid. Only the PREVIEW copy is written on - the tensors that leave
+    the outputs are untouched.
+    """
+    from PIL import Image as PILImage, ImageDraw, ImageFont
+
+    h, w = frames.shape[1], frames.shape[2]
+    scale = min(1.0, PREVIEW_MAX_W / max(1, w))
+    tw, th = max(1, int(w * scale)), max(1, int(h * scale))
+    try:
+        font = ImageFont.load_default(size=max(11, th // 12))
+    except TypeError:            # Pillow < 10.1: no sized default font
+        font = ImageFont.load_default()
+
+    out = []
+    for n, (frame, idx) in enumerate(zip(frames, picks), start=1):
+        arr = (frame.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+        img = PILImage.fromarray(arr).resize((tw, th), PILImage.BILINEAR)
+        draw = ImageDraw.Draw(img)
+        label = f"{n} · f{idx}"
+        box = draw.textbbox((0, 0), label, font=font)
+        draw.rectangle((3, 3, box[2] + 11, box[3] + 9), fill=(12, 14, 18))
+        draw.text((7, 5), label, font=font, fill=(123, 216, 143))   # the marker green
+        out.append(torch.from_numpy(np.asarray(img).astype("float32") / 255.0))
+    return torch.stack(out)
+
+
+class NKDFreezeFrames(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="NKDFreezeFrames",
+            display_name="😺NKD Freeze Frames",
+            category="😺NKD Nodes/Preview",
+            description=(
+                "Hold individual frames of a batch as still images, one per socket.\n\n"
+                "Wire the 'markers' output of NKD Timeline into 'frames' and every frame "
+                "you marked with M comes out of its own 'frame_N' output, previewed on the "
+                "node so you can see which is which. The field can also just be typed: "
+                "'0, 12, 47'. 'images' carries the same frames as one batch."),
+            inputs=[
+                io.Image.Input("images",
+                               tooltip="The batch to pick from - normally the 'images' "
+                                       "output of NKD Timeline."),
+                io.String.Input("frames", default="", multiline=False,
+                                tooltip="Indices into the batch, any separator. Negatives "
+                                        "count from the end. Repeats are kept."),
+            ],
+            # images/count FIRST - see MAX_FREEZE_OUTPUTS. Never reorder these.
+            outputs=[
+                io.Image.Output(display_name="images"),
+                io.Int.Output(display_name="count"),
+                *[io.Image.Output(display_name=f"frame_{i}")
+                  for i in range(1, MAX_FREEZE_OUTPUTS + 1)],
+            ],
+            is_output_node=True,      # so the node can show the previews at all
+        )
+
+    @classmethod
+    def execute(cls, images: torch.Tensor, frames: str) -> io.NodeOutput:
+        picks = parse_frame_list(frames, int(images.shape[0]))
+        if len(picks) > MAX_FREEZE_OUTPUTS:
+            raise ValueError(
+                f"NKD Freeze Frames: {len(picks)} frames requested but the node has "
+                f"{MAX_FREEZE_OUTPUTS} sockets. Use the 'images' batch output instead, or "
+                f"split the markers across two nodes.")
+        # index_select rather than fancy indexing: it is explicit about producing a copy,
+        # so a downstream in-place op cannot reach back into the timeline's own batch.
+        out = images.index_select(0, torch.tensor(picks, device=images.device))
+        # One socket per frame, then None for the sockets the editor is hiding. A hidden
+        # socket has no link, so nothing ever reads the None.
+        singles = [out[i:i + 1] for i in range(len(picks))]
+        singles += [None] * (MAX_FREEZE_OUTPUTS - len(singles))
+        return io.NodeOutput(out, len(picks), *singles,
+                             ui=ui.PreviewImage(_badge_previews(out, picks), cls=cls))
+
+
+# No ComfyExtension and no NODE_CLASS_MAPPINGS here on purpose. `__init__.py` exports ONE
+# entrypoint, `nodes.py:comfy_entrypoint`, and ComfyUI only looks at that; a second
+# extension class in this module would never be called. There used to be one, and it is
+# exactly why NKDFreezeFrames shipped invisible - it was registered somewhere nobody reads.
+# A node added here MUST also go into the list in `nodes.py`.

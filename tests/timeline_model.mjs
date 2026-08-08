@@ -599,3 +599,73 @@ test("clipExtent — mark clip, from the selection or from the playhead", () => 
   const ext = M.clipExtent(t, 20, new Set(["a"]));
   assert.equal(ext.end - ext.start, 20);
 });
+
+// ── Freeze-frame markers ──────────────────────────────────────────────────────
+// Markers are anchored to the CLIP, so the invariant under test is: an edit that moves
+// the clip must not change which PICTURE a marker sits on.
+
+test("markers survive a round trip and stay sorted, unique and in range", () => {
+  const t = M.parseTimeline(JSON.stringify({
+    clips: [{ id: "a", src: "media_0", start: 100, length: 10,
+              markers: [7, 3, 3, -1, 10, 99] }],
+  }));
+  assert.deepEqual(t.clips[0].markers, [3, 7]);        // dupes, negatives and >= length go
+  assert.deepEqual(M.parseTimeline(M.serialiseTimeline(t)).clips[0].markers, [3, 7]);
+});
+
+test("a clip with no markers keeps them out of the JSON", () => {
+  const t = M.parseTimeline(JSON.stringify({ clips: [{ src: "media_0", length: 5 }] }));
+  assert.equal("markers" in t.clips[0], false);
+  assert.equal(M.serialiseTimeline(t).includes("markers"), false);
+});
+
+test("toggleMarker adds, removes, and refuses frames off the clip", () => {
+  const c = clip({ start: 100, length: 10 });
+  assert.equal(M.toggleMarker(c, 103), true);
+  assert.deepEqual(c.markers, [3]);
+  assert.equal(M.toggleMarker(c, 105), true);
+  assert.deepEqual(c.markers, [3, 5]);
+  assert.equal(M.toggleMarker(c, 103), true);          // same frame again: lifts it
+  assert.deepEqual(c.markers, [5]);
+  assert.equal(M.toggleMarker(c, 99), false);          // before the clip
+  assert.equal(M.toggleMarker(c, 110), false);         // one past the end
+  assert.deepEqual(c.markers, [5]);
+});
+
+test("moving a clip carries its markers to the new absolute frames", () => {
+  const t = M.emptyTimeline();
+  const c = clip({ start: 100, length: 10, markers: [3] });
+  t.clips.push(c);
+  assert.deepEqual(M.markerFrames(t), [103]);
+  M.moveClip(c, 200, 0);
+  assert.deepEqual(M.markerFrames(t), [203]);          // same picture, new position
+});
+
+test("trimming the head keeps markers on the same picture", () => {
+  const c = clip({ start: 100, length: 10, markers: [2, 6] });
+  M.trimStart(c, 104, 24, 24);                         // cut 4 frames off the front
+  assert.equal(c.start, 104);
+  assert.deepEqual(c.markers, [2]);                    // 6 -> 2, still frame 106; 2 is gone
+  assert.deepEqual(M.markerFrames({ clips: [c], masks: [], audio: [] }), [106]);
+});
+
+test("trimming the tail drops the markers that went with it", () => {
+  const c = clip({ start: 0, length: 10, markers: [2, 8] });
+  M.trimEnd(c, 5, 0, 24, 24);
+  assert.deepEqual(c.markers, [2]);
+});
+
+test("slipping slides markers with the content", () => {
+  const c = clip({ start: 0, length: 10, trimIn: 10, markers: [5] });
+  M.slipClip(c, 3, 100, 24, 24);                       // content moves 3 frames earlier
+  assert.equal(c.trimIn, 13);
+  assert.deepEqual(c.markers, [2]);
+});
+
+test("markerFrames deduplicates across lanes", () => {
+  const t = M.emptyTimeline();
+  t.clips.push(clip({ id: "a", start: 0, length: 10, markers: [4] }));
+  t.clips.push(clip({ id: "b", track: 1, start: 0, length: 10, markers: [4, 9] }));
+  t.masks.push(clip({ id: "c", start: 5, length: 10, markers: [0] }));   // -> frame 5
+  assert.deepEqual(M.markerFrames(t), [4, 5, 9]);
+});
