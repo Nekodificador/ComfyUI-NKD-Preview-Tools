@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-nkd-preview-tools"
 description = "Preview tools for ComfyUI: a floating popup preview window (multi-monitor friendly) and a wireless reference image to compare against."
-version = "2.6.0"
+version = "3.0.0"
 license = { file = "LICENSE.txt" }
 dependencies  = []
 

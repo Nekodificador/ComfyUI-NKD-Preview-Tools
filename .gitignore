@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 *.pyo
+node_modules/
+package-lock.json
+.vite/
 PROJECT_CONTEXT.md
 CLAUDE.md
 .claude/

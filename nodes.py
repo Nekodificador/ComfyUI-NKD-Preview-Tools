@@ -11,6 +11,11 @@ from comfy_api.latest import ComfyExtension, io, ui
 from comfy_api.latest._io import _UIOutput
 from typing_extensions import override
 
+# Import a nivel de MÓDULO, no dentro de get_node_list: nkd_timeline registra su ruta
+# aiohttp al importarse, y get_node_list se ejecuta cuando la tabla de rutas ya está
+# cerrada — la ruta se perdía en silencio.
+from .nkd_timeline import NKDTimeline  # noqa: E402
+
 
 # Single active reference image for the workflow ("wireless" compare source).
 # (abs_path, item_dict) where item_dict has {filename, subfolder, type} for the
@@ -164,7 +169,7 @@ class NKDPopupPreviewNode(io.ComfyNode):
 class NKDExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [NKDPopupPreviewNode, NKDReferenceImage]
+        return [NKDPopupPreviewNode, NKDReferenceImage, NKDTimeline]
 
 async def comfy_entrypoint() -> NKDExtension:
     return NKDExtension()
