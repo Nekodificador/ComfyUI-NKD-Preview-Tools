@@ -348,8 +348,20 @@ export function serialiseTimeline(t: Timeline): string {
       trimIn: a.trimIn, length: a.length, gain: a.gain,
       ...(a.muted ? { muted: true } : {}),
     })),
-    ui: { zoom: t.ui.zoom, scroll: t.ui.scroll, playhead: t.ui.playhead },
+    // ZOOM AND SCROLL ARE DELIBERATELY ABSENT. This string is a node INPUT, and a widget
+    // value goes verbatim into ComfyUI's cache signature (comfy_execution/caching.py:126),
+    // so anything written here invalidates the render. Where the user happens to be
+    // looking changes nothing about the output, yet it would cost a full re-render on
+    // every wheel tick. It lives in `node.properties` instead, which persists with the
+    // workflow but is not an input. The playhead DOES stay: it drives `current_frame` /
+    // `current_image`, so invalidating on a scrub is the point.
+    ui: { playhead: t.ui.playhead },
   });
+}
+
+/** The view state kept OUT of the widget, for the host to park in `node.properties`. */
+export function viewState(t: Timeline): { zoom: number; scroll: number } {
+  return { zoom: t.ui.zoom, scroll: t.ui.scroll };
 }
 
 export function sortClips(t: Timeline): void {

@@ -1110,16 +1110,29 @@ export class TimelineEditor {
    */
   reloadSources(): void {
     this.host.reloadSources();
+    this.retightenToSources();
+    this.requestRender();
+  }
+
+  /**
+   * Pull every clip back inside the material it points at, if that material turned out
+   * shorter. Idempotent, and it only ever SHORTENS, so it is safe to run on the tick.
+   *
+   * It has to run there and not just from the reload button: swapping the file in an
+   * upstream Load Video is detected automatically, but the new length only arrives when
+   * the probe lands a tick or two LATER - and until something re-clamps, the clip is
+   * longer than its file, which the backend renders as the last frame repeating.
+   */
+  retightenToSources(): boolean {
     const fps = this.host.getFps();
     const before = JSON.stringify(this.tl);
     const changed = clampClipsToSources(this.tl, fps,
       (src) => this.host.srcFramesFor(src),
       (src) => this.host.sourceFor(src)?.info?.fps ?? fps);
-    if (changed && JSON.stringify(this.tl) !== before) {
-      this.pushUndo();
-      this.host.commit();
-    }
-    this.requestRender();
+    if (!changed || JSON.stringify(this.tl) === before) return false;
+    this.pushUndo();
+    this.host.commit();
+    return true;
   }
 
   private toggleMaskOverlay(): void {

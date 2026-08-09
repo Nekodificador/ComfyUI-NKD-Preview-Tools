@@ -219,8 +219,18 @@ function serialiseTimeline(t) {
       gain: a.gain,
       ...a.muted ? { muted: true } : {}
     })),
-    ui: { zoom: t.ui.zoom, scroll: t.ui.scroll, playhead: t.ui.playhead }
+    // ZOOM AND SCROLL ARE DELIBERATELY ABSENT. This string is a node INPUT, and a widget
+    // value goes verbatim into ComfyUI's cache signature (comfy_execution/caching.py:126),
+    // so anything written here invalidates the render. Where the user happens to be
+    // looking changes nothing about the output, yet it would cost a full re-render on
+    // every wheel tick. It lives in `node.properties` instead, which persists with the
+    // workflow but is not an input. The playhead DOES stay: it drives `current_frame` /
+    // `current_image`, so invalidating on a scrub is the point.
+    ui: { playhead: t.ui.playhead }
   });
+}
+function viewState(t) {
+  return { zoom: t.ui.zoom, scroll: t.ui.scroll };
 }
 function sortClips(t) {
   const byTrack = (a, b) => a.track - b.track || a.start - b.start;
@@ -1879,6 +1889,19 @@ class TimelineEditor {
    */
   reloadSources() {
     this.host.reloadSources();
+    this.retightenToSources();
+    this.requestRender();
+  }
+  /**
+   * Pull every clip back inside the material it points at, if that material turned out
+   * shorter. Idempotent, and it only ever SHORTENS, so it is safe to run on the tick.
+   *
+   * It has to run there and not just from the reload button: swapping the file in an
+   * upstream Load Video is detected automatically, but the new length only arrives when
+   * the probe lands a tick or two LATER - and until something re-clamps, the clip is
+   * longer than its file, which the backend renders as the last frame repeating.
+   */
+  retightenToSources() {
     const fps = this.host.getFps();
     const before = JSON.stringify(this.tl);
     const changed = clampClipsToSources(
@@ -1890,11 +1913,10 @@ class TimelineEditor {
         return ((_b = (_a = this.host.sourceFor(src)) == null ? void 0 : _a.info) == null ? void 0 : _b.fps) ?? fps;
       }
     );
-    if (changed && JSON.stringify(this.tl) !== before) {
-      this.pushUndo();
-      this.host.commit();
-    }
-    this.requestRender();
+    if (!changed || JSON.stringify(this.tl) === before) return false;
+    this.pushUndo();
+    this.host.commit();
+    return true;
   }
   toggleMaskOverlay() {
     this.maskOverlay = !this.maskOverlay;
@@ -2760,9 +2782,9 @@ function readSetting(id, fallback) {
     return fallback;
   }
 }
-const ROW_SAFETY = 8;
+const ROW_SAFETY = 2;
 const MAX_INSET = 48;
-console.log("[NKD Timeline] rev 3.1.0");
+console.log("[NKD Timeline] rev 3.1.1");
 const findW = (node, name) => {
   var _a;
   return (_a = node.widgets) == null ? void 0 : _a.find((w) => w.name === name);
@@ -2829,10 +2851,21 @@ function keepDomWidgetSized(node, container) {
     clamp();
   };
   const iv = window.setInterval(clamp, 250);
-  return () => {
-    ro.disconnect();
-    clearInterval(iv);
+  return {
+    release: () => {
+      ro.disconnect();
+      clearInterval(iv);
+    },
+    margin: () => goodMargin
   };
+}
+const VIEW_PROP = "nkdView";
+function restoreView(node, tl) {
+  var _a;
+  const v = (_a = node.properties) == null ? void 0 : _a[VIEW_PROP];
+  if (!v || typeof v !== "object") return;
+  if (Number.isFinite(Number(v.zoom))) tl.ui.zoom = Number(v.zoom);
+  if (Number.isFinite(Number(v.scroll))) tl.ui.scroll = Number(v.scroll);
 }
 function makeHost(node, state) {
   const numW = (name, def) => {
@@ -2853,6 +2886,8 @@ function makeHost(node, state) {
     commit() {
       const w = findW(node, "timeline");
       if (w) w.value = serialiseTimeline(state.tl);
+      node.properties = node.properties || {};
+      node.properties[VIEW_PROP] = viewState(state.tl);
       node.setDirtyCanvas(true, true);
       syncAllFreezeNodes();
     },
@@ -2985,6 +3020,7 @@ app.registerExtension({
       const ghost = (_a = node.inputs) == null ? void 0 : _a.findIndex((i) => i.name === "timeline");
       if (ghost >= 0) node.removeInput(ghost);
       const state = { tl: parseTimeline(dataW == null ? void 0 : dataW.value) };
+      restoreView(node, state.tl);
       const host = makeHost(node, state);
       const editor = new TimelineEditor(host);
       const container = document.createElement("div");
@@ -3005,6 +3041,7 @@ app.registerExtension({
         setValue: (v) => {
           if (dataW) dataW.value = v;
           state.tl = parseTimeline(v);
+          restoreView(node, state.tl);
           editor.requestRender();
         },
         serialize: false,
@@ -3013,36 +3050,42 @@ app.registerExtension({
         getMaxHeight: heightFor,
         getHeight: heightFor
       });
-      const releaseWidth = keepDomWidgetSized(node, container);
+      const widthKeeper = keepDomWidgetSized(node, container);
+      const minNodeWidth = () => MIN_W + widthKeeper.margin();
       const resizeToContent = () => {
-        node.setSize([node.size[0], node.computeSize()[1]]);
+        node.setSize([Math.max(node.size[0], minNodeWidth()), node.computeSize()[1]]);
         node.setDirtyCanvas(true, true);
       };
       let settling = false;
-      const ro = new ResizeObserver(() => {
+      const calibrate = () => {
         var _a2;
+        const hostH = ((_a2 = container.parentElement) == null ? void 0 : _a2.clientHeight) ?? 0;
+        if (hostH < 1) return false;
+        const gap = Math.min(MAX_INSET, Math.max(0, Math.round(heightFor() - hostH)));
+        if (Math.abs(gap - inset) <= 1) return false;
+        inset = gap;
+        return true;
+      };
+      const ro = new ResizeObserver(() => {
         if (settling) return;
         const h = editor.root.offsetHeight;
         if (h < 1) return;
-        if (Math.abs(h - measured) <= 1) return;
-        measured = h;
+        const grew = Math.abs(h - measured) > 1;
+        if (grew) measured = h;
+        if (!calibrate() && !grew) return;
         settling = true;
         resizeToContent();
         requestAnimationFrame(() => {
           settling = false;
         });
-        const hostH = ((_a2 = container.parentElement) == null ? void 0 : _a2.clientHeight) ?? 0;
-        if (hostH > 0) {
-          const missing = heightFor() - hostH;
-          if (missing > inset && missing <= MAX_INSET) inset = Math.round(missing);
-        }
       });
       ro.observe(editor.root);
       editor.onHeightChange = () => requestAnimationFrame(resizeToContent);
       const origResize = node.onResize;
       node.onResize = function(size) {
         origResize == null ? void 0 : origResize.apply(this, arguments);
-        if (size[0] < MIN_W) size[0] = MIN_W;
+        const min = minNodeWidth();
+        if (size[0] < min) size[0] = min;
         size[1] = this.computeSize(size[0])[1];
         editor.requestRender();
       };
@@ -3051,7 +3094,8 @@ app.registerExtension({
         const sz = origComputeSize();
         const needed = heightFor();
         if (sz[1] < needed) sz[1] = needed;
-        if (sz[0] < MIN_W) sz[0] = MIN_W;
+        const min = minNodeWidth();
+        if (sz[0] < min) sz[0] = min;
         return sz;
       };
       const syncQuantumStep = () => {
@@ -3144,6 +3188,7 @@ app.registerExtension({
         requestAnimationFrame(() => {
           var _a2;
           state.tl = parseTimeline((_a2 = findW(node, "timeline")) == null ? void 0 : _a2.value);
+          restoreView(node, state.tl);
           syncSlots();
           resizeToContent();
           editor.requestRender();
@@ -3166,13 +3211,14 @@ app.registerExtension({
       const tick = window.setInterval(() => {
         syncQuantumStep();
         detectSourceSwaps();
+        editor.retightenToSources();
         editor.requestRender();
       }, 300);
       const origRemoved = node.onRemoved;
       node.onRemoved = function(...args) {
         window.clearInterval(tick);
         ro.disconnect();
-        releaseWidth();
+        widthKeeper.release();
         editor.destroy();
         releaseUnused([]);
         origRemoved == null ? void 0 : origRemoved.apply(this, args);

@@ -8,7 +8,7 @@
 import { app as comfyApp } from "./comfyRuntime";
 import {
   type FitMode, type ImportMode, type QuantizeMode, type Timeline,
-  parseTimeline, quantizeCount, quantizeGrid, serialiseTimeline, slotInUse,
+  parseTimeline, quantizeCount, quantizeGrid, serialiseTimeline, slotInUse, viewState,
 } from "./timeline/model";
 import {
   PREVIEW_MAX_H, TimelineEditor, type KeyAction, type TimelineHost,
@@ -61,14 +61,16 @@ function readSetting(id: string, fallback: string): string {
     return fallback;
   }
 }
-// The canvas renderer reserves the widget row a few px short (rounding), which shows up
-// as a clipped bottom edge that varies with the aspect ratio.
-const ROW_SAFETY = 8;
+// The canvas renderer reserves the widget row a few px short (rounding), which shows up as
+// a clipped bottom edge. `inset` MEASURES that shortfall, so this is only the cushion for
+// sub-pixel rounding on top of it - and whatever is put here is, by definition, the empty
+// strip left under the toolbar. It was 8, which is exactly the margin that looked wrong.
+const ROW_SAFETY = 2;
 const MAX_INSET = 48;
 
 // A console version stamp: a cached bundle is the number one confounder when debugging
 // frontend behaviour that "should" already be fixed.
-console.log("[NKD Timeline] rev 3.1.0");
+console.log("[NKD Timeline] rev 3.1.1");
 
 // ── Widget helpers ────────────────────────────────────────────────────────────
 
@@ -101,9 +103,16 @@ function hideWidget(w: any): void {
  * inset. The 250 ms poll matters: the ResizeObserver does NOT fire when ComfyUI re-lays
  * out the host, which is precisely when it breaks.
  */
-function keepDomWidgetSized(node: any, container: HTMLElement): () => void {
+function keepDomWidgetSized(
+  node: any, container: HTMLElement,
+): { release: () => void; margin: () => number } {
   const MAX_MARGIN = 40;
   let enforcing = false;
+  // The gutter ComfyUI leaves between the node's border and the widget column. Starts at
+  // LiteGraph's own 15 and is re-measured from the real layout below. Exposed because the
+  // node's MINIMUM WIDTH has to include it: clamping the node to MIN_W alone leaves the
+  // host at MIN_W - margin, the container's `min-width` then overflows it to the right, and
+  // the widget ends up flush against the right border while the left keeps its gutter.
   let goodMargin = 15;
   const vueMode = () => !!(window as any).LiteGraph?.vueNodesMode;
   const clamp = () => {
@@ -147,10 +156,24 @@ function keepDomWidgetSized(node: any, container: HTMLElement): () => void {
     clamp();
   };
   const iv = window.setInterval(clamp, 250);
-  return () => { ro.disconnect(); clearInterval(iv); };
+  return {
+    release: () => { ro.disconnect(); clearInterval(iv); },
+    margin: () => goodMargin,
+  };
 }
 
 // ── Host: everything the editor needs to know about the node ──────────────────
+
+/** Where the view state lives instead of the widget. See `serialiseTimeline`. */
+const VIEW_PROP = "nkdView";
+
+/** Put zoom/scroll back on a timeline that was just parsed from the widget. */
+function restoreView(node: any, tl: Timeline): void {
+  const v = node.properties?.[VIEW_PROP];
+  if (!v || typeof v !== "object") return;
+  if (Number.isFinite(Number(v.zoom))) tl.ui.zoom = Number(v.zoom);
+  if (Number.isFinite(Number(v.scroll))) tl.ui.scroll = Number(v.scroll);
+}
 
 type SourceEntry = { ref: MediaRef; info: MediaInfo | null; label: string };
 type Host = TimelineHost & {
@@ -178,6 +201,11 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
     commit() {
       const w = findW(node, "timeline");
       if (w) w.value = serialiseTimeline(state.tl);
+      // Zoom and scroll ride in `properties`, NOT in the widget: LiteGraph saves them with
+      // the workflow, but they are not a node input, so panning the view no longer throws
+      // away a fifteen-second render.
+      node.properties = node.properties || {};
+      node.properties[VIEW_PROP] = viewState(state.tl);
       node.setDirtyCanvas(true, true);
       // A downstream Freeze Frames draws one socket per marker, and it can only learn the
       // count by reading THIS widget. Pushing from here is what makes pressing M grow the
@@ -305,6 +333,7 @@ comfyApp.registerExtension({
       if (ghost >= 0) node.removeInput(ghost);
 
       const state = { tl: parseTimeline(dataW?.value) };
+      restoreView(node, state.tl);
       const host = makeHost(node, state);
       const editor = new TimelineEditor(host);
 
@@ -339,6 +368,7 @@ comfyApp.registerExtension({
         setValue: (v: string) => {
           if (dataW) dataW.value = v;
           state.tl = parseTimeline(v);
+          restoreView(node, state.tl);
           editor.requestRender();
         },
         serialize: false,
@@ -349,32 +379,71 @@ comfyApp.registerExtension({
       });
       void domWidget;
 
-      const releaseWidth = keepDomWidgetSized(node, container);
+      const widthKeeper = keepDomWidgetSized(node, container);
+      /**
+       * MIN_W is what the CONTENT needs; the node also has to pay for the gutter ComfyUI
+       * leaves around the widget column.
+       *
+       * Clamping the node to MIN_W alone is what left the widget lopsided: the host then
+       * gets MIN_W minus the gutter, the container's `min-width: MIN_W` overflows it, and
+       * since the host is anchored on the left the spill all lands on the right - flush
+       * against that border while the left keeps its margin. `margin()` is the measured
+       * TOTAL (node width minus host width), so it is added once, not per side.
+       */
+      const minNodeWidth = () => MIN_W + widthKeeper.margin();
 
+      /**
+       * Keep the node's box wrapped around the widget.
+       *
+       * The width clamp is the important half. `container` carries `min-width: MIN_W`, so
+       * the rendered DOM can never be narrower than that - but nothing forced the NODE to
+       * be that wide, and a freshly created one is 210 px. Measured live: node 210 wide,
+       * widget DOM 380, so the timeline hung out past both borders. Same fix as NKD Sigmas
+       * Curve, which clamps to its canvas width on every resize.
+       *
+       * The width the user chose is still preserved - this only ever raises it to the
+       * minimum, never shrinks it back to `computeSize()[0]`.
+       */
       const resizeToContent = () => {
-        // Preserve the user's width: computeSize()[0] is the MINIMUM and would shrink it.
-        node.setSize([node.size[0], node.computeSize()[1]]);
+        node.setSize([Math.max(node.size[0], minNodeWidth()), node.computeSize()[1]]);
         node.setDirtyCanvas(true, true);
       };
 
       // Re-lock the height whenever the content's real height changes (new track, output
       // aspect changed by conform, control bar wrapping to two rows).
       let settling = false;
+
+      /**
+       * How many px the host row ends up short of what we asked for.
+       *
+       * ASSIGNED, never ratcheted. A one-way maximum was the bug: a single reading taken
+       * while the layout was still settling (host briefly short) got locked in for the rest
+       * of the session as dead space under the toolbar. Assigning converges instead - the
+       * gap is `asked - got` and `asked` already contains the current inset, so a constant
+       * renderer offset is an immediate fixed point, not a feedback loop. The 1 px deadband
+       * keeps sub-pixel rounding from thrashing the node size.
+       */
+      const calibrate = (): boolean => {
+        const hostH = container.parentElement?.clientHeight ?? 0;
+        if (hostH < 1) return false;
+        const gap = Math.min(MAX_INSET, Math.max(0, Math.round(heightFor() - hostH)));
+        if (Math.abs(gap - inset) <= 1) return false;
+        inset = gap;
+        return true;
+      };
+
       const ro = new ResizeObserver(() => {
         if (settling) return;
         const h = editor.root.offsetHeight;   // offsetHeight, NOT getBoundingClientRect:
         if (h < 1) return;                    // gBCR is screen space and scales with zoom
-        if (Math.abs(h - measured) <= 1) return;
-        measured = h;
+        const grew = Math.abs(h - measured) > 1;
+        if (grew) measured = h;
+        // Recalibrated on EVERY tick, not only when the content changed height: otherwise
+        // a stale inset survives until the user happens to add a track.
+        if (!calibrate() && !grew) return;
         settling = true;
         resizeToContent();
         requestAnimationFrame(() => { settling = false; });
-        // Calibrate the row inset from what the host actually got versus what we asked.
-        const hostH = container.parentElement?.clientHeight ?? 0;
-        if (hostH > 0) {
-          const missing = heightFor() - hostH;
-          if (missing > inset && missing <= MAX_INSET) inset = Math.round(missing);
-        }
       });
       ro.observe(editor.root);
       editor.onHeightChange = () => requestAnimationFrame(resizeToContent);
@@ -382,7 +451,8 @@ comfyApp.registerExtension({
       const origResize = node.onResize;
       node.onResize = function (this: any, size: [number, number]) {
         origResize?.apply(this, arguments as any);
-        if (size[0] < MIN_W) size[0] = MIN_W;
+        const min = minNodeWidth();
+        if (size[0] < min) size[0] = min;
         size[1] = this.computeSize(size[0])[1];
         editor.requestRender();
       };
@@ -392,7 +462,8 @@ comfyApp.registerExtension({
         const sz = origComputeSize();       // no arguments: passing a width breaks LGN
         const needed = heightFor();
         if (sz[1] < needed) sz[1] = needed;
-        if (sz[0] < MIN_W) sz[0] = MIN_W;
+        const min = minNodeWidth();
+        if (sz[0] < min) sz[0] = min;
         return sz;
       };
 
@@ -503,6 +574,7 @@ comfyApp.registerExtension({
         // Widget values are restored AFTER the node is created.
         requestAnimationFrame(() => {
           state.tl = parseTimeline(findW(node, "timeline")?.value);
+          restoreView(node, state.tl);
           syncSlots();
           resizeToContent();
           editor.requestRender();
@@ -533,6 +605,9 @@ comfyApp.registerExtension({
       const tick = window.setInterval(() => {
         syncQuantumStep();
         detectSourceSwaps();
+        // After a swap the new length only lands once the probe answers, so the clamp
+        // belongs here rather than inside the detector. No-op when nothing shrank.
+        editor.retightenToSources();
         editor.requestRender();
       }, 300);
 
@@ -540,7 +615,7 @@ comfyApp.registerExtension({
       node.onRemoved = function (this: any, ...args: any[]) {
         window.clearInterval(tick);
         ro.disconnect();
-        releaseWidth();
+        widthKeeper.release();
         editor.destroy();
         releaseUnused([]);
         origRemoved?.apply(this, args);

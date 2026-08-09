@@ -726,18 +726,34 @@ class NKDTimeline(io.ComfyNode):
             width = int(width) if width > 0 else int(w0)
             height = int(height) if height > 0 else int(h0)
 
-        out = torch.zeros((count, height, width, 3), dtype=torch.float32)
-        mask_out = torch.zeros((count, height, width), dtype=torch.float32)
-        coverage = torch.zeros((count, height, width), dtype=torch.float32)
+        # `empty`, not `zeros`: at 1920x1080x294 this buffer is 6.8 GiB and MEMSETTING it
+        # costs 2.4s - measured - only for the clips to overwrite it a moment later. The
+        # frames no clip covers are blacked out right after the loop, before anything reads
+        # them, so the uninitialised memory is never observable.
+        out = torch.empty((count, height, width, 3), dtype=torch.float32)
         # Which output frames already carry picture. A blend needs something underneath to
         # blend WITH: the bottom-most clip on a frame always writes straight, whatever its
-        # track mode says, or `multiply` over the initial black would just erase it.
+        # track mode says, or `multiply` over the initial black would just erase it. It is
+        # also what says which frames still need blacking out.
         written = torch.zeros(count, dtype=torch.bool)
+        # Coverage is constant ACROSS each frame - it is only ever set whole frames at a
+        # time - so it is kept as one flag per frame and expanded to a full-size view at the
+        # end. Materialising it cost 2.0s and 2.3 GiB for information that is one bit per
+        # frame. Same for the mask lane when nothing is on it.
+        cover_rows = torch.zeros(count, dtype=torch.float32)
+        mask_out = (torch.zeros((count, height, width), dtype=torch.float32)
+                    if maskclips else None)
         audio_segments: list[tuple[torch.Tensor, int, int, int, float]] = []
         sample_rate = 0
 
         end_frame = start_frame + count
+        # ponytail: progress is per CLIP, not per frame - gather_window decodes a whole
+        # window in ONE core call (that is the point: no decoder of our own), so there is
+        # no finer hook to report from. Ticked at the TOP of each body so the count still
+        # lands on the total when a clip falls outside the range and is skipped.
+        pbar = comfy.utils.ProgressBar(len(clips) + len(maskclips) + len(auclips))
         for clip in clips:  # already sorted by track, so higher ones overwrite
+            pbar.update(1)
             a = max(clip["start"], start_frame)
             b = min(clip["start"] + clip["length"], end_frame)
             if b <= a:
@@ -758,7 +774,7 @@ class NKDTimeline(io.ComfyNode):
                 have = written[lo_i:hi_i].view(-1, 1, 1, 1)
                 out[lo_i:hi_i] = torch.where(have, blended, fitted)
             written[lo_i:hi_i] = True
-            coverage[lo_i:hi_i] = 1.0
+            cover_rows[lo_i:hi_i] = 1.0
 
             if clip_audio and audio is not None and not clip.get("muted"):
                 wave = audio["waveform"]
@@ -772,9 +788,16 @@ class NKDTimeline(io.ComfyNode):
                 audio_segments.append((wave[0], sr,
                                        int(round((a - start_frame) / fps * sr)), trim, 1.0))
 
+        # Black out the frames no clip reached. This is what makes `torch.empty` above safe,
+        # so it MUST stay ahead of every read of `out` - the mask lane and the audio mix do
+        # not touch it, but `current_image` does.
+        if not bool(written.all()):
+            out[(~written).nonzero().flatten()] = 0.0
+
         # The mask lane. A mask clip may point at ANY slot: a real MASK passes through, an
         # image or video is read as luminance. That is "use this video as a mask".
         for clip in maskclips:
+            pbar.update(1)
             a = max(clip["start"], start_frame)
             b = min(clip["start"] + clip["length"], end_frame)
             if b <= a:
@@ -787,6 +810,7 @@ class NKDTimeline(io.ComfyNode):
                 _to_mask(frames), width, height, fit).clamp(0.0, 1.0)
 
         for ac in auclips:
+            pbar.update(1)
             if ac.get("muted"):
                 continue
             src = auds[ac["src"]]
@@ -822,6 +846,15 @@ class NKDTimeline(io.ComfyNode):
 
         markers = ", ".join(str(i) for i in marker_indices(
             [clips, maskclips, auclips], start_frame, count))
+
+        # Blown up to full size only now, and as a VIEW (stride 0 across H and W): no copy,
+        # no allocation. Every ordinary tensor op reads it fine; a consumer that writes into
+        # a mask IN PLACE gets a loud torch error rather than silent corruption, and can be
+        # fed a `.contiguous()` copy at that point.
+        coverage = cover_rows.view(count, 1, 1).expand(count, height, width)
+        if mask_out is None:
+            mask_out = torch.zeros((count, 1, 1),
+                                   dtype=torch.float32).expand(count, height, width)
 
         return io.NodeOutput(out, mask_out, coverage, audio_out, video_out,
                              float(fps), int(count), int(width), int(height), int(current),

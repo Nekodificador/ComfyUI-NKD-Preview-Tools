@@ -324,6 +324,47 @@ def test_current_image_is_the_composited_frame():
     assert cur_img.shape[0] == 1
 
 
+def test_gaps_are_black_and_the_flat_lanes_cost_nothing():
+    """`out` is allocated with `torch.empty` - memsetting 6.8 GiB measured 2.4s - so the
+    frames no clip covers MUST be blacked out explicitly. Uninitialised memory leaking into
+    a gap would show up as garbage exactly where the design says "region to generate".
+
+    Coverage and an empty mask lane are stride-0 views for the same reason: they carry one
+    value per frame, and materialising them cost 4.1s and 4.5 GiB at 1080p.
+    """
+    import json
+
+    seq = torch.full((6, 4, 4, 3), 0.5)
+    tl = json.dumps({
+        "clips": [{"src": "media_0", "track": 0, "start": 2, "trimIn": 0, "length": 6}],
+        "masks": [], "audio": [], "ui": {"playhead": 0}})
+    r = NKDTimeline.execute(
+        media={"media_0": seq}, timeline=tl, import_mode="stack", fps=24.0,
+        start_frame=0, frame_count=12, width=4, height=4, fit="stretch",
+        quantize="free", quantize_n=8, clip_audio=False)
+    images, mask, cov = r.result[0], r.result[1], r.result[2]
+
+    assert images.shape[0] == 12
+    for f in (0, 1, 8, 11):                       # before the clip and after it
+        assert float(images[f].abs().max()) == 0.0, f
+    for f in (2, 5, 7):
+        assert float(images[f].min()) == 0.5, f
+
+    assert cov.shape == (12, 4, 4) and mask.shape == (12, 4, 4)
+    assert cov.stride() == (1, 0, 0) and mask.stride() == (1, 0, 0)   # views, not buffers
+    assert float(cov[0].max()) == 0.0 and float(cov[3].min()) == 1.0
+    assert float(mask.max()) == 0.0
+    # A real mask clip still gets a full per-pixel buffer.
+    tl2 = json.loads(tl)
+    tl2["masks"] = [{"src": "media_0", "track": 0, "start": 0, "trimIn": 0, "length": 6}]
+    r2 = NKDTimeline.execute(
+        media={"media_0": seq}, timeline=json.dumps(tl2), import_mode="stack", fps=24.0,
+        start_frame=0, frame_count=12, width=4, height=4, fit="stretch",
+        quantize="free", quantize_n=8, clip_audio=False)
+    assert r2.result[1].stride() == (16, 4, 1)
+    assert float(r2.result[1][0].min()) > 0.0
+
+
 def test_classify():
     """One socket takes everything, so the kind has to be recovered from the object. The
     four are never ambiguous - but a wrong answer here would put a mask on the picture

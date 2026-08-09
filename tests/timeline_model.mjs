@@ -159,8 +159,10 @@ test("serialiseTimeline — round trip, no transient fields", () => {
   assert.deepEqual(round.clips[0], {
     id: "a", src: "video_0", track: 1, start: 4, trimIn: 2, length: 8,
   });
+  // The playhead persists in the widget on purpose - it drives current_frame /
+  // current_image, so a scrub SHOULD invalidate the render. The zoom must not.
   assert.equal(round.ui.playhead, 3);
-  assert.equal(round.ui.zoom, 1.5);
+  assert.equal(JSON.parse(M.serialiseTimeline(t)).ui.zoom, undefined);
 });
 
 test("clipsAt — the higher track is the visible one", () => {
@@ -369,12 +371,16 @@ test("viewWindow — zoom and scroll stay inside the content", () => {
   }
   // A tiny timeline still yields a usable window rather than collapsing to zero.
   assert.ok(M.viewWindow({ ...ui, zoom: M.MAX_ZOOM }, 10).frames >= 2);
-  // The view state round-trips, so a workflow reopens where it was left.
+  // The view state goes through `viewState` into node.properties, NOT through the widget
+  // JSON: the widget is a node input, so a wheel tick there would cost a full re-render.
   const t = M.emptyTimeline();
   t.ui.zoom = 6; t.ui.scroll = 42;
-  const back = M.parseTimeline(M.serialiseTimeline(t));
-  assert.equal(back.ui.zoom, 6);
-  assert.equal(back.ui.scroll, 42);
+  assert.deepEqual(M.viewState(t), { zoom: 6, scroll: 42 });
+  const json = JSON.parse(M.serialiseTimeline(t));
+  assert.equal(json.ui.zoom, undefined);
+  assert.equal(json.ui.scroll, undefined);
+  // Still parsed when present, so workflows saved by older versions keep their view.
+  assert.equal(M.parseTimeline(JSON.stringify({ ui: { zoom: 6, scroll: 42 } })).ui.zoom, 6);
 });
 
 test("mute — per clip, omitted from the JSON when off", () => {
