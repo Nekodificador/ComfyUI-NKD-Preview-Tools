@@ -38,7 +38,9 @@ function markerCountOf(timelineNode: any): number {
   const start = Math.max(0, num(widgetValue(timelineNode, "start_frame"), 0));
   const count = effectiveCount(
     tl, start, Math.max(0, num(widgetValue(timelineNode, "frame_count"), 0)),
-    String(widgetValue(timelineNode, "quantize") ?? ""),
+    // The widget is named `model` since 2026-08-09: what you pick IS the model, and the
+    // frame grid follows from it.
+    String(widgetValue(timelineNode, "model") ?? ""),
     num(widgetValue(timelineNode, "quantize_n"), 8));
   return markerFrames(tl).filter((f) => f >= start && f < start + count).length;
 }

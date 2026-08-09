@@ -74,6 +74,73 @@ function quantizeGrid(mode, k = 8) {
 function firstStop(step, offset) {
   return offset > 1 ? offset : offset + step;
 }
+const ASPECT_CUSTOM = "Custom";
+const ASPECT_SOURCE = "As Source";
+const ASPECT_RATIOS = {
+  [ASPECT_CUSTOM]: null,
+  [ASPECT_SOURCE]: null,
+  "1:1": [1, 1],
+  "2:3 Vertical": [2, 3],
+  "3:4 Vertical": [3, 4],
+  "3:5 Vertical": [3, 5],
+  "4:5 Vertical": [4, 5],
+  "5:7 Vertical": [5, 7],
+  "5:8 Vertical": [5, 8],
+  "7:9 Vertical": [7, 9],
+  "9:16 Vertical": [9, 16],
+  "9:19 Vertical": [9, 19],
+  "9:21 Vertical": [9, 21],
+  "9:32 Vertical": [9, 32],
+  "3:2 Horizontal": [3, 2],
+  "4:3 Horizontal": [4, 3],
+  "5:3 Horizontal": [5, 3],
+  "5:4 Horizontal": [5, 4],
+  "7:5 Horizontal": [7, 5],
+  "8:5 Horizontal": [8, 5],
+  "9:7 Horizontal": [9, 7],
+  "16:9 Horizontal": [16, 9],
+  "19:9 Horizontal": [19, 9],
+  "21:9 Horizontal": [21, 9],
+  "32:9 Horizontal": [32, 9]
+};
+function scaleToMegapixels(width, height, targetPixels, multiple) {
+  const m = Math.max(1, Math.round(multiple));
+  if (!(width > 0) || !(height > 0)) return [m, m];
+  const aspect = width / height;
+  const hIdeal = Math.sqrt(targetPixels / aspect);
+  const wIdeal = hIdeal * aspect;
+  const snap2 = (v, up) => Math.max(1, Math.trunc(v / m) + (up ? 1 : 0)) * m;
+  let best = null;
+  for (const wUp of [false, true]) {
+    for (const hUp of [false, true]) {
+      const cw = snap2(wIdeal, wUp);
+      const ch = snap2(hIdeal, hUp);
+      const cand = [
+        Math.abs(cw / ch - aspect) / aspect,
+        Math.abs(cw * ch - targetPixels) / Math.max(1, targetPixels),
+        cw,
+        ch
+      ];
+      if (!best || cand[0] < best[0] || cand[0] === best[0] && cand[1] < best[1]) {
+        best = cand;
+      }
+    }
+  }
+  return [best[2], best[3]];
+}
+function resolveResolution(aspect, megapixels, width, height, multiple, srcW = 0, srcH = 0) {
+  const mp = Number.isFinite(megapixels) && megapixels > 0 ? megapixels : 1;
+  if (aspect === ASPECT_SOURCE) {
+    return srcW > 0 && srcH > 0 ? scaleToMegapixels(srcW, srcH, mp * 1048576, multiple) : [Math.round(width), Math.round(height)];
+  }
+  const parts = ASPECT_RATIOS[aspect];
+  if (!parts) return [Math.round(width), Math.round(height)];
+  const m = Math.max(1, Math.round(multiple));
+  const up = (v) => Math.max(m, Math.ceil(Math.trunc(v) / m) * m);
+  const target = mp * 1048576;
+  const [w, h] = parts;
+  return [up(Math.sqrt(target * w / h)), up(Math.sqrt(target * h / w))];
+}
 function quantizeCount(n, mode, k = 8) {
   n = Math.max(0, int(n));
   const grid = quantizeGrid(mode, k);
@@ -144,6 +211,7 @@ function parseClipList(raw) {
       trimIn: Math.max(0, int(c.trimIn)),
       length,
       ...c.muted ? { muted: true } : {},
+      ...c.audioOnly ? { audioOnly: true } : {},
       ...markers.length ? { markers } : {}
     });
   }
@@ -202,6 +270,7 @@ function serialiseTimeline(t) {
       length: c.length,
       ...c.muted ? { muted: true } : {},
       // omitted when false: keeps the JSON small
+      ...c.audioOnly ? { audioOnly: true } : {},
       ...((_a = c.markers) == null ? void 0 : _a.length) ? { markers: c.markers } : {}
     };
   };
@@ -321,6 +390,27 @@ function trimEnd(clip, newEnd, srcFrames, srcFps, fps) {
   const maxLen = srcFrames > 0 ? Math.max(1, Math.floor((srcFrames - clip.trimIn) / (ratio || 1))) : Number.MAX_SAFE_INTEGER;
   clip.length = Math.max(1, Math.min(Math.round(newEnd) - clip.start, maxLen));
   pruneMarkers(clip);
+}
+function splitClip(clip, frame, srcFps, fps) {
+  const at = Math.round(frame);
+  if (!(at > clip.start && at < clip.start + clip.length)) return null;
+  const ratio = fps > 0 ? srcFps / fps : 1;
+  const leftLen = at - clip.start;
+  const right = {
+    ...clip,
+    id: newId(),
+    start: at,
+    length: clip.length - leftLen,
+    trimIn: Math.max(0, clip.trimIn + Math.round(leftLen * ratio))
+  };
+  const marks = clip.markers ?? [];
+  const rightMarks = marks.filter((m) => m >= leftLen).map((m) => m - leftLen);
+  clip.length = leftLen;
+  clip.markers = cleanMarkers(marks, clip.length);
+  if (!clip.markers.length) delete clip.markers;
+  right.markers = cleanMarkers(rightMarks, right.length);
+  if (!right.markers.length) delete right.markers;
+  return right;
 }
 function slipClip(clip, deltaFrames, srcFrames, srcFps, fps) {
   const ratio = fps > 0 ? srcFps / fps : 1;
@@ -1243,6 +1333,26 @@ class TimelineEditor {
             }
           });
         }
+        if (hit.lane === "video") {
+          items.push({
+            label: c.audioOnly ? "Restore picture" : "Audio only (picture becomes a gap)",
+            active: !!c.audioOnly,
+            on: () => {
+              this.pushUndo();
+              if (c.audioOnly) delete c.audioOnly;
+              else c.audioOnly = true;
+              this.host.commit();
+              this.requestRender();
+            }
+          });
+        }
+        items.push({
+          label: "Split at playhead",
+          on: () => {
+            this.select(c);
+            this.bladeAtPlayhead();
+          }
+        });
         items.push({ label: "Delete", on: () => {
           this.select(c);
           this.deleteSelected();
@@ -1293,6 +1403,7 @@ class TimelineEditor {
       else if (bound("markIn", "i")) this.setIn(this.playhead);
       else if (bound("markOut", "o")) this.setOut(this.playhead);
       else if (bound("markClip", "x")) this.markClip();
+      else if (bound("blade", "w")) this.bladeAtPlayhead();
       else if (bound("zoomFit", "f")) this.zoomFit();
       else switch (key) {
         case " ":
@@ -1917,6 +2028,44 @@ class TimelineEditor {
     this.pushUndo();
     this.host.commit();
     return true;
+  }
+  /**
+   * Blade at the playhead - the razor every NLE has.
+   *
+   * Acts on the selection when there is one, otherwise on everything the playhead crosses
+   * in every lane, which is the same rule as Q/E and X. Cutting picture and sound in one
+   * keystroke is the point: cutting only the topmost clip would desync them.
+   */
+  bladeAtPlayhead() {
+    const fps = this.host.getFps();
+    const at = this.playhead;
+    const made = [];
+    this.pushUndo();
+    for (const lane of [
+      this.tl.clips,
+      this.tl.masks,
+      this.tl.audio
+    ]) {
+      for (const c of [...lane]) {
+        if (this.selection.size && !this.selection.has(c.id)) continue;
+        const right = splitClip(c, at, this.rateOf(c), fps);
+        if (right) {
+          lane.push(right);
+          made.push(right);
+        }
+      }
+    }
+    if (!made.length) return;
+    sortClips(this.tl);
+    this.selection.clear();
+    for (const c of made) this.selection.add(c.id);
+    this.host.commit();
+    this.requestRender();
+  }
+  /** Source frame rate for a clip, or the timeline's when it has none of its own. */
+  rateOf(c) {
+    var _a, _b;
+    return ((_b = (_a = this.host.sourceFor(c.src)) == null ? void 0 : _a.info) == null ? void 0 : _b.fps) ?? this.host.getFps();
   }
   toggleMaskOverlay() {
     this.maskOverlay = !this.maskOverlay;
@@ -2636,7 +2785,9 @@ function markerCountOf(timelineNode) {
     tl,
     start,
     Math.max(0, num(widgetValue(timelineNode, "frame_count"), 0)),
-    String(widgetValue(timelineNode, "quantize") ?? ""),
+    // The widget is named `model` since 2026-08-09: what you pick IS the model, and the
+    // frame grid follows from it.
+    String(widgetValue(timelineNode, "model") ?? ""),
     num(widgetValue(timelineNode, "quantize_n"), 8)
   );
   return markerFrames(tl).filter((f) => f >= start && f < start + count).length;
@@ -2770,6 +2921,12 @@ const KEY_SETTINGS = [
     label: "Freeze-frame marker at playhead (Shift+M toggles the mask overlay)",
     def: "m"
   },
+  {
+    action: "blade",
+    id: "NKD.Timeline.Key.Blade",
+    label: "Blade: split at the playhead",
+    def: "w"
+  },
   { action: "zoomFit", id: "NKD.Timeline.Key.ZoomFit", label: "Fit timeline", def: "f" }
 ];
 const KEY_SETTING_BY_ACTION = new Map(KEY_SETTINGS.map((k) => [k.action, k.id]));
@@ -2784,7 +2941,7 @@ function readSetting(id, fallback) {
 }
 const ROW_SAFETY = 2;
 const MAX_INSET = 48;
-console.log("[NKD Timeline] rev 3.1.1");
+console.log("[NKD Timeline] rev 3.2.0");
 const findW = (node, name) => {
   var _a;
   return (_a = node.widgets) == null ? void 0 : _a.find((w) => w.name === name);
@@ -2798,6 +2955,14 @@ function hideWidget(w) {
   w.draw = () => {
   };
   if ((_a = w.element) == null ? void 0 : _a.style) w.element.style.display = "none";
+}
+function setWidgetVisible(node, name, visible) {
+  const w = findW(node, name);
+  if (!w) return;
+  w.hidden = !visible;
+  if (w.options) w.options.hidden = !visible;
+  if (visible) delete w.computeSize;
+  else w.computeSize = () => [0, -4];
 }
 function keepDomWidgetSized(node, container) {
   const MAX_MARGIN = 40;
@@ -2881,6 +3046,7 @@ function makeHost(node, state) {
     (_a = w.callback) == null ? void 0 : _a.call(w, value);
   };
   const srcCache = /* @__PURE__ */ new Map();
+  let reported = null;
   const host = {
     getTimeline: () => state.tl,
     commit() {
@@ -2898,7 +3064,7 @@ function makeHost(node, state) {
     setFrameCount: (v) => setW("frame_count", Math.max(0, Math.round(v))),
     getQuantize: () => {
       var _a;
-      return ((_a = findW(node, "quantize")) == null ? void 0 : _a.value) ?? "free";
+      return ((_a = findW(node, "model")) == null ? void 0 : _a.value) ?? "free";
     },
     getQuantizeN: () => Math.max(1, Math.round(numW("quantize_n", 8))),
     getFit: () => {
@@ -2932,13 +3098,36 @@ function makeHost(node, state) {
         life: 8e3
       });
     },
+    /**
+     * The output resolution, in order of how much it can be trusted.
+     *
+     * 1. The widgets, when they hold a real number.
+     * 2. What the last run REPORTED. This is the only thing that works when width/height
+     *    arrive through a LINK - a resolution selector, a maths node, a primitive - because
+     *    a linked value does not exist in the browser at all: it is produced while the
+     *    graph runs. Reading the upstream node's widgets instead would only ever cover the
+     *    nodes whose output IS a widget, and a computed selector's is not.
+     * 3. The first clip's own size, so a fresh node still previews something sane.
+     */
     getOutSize() {
-      var _a;
-      const w = Math.round(numW("width", 0));
-      const h = Math.round(numW("height", 0));
+      var _a, _b, _c;
+      const firstClip = state.tl.clips[0] ?? state.tl.masks[0];
+      const srcInfo = firstClip ? (_a = srcCache.get(firstClip.src)) == null ? void 0 : _a.info : null;
+      const [w, h] = resolveResolution(
+        String(((_b = findW(node, "aspect_ratio")) == null ? void 0 : _b.value) ?? ASPECT_CUSTOM),
+        numW("megapixels", 1),
+        Math.round(numW("width", 0)),
+        Math.round(numW("height", 0)),
+        numW("size_multiple", 16),
+        (srcInfo == null ? void 0 : srcInfo.width) ?? 0,
+        (srcInfo == null ? void 0 : srcInfo.height) ?? 0
+      );
       if (w > 0 && h > 0) return [w, h];
+      if (reported && reported.width > 0 && reported.height > 0) {
+        return [reported.width, reported.height];
+      }
       const first = state.tl.clips[0];
-      const info = first ? (_a = srcCache.get(first.src)) == null ? void 0 : _a.info : null;
+      const info = first ? (_c = srcCache.get(first.src)) == null ? void 0 : _c.info : null;
       return info ? [info.width, info.height] : [16, 9];
     },
     sourceFor(src) {
@@ -2985,6 +3174,14 @@ function makeHost(node, state) {
       node.setDirtyCanvas(true, true);
     },
     clearSourceCache: () => srcCache.clear(),
+    applyMeta(m) {
+      if (!(m.width > 0 && m.height > 0)) return false;
+      if (reported && reported.width === m.width && reported.height === m.height) {
+        return false;
+      }
+      reported = { width: m.width, height: m.height };
+      return true;
+    },
     /** Read the cache WITHOUT resolving, so the swap detector can compare against it. */
     peekSource: (src) => srcCache.get(src),
     dropSource: (src) => {
@@ -3195,6 +3392,14 @@ app.registerExtension({
         });
         return r;
       };
+      const onMeta = (e) => {
+        const d = e == null ? void 0 : e.detail;
+        if (!d || String(d.node) !== String(node.id)) return;
+        if (!host.applyMeta(d)) return;
+        resizeToContent();
+        editor.requestRender();
+      };
+      api.addEventListener("nkd-timeline-meta", onMeta);
       const detectSourceSwaps = () => {
         for (const slot of new Set(
           [...state.tl.clips, ...state.tl.masks, ...state.tl.audio].map((c) => c.src)
@@ -3208,7 +3413,27 @@ app.registerExtension({
           editor.requestRender();
         }
       };
+      let lastAspect = null;
+      let lastModel = null;
+      const syncAspectWidgets = () => {
+        var _a2, _b;
+        const aspect = String(((_a2 = findW(node, "aspect_ratio")) == null ? void 0 : _a2.value) ?? ASPECT_CUSTOM);
+        const model = String(((_b = findW(node, "model")) == null ? void 0 : _b.value) ?? "");
+        if (aspect === lastAspect && model === lastModel) return;
+        lastAspect = aspect;
+        lastModel = model;
+        const custom = aspect === ASPECT_CUSTOM;
+        setWidgetVisible(node, "width", custom);
+        setWidgetVisible(node, "height", custom);
+        setWidgetVisible(node, "megapixels", !custom);
+        setWidgetVisible(node, "size_multiple", !custom);
+        setWidgetVisible(node, "quantize_n", model === QUANTIZE_CUSTOM);
+        if (Array.isArray(node.widgets)) node.widgets = [...node.widgets];
+        resizeToContent();
+        editor.requestRender();
+      };
       const tick = window.setInterval(() => {
+        syncAspectWidgets();
         syncQuantumStep();
         detectSourceSwaps();
         editor.retightenToSources();
@@ -3219,6 +3444,7 @@ app.registerExtension({
         window.clearInterval(tick);
         ro.disconnect();
         widthKeeper.release();
+        api.removeEventListener("nkd-timeline-meta", onMeta);
         editor.destroy();
         releaseUnused([]);
         origRemoved == null ? void 0 : origRemoved.apply(this, args);

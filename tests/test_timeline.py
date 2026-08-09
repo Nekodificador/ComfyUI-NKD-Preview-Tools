@@ -15,10 +15,15 @@ sys.path.insert(0, _PACK)
 # The node imports folder_paths / comfy.utils from core: custom_nodes/<pack>/ -> ComfyUI/
 sys.path.insert(0, os.path.dirname(os.path.dirname(_PACK)))
 
+from fractions import Fraction  # noqa: E402
+
 import torch  # noqa: E402
 
+from comfy_api.latest import Types  # noqa: E402
+
 from nkd_timeline import (  # noqa: E402
-    BLEND_MODES, QUANTIZE_MODES, NKDTimeline, _to_mask, _to_rgb, blend_pixels,
+    ASPECT_MODES, BLEND_MODES, QUANTIZE_MODES, NKDTimeline, _to_mask, _to_rgb,
+    blend_pixels, resolve_resolution,
     build_sources, classify,
     fit_frames, gather_window, marker_indices, mix_audio, parse_frame_list,
     parse_timeline, quantize_count, quantize_stops,
@@ -30,6 +35,20 @@ LTX = "LTX (8n+1)"
 MOCHI = "Mochi (6n+1)"
 MINIMAX = "MiniMax H3 (17n+5)"
 CUSTOM = "custom (multiple of N)"
+
+
+def outs(r):
+    """The result tuple keyed by the schema's OUTPUT NAMES.
+
+    Indexing by number is what let a whole reorder of the sockets slip past these tests -
+    every assertion still passed while pointing at a different value. The names are the
+    contract. It also pins the two lists to the same length, which is the classic way this
+    node breaks: the runtime hands out the tuple by slot number, so one missing element
+    silently shifts every socket after it.
+    """
+    names = [o.display_name for o in NKDTimeline.define_schema().outputs]
+    assert len(names) == len(r.result), (len(names), len(r.result))
+    return dict(zip(names, r.result))
 
 
 def test_quantize():
@@ -305,9 +324,11 @@ def test_current_image_is_the_composited_frame():
         r = NKDTimeline.execute(
             media={"media_0": seq}, timeline=tl,
             import_mode="stack", fps=24.0, start_frame=0, frame_count=0, width=8,
-            height=8, fit="stretch", quantize="free", quantize_n=8, clip_audio=False)
-        (images, _mask, _cov, _aud, _vid, _fps, n, _w, _h, cur, cur_img, dur,
-         _marks) = r.result
+            height=8, fit="stretch", aspect_ratio="Custom", megapixels=1.0,
+            size_multiple=16, model="free", quantize_n=8, clip_audio=False)
+        o = outs(r)
+        images, n, cur = o["images"], o["frame_count"], o["current_frame"]
+        cur_img, dur = o["current_image"], o["duration"]
         # Duration must be the QUANTISED count in seconds, matching what was rendered.
         assert abs(dur - n / 24.0) < 1e-9, (dur, n)
         assert images.shape[0] == n
@@ -340,9 +361,11 @@ def test_gaps_are_black_and_the_flat_lanes_cost_nothing():
         "masks": [], "audio": [], "ui": {"playhead": 0}})
     r = NKDTimeline.execute(
         media={"media_0": seq}, timeline=tl, import_mode="stack", fps=24.0,
-        start_frame=0, frame_count=12, width=4, height=4, fit="stretch",
-        quantize="free", quantize_n=8, clip_audio=False)
-    images, mask, cov = r.result[0], r.result[1], r.result[2]
+        start_frame=0, frame_count=12, width=4, height=4, fit="stretch", aspect_ratio="Custom", megapixels=1.0,
+            size_multiple=16,
+        model="free", quantize_n=8, clip_audio=False)
+    o = outs(r)
+    images, mask, cov = o["images"], o["mask"], o["coverage"]
 
     assert images.shape[0] == 12
     for f in (0, 1, 8, 11):                       # before the clip and after it
@@ -352,17 +375,149 @@ def test_gaps_are_black_and_the_flat_lanes_cost_nothing():
 
     assert cov.shape == (12, 4, 4) and mask.shape == (12, 4, 4)
     assert cov.stride() == (1, 0, 0) and mask.stride() == (1, 0, 0)   # views, not buffers
-    assert float(cov[0].max()) == 0.0 and float(cov[3].min()) == 1.0
+    # POLARITY: white in the GAPS, black over material. It is an inpainting mask ("generate
+    # here"), not a report of what is covered - core's VAEEncodeForInpaint wipes the pixels
+    # where the mask is 1 (nodes.py:436). Flipped on purpose; do not "fix" it back.
+    assert float(cov[0].min()) == 1.0, "frame 0 is a gap -> white"
+    assert float(cov[3].max()) == 0.0, "frame 3 has material -> black"
     assert float(mask.max()) == 0.0
     # A real mask clip still gets a full per-pixel buffer.
     tl2 = json.loads(tl)
     tl2["masks"] = [{"src": "media_0", "track": 0, "start": 0, "trimIn": 0, "length": 6}]
     r2 = NKDTimeline.execute(
         media={"media_0": seq}, timeline=json.dumps(tl2), import_mode="stack", fps=24.0,
-        start_frame=0, frame_count=12, width=4, height=4, fit="stretch",
-        quantize="free", quantize_n=8, clip_audio=False)
-    assert r2.result[1].stride() == (16, 4, 1)
-    assert float(r2.result[1][0].min()) > 0.0
+        start_frame=0, frame_count=12, width=4, height=4, fit="stretch", aspect_ratio="Custom", megapixels=1.0,
+            size_multiple=16,
+        model="free", quantize_n=8, clip_audio=False)
+    assert outs(r2)["mask"].stride() == (16, 4, 1)
+    assert float(outs(r2)["mask"][0].min()) > 0.0
+
+
+def test_generate_mask_unions_the_lane_and_the_gaps():
+    """A gap is a region to generate, so it has to be WHITE in the conditioning mask.
+    `mask` alone leaves it black, and a black mask generates nothing exactly where there is
+    nothing - which is the one place the user wanted something."""
+    import json
+
+    seq = torch.full((6, 4, 4, 3), 0.5)
+    base = {"clips": [{"src": "media_0", "track": 0, "start": 0, "trimIn": 0, "length": 6}],
+            "masks": [], "audio": [], "ui": {"playhead": 0}}
+
+    def run(tl):
+        r = NKDTimeline.execute(
+            media={"media_0": seq}, timeline=json.dumps(tl), import_mode="stack", fps=24.0,
+            start_frame=0, frame_count=10, width=4, height=4, fit="stretch", aspect_ratio="Custom", megapixels=1.0,
+            size_multiple=16,
+            model="free", quantize_n=8, clip_audio=False)
+        o = outs(r)
+        return o["mask"], o["generate"]
+
+    # No mask lane: generate IS the gaps, and stays a free stride-0 view.
+    mask, gen = run(base)
+    assert gen.shape == (10, 4, 4) and gen.stride() == (1, 0, 0)
+    assert float(mask.max()) == 0.0                       # the lane is empty
+    assert [float(gen[f].max()) for f in (0, 5, 6, 9)] == [0.0, 0.0, 1.0, 1.0]
+
+    # With a mask lane: the union. Covered frames keep the lane's pixels, gaps go white.
+    tl2 = dict(base)
+    tl2["masks"] = [{"src": "media_0", "track": 0, "start": 0, "trimIn": 0, "length": 3}]
+    mask2, gen2 = run(tl2)
+    assert float(mask2[7].max()) == 0.0                   # the lane says nothing there
+    assert float(gen2[7].min()) == 1.0                    # but it IS a gap -> generate
+    assert torch.equal(gen2[1], mask2[1])                 # covered + masked: the lane wins
+    assert float(gen2[4].max()) == 0.0                    # covered, unmasked: leave alone
+
+
+def test_resolve_resolution():
+    """Parity anchor for `resolveResolution` in src/timeline/model.ts - the editor previews
+    from the TS copy, so a drift means the monitor lies about what will be rendered. Same
+    table and same formula as NKD Klein Presampling, so a ratio picked here lands on the
+    numbers that pack already produces."""
+    assert resolve_resolution("16:9 Horizontal", 1.0, 1920, 1080, 16) == (1376, 768)
+    assert resolve_resolution("9:16 Vertical", 1.0, 1920, 1080, 16) == (768, 1376)
+    assert resolve_resolution("9:16 Vertical", 0.8, 1920, 1080, 32) == (704, 1248)
+    assert resolve_resolution("1:1", 2.0, 1920, 1080, 16) == (1456, 1456)
+    assert resolve_resolution("21:9 Horizontal", 0.5, 1920, 1080, 8) == (1112, 480)
+    assert resolve_resolution("32:9 Horizontal", 1.0, 1920, 1080, 64) == (1984, 576)
+    # Custom is the default and MUST be a pass-through: that is the behaviour every
+    # workflow saved before these widgets existed depends on.
+    assert resolve_resolution("Custom", 1.0, 1920, 1080, 16) == (1920, 1080)
+    assert resolve_resolution("Custom", 4.0, 0, 0, 16) == (0, 0)
+    # An unknown ratio (a workflow from a newer version) falls back to Custom, it does not
+    # raise mid-render.
+    assert resolve_resolution("47:3 Sideways", 1.0, 800, 600, 16) == (800, 600)
+    for mult in (8, 16, 32, 64):
+        w, h = resolve_resolution("9:16 Vertical", 1.0, 0, 0, mult)
+        assert w % mult == 0 and h % mult == 0, (mult, w, h)
+    # As Source keeps the material's shape and only rescales it to the budget.
+    assert resolve_resolution("As Source", 0.5, 0, 0, 16, 1920, 1080) == (960, 544)
+    assert resolve_resolution("As Source", 0.5, 0, 0, 32, 1080, 1920) == (544, 960)
+    assert resolve_resolution("As Source", 2.0, 0, 0, 16, 2560, 1210) == (2096, 992)
+    # Without a source to copy it falls back to the typed size rather than inventing one.
+    assert resolve_resolution("As Source", 1.0, 640, 480, 16, 0, 0) == (640, 480)
+    assert len(ASPECT_MODES) == 25
+
+
+def test_audio_only_clip_is_a_gap_that_still_sounds():
+    """Cut a segment out, let the model refill it, keep the sound.
+
+    Deleting the middle clip outright takes its audio with it. An `audioOnly` clip leaves
+    the picture unwritten - so the span reads as a gap and comes out of `generate` - while
+    its own audio still lands on the mix at the right offset.
+    """
+    import json
+
+    class FakeVideo:
+        """Minimal VideoInput: duck-typed exactly like `classify` expects."""
+
+        def __init__(self, n, rate=24.0):
+            self.n, self.rate = n, rate
+
+        def get_frame_rate(self):
+            return self.rate
+
+        def get_dimensions(self):
+            return (4, 4)
+
+        def get_frame_count(self):
+            return self.n
+
+        def as_trimmed(self, start, duration, strict_duration=True):
+            return self
+
+        def get_components(self):
+            frames = torch.full((self.n, 4, 4, 3), 0.5)
+            wave = torch.ones((1, 1, int(self.n / self.rate * 8000)))
+            return Types.VideoComponents(images=frames, audio={
+                "waveform": wave, "sample_rate": 8000}, frame_rate=Fraction(24, 1))
+
+    def run(audio_only):
+        tl = {"clips": [
+            {"src": "media_0", "track": 0, "start": 0, "trimIn": 0, "length": 4},
+            {"src": "media_0", "track": 0, "start": 4, "trimIn": 4, "length": 4,
+             **({"audioOnly": True} if audio_only else {})},
+            {"src": "media_0", "track": 0, "start": 8, "trimIn": 8, "length": 4}],
+            "masks": [], "audio": [], "ui": {"playhead": 0}}
+        r = NKDTimeline.execute(
+            media={"media_0": FakeVideo(12)}, timeline=json.dumps(tl),
+            import_mode="stack", fps=24.0, start_frame=0, frame_count=12, width=4,
+            height=4, fit="stretch", aspect_ratio="Custom", megapixels=1.0,
+            size_multiple=16, model="free", quantize_n=8, clip_audio=True)
+        return outs(r)
+
+    whole = run(False)
+    holed = run(True)
+    # Picture: the middle is now black, and `generate` says "fill this".
+    assert float(whole["images"][5].max()) > 0.0
+    assert float(holed["images"][5].max()) == 0.0
+    assert float(holed["coverage"][5].min()) == 1.0          # coverage WHITE - it IS a gap
+    assert float(whole["coverage"][5].max()) == 0.0          # with the picture on, black
+    assert float(holed["generate"][5].min()) == 1.0         # generate 1 - regenerate it
+    assert float(holed["images"][1].max()) > 0.0           # the halves either side are untouched
+    assert float(holed["images"][9].max()) > 0.0
+    # Sound: unchanged. That is the whole point of the flag.
+    assert torch.allclose(whole["audio"]["waveform"], holed["audio"]["waveform"])
+    assert float(holed["audio"]["waveform"].abs().max()) > 0.0
 
 
 def test_classify():
@@ -469,9 +624,11 @@ def test_markers_output_feeds_freeze_frames():
         "ui": {"playhead": 0}})
     r = NKDTimeline.execute(
         media={"media_0": seq}, timeline=tl, import_mode="stack", fps=24.0,
-        start_frame=4, frame_count=0, width=4, height=4, fit="stretch",
-        quantize="free", quantize_n=8, clip_audio=False)
-    images, marks = r.result[0], r.result[12]
+        start_frame=4, frame_count=0, width=4, height=4, fit="stretch", aspect_ratio="Custom", megapixels=1.0,
+            size_multiple=16,
+        model="free", quantize_n=8, clip_audio=False)
+    o = outs(r)
+    images, marks = o["images"], o["markers"]
     assert marks == "2, 8"                              # 5+1-4 and 5+7-4
     frozen = NKDFreezeFrames.execute(images, marks).result
     assert frozen[1] == 2                                # count

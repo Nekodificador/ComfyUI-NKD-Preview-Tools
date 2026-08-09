@@ -7,8 +7,9 @@ that matter -- fps, frame count, resolution, ranges -- come back out as REAL SOC
 rest of the graph can be coordinated with.
 
 The important reframing: **a gap in the timeline is a region to generate**. The `coverage`
-output is 1 where there is material and 0 in the gaps, so it is directly the conditioning
-mask for temporal inpainting.
+output is 1 IN THE GAPS and 0 where there is material, so it is directly the conditioning
+mask for temporal inpainting - white means "generate here", which is the convention core
+uses (`VAEEncodeForInpaint` in nodes.py:436 wipes the pixels where the mask is 1).
 
 All the heavy lifting is already in ComfyUI core: the native VIDEO type
 (`comfy_api.latest.InputImpl.VideoFromFile`) provides `as_trimmed()` with lazy,
@@ -21,7 +22,6 @@ import json
 import math
 import re
 import os
-from fractions import Fraction
 from typing import Any, Optional
 
 import folder_paths
@@ -29,7 +29,7 @@ import numpy as np
 import torch
 
 import comfy.utils
-from comfy_api.latest import InputImpl, Types, io, ui
+from comfy_api.latest import InputImpl, io, ui
 
 # ── Frame-count quantisation ──────────────────────────────────────────────────
 # Video models only accept certain frame counts. Getting this wrong looks fine while
@@ -88,6 +88,106 @@ def first_stop(step: int, offset: int) -> int:
     8n+1 -> 9, 6n+1 -> 7, 17n+5 -> 5, multiple of N -> N.
     """
     return offset if offset > 1 else offset + step
+
+
+# ── Output resolution from an aspect ratio ────────────────────────────────────
+# Same table and same formula as NKD Klein Presampling (`helpers.py`), so a ratio picked
+# here lands on exactly the numbers that pack already produces. `Custom` means "use the
+# width/height widgets", which is the behaviour this node always had and stays the default.
+ASPECT_CUSTOM = "Custom"
+# Keep the material's own shape and only rescale it to the megapixel budget. Klein calls
+# this "As Reference" because there it follows a reference IMAGE; here the reference is the
+# first clip on the timeline, so the name says source.
+ASPECT_SOURCE = "As Source"
+ASPECT_RATIOS: dict[str, Optional[tuple[int, int]]] = {
+    ASPECT_CUSTOM:      None,
+    ASPECT_SOURCE:      None,
+    "1:1":              (1, 1),
+    "2:3 Vertical":     (2, 3),
+    "3:4 Vertical":     (3, 4),
+    "3:5 Vertical":     (3, 5),
+    "4:5 Vertical":     (4, 5),
+    "5:7 Vertical":     (5, 7),
+    "5:8 Vertical":     (5, 8),
+    "7:9 Vertical":     (7, 9),
+    "9:16 Vertical":    (9, 16),
+    "9:19 Vertical":    (9, 19),
+    "9:21 Vertical":    (9, 21),
+    "9:32 Vertical":    (9, 32),
+    "3:2 Horizontal":   (3, 2),
+    "4:3 Horizontal":   (4, 3),
+    "5:3 Horizontal":   (5, 3),
+    "5:4 Horizontal":   (5, 4),
+    "7:5 Horizontal":   (7, 5),
+    "8:5 Horizontal":   (8, 5),
+    "9:7 Horizontal":   (9, 7),
+    "16:9 Horizontal":  (16, 9),
+    "19:9 Horizontal":  (19, 9),
+    "21:9 Horizontal":  (21, 9),
+    "32:9 Horizontal":  (32, 9),
+}
+ASPECT_MODES = list(ASPECT_RATIOS)
+
+
+def scale_to_megapixels(width: int, height: int, target_pixels: float,
+                        multiple: int) -> tuple[int, int]:
+    """Scale (w,h) to about `target_pixels` keeping the aspect, aligned to `multiple`.
+
+    Ported from `_scale_to_megapixels` in NKD Klein Tools. Rounding each axis on its own
+    drifts the aspect by up to ~0.6% on awkward shapes, because the floor/ceil decisions are
+    taken in isolation; evaluating the four aligned candidates together and picking the one
+    closest in RATIO keeps it under ~0.15%. On a timeline that drift is a slow squash of the
+    picture nobody attributes to the resolution widget.
+    """
+    m = max(1, int(multiple))
+    if width <= 0 or height <= 0:
+        return m, m
+    aspect = width / height
+    h_ideal = (target_pixels / aspect) ** 0.5
+    w_ideal = h_ideal * aspect
+
+    def snap(v: float, up: bool) -> int:
+        n = int(v / m) + (1 if up else 0)
+        return max(1, n) * m
+
+    best = None
+    for w_up in (False, True):
+        for h_up in (False, True):
+            cw, ch = snap(w_ideal, w_up), snap(h_ideal, h_up)
+            cand = (abs(cw / ch - aspect) / aspect,
+                    abs(cw * ch - target_pixels) / max(1.0, target_pixels), cw, ch)
+            if best is None or cand < best:
+                best = cand
+    return best[2], best[3]
+
+
+def resolve_resolution(aspect: str, megapixels: float, width: int, height: int,
+                       multiple: int, src_w: int = 0, src_h: int = 0) -> tuple[int, int]:
+    """(width, height) for the chosen ratio, or the widgets when it is `Custom`.
+
+    `As Source` needs the first clip's dimensions, so it is resolved LATE - after the
+    sources are known - unlike the fixed ratios, which the editor can work out on its own.
+
+    `multiple` is not cosmetic: a video model's canvas has its own grid (MiniMax H3 rounds
+    to 32, `nodes_minimax_h3.py:adapt_canvas`), and landing off it means the model resizes
+    every frame again through `common_upscale`'s per-frame PIL loop - measured at 5.35s per
+    60 frames of 1080p. Matching the grid here is what avoids paying that twice.
+    """
+    mp0 = float(megapixels) if megapixels and float(megapixels) > 0 else 1.0
+    if aspect == ASPECT_SOURCE:
+        if src_w > 0 and src_h > 0:
+            return scale_to_megapixels(src_w, src_h, mp0 * 1_048_576, multiple)
+        return int(width), int(height)      # nothing to take a shape from yet
+    parts = ASPECT_RATIOS.get(aspect)
+    if parts is None:
+        return int(width), int(height)
+    m = max(1, int(multiple))
+    up = lambda v: max(m, (int(v) + m - 1) // m * m)  # noqa: E731 - ceil to the grid
+    mp = float(megapixels) if megapixels and float(megapixels) > 0 else 1.0
+    target = mp * 1_048_576
+    w_parts, h_parts = parts
+    return (up(math.sqrt(target * w_parts / h_parts)),
+            up(math.sqrt(target * h_parts / w_parts)))
 
 
 def quantize_count(n: int, mode: str, k: int = 8) -> int:
@@ -149,6 +249,7 @@ def _parse_clips(raw_list: Any) -> list[dict]:
             "trimIn": max(0, _int(c.get("trimIn"))),
             "length": length,
             "muted": bool(c.get("muted")),
+            "audioOnly": bool(c.get("audioOnly")),
             "markers": markers,
         })
     out.sort(key=lambda c: (c["track"], c["start"]))
@@ -380,6 +481,24 @@ def gather_window(kind: str, obj: Any, clip: dict, a: int, b: int,
     return frames.index_select(0, torch.tensor(picks, dtype=torch.long)), audio
 
 
+def _queue_clip_audio(segments: list, clip: dict, kind: str, obj: Any, a: int, b: int,
+                      fps: float, audio: dict, start_frame: int) -> int:
+    """Place a video clip's own sound on the mix, and report its sample rate.
+
+    Shared by the ordinary path and the audio-only one, so a clip whose picture has been
+    turned off still contributes exactly the same audio it did before.
+    """
+    wave = audio["waveform"]
+    sr = int(audio["sample_rate"])
+    src_fps = source_meta(kind, obj, fps)[0]
+    s0 = source_frame(clip, a, src_fps, fps)
+    s1 = source_frame(clip, b - 1, src_fps, fps)
+    # The decoded window starts at min(s0,s1); the offset to `a` is the trim.
+    trim = int(round((s0 - min(s0, s1)) / src_fps * sr))
+    segments.append((wave[0], sr, int(round((a - start_frame) / fps * sr)), trim, 1.0))
+    return sr
+
+
 # ── Resolution fitting ────────────────────────────────────────────────────────
 
 def _resize(chw: torch.Tensor, width: int, height: int) -> torch.Tensor:
@@ -575,6 +694,22 @@ def _register_routes() -> None:
 _register_routes()
 
 
+def _push_meta(node_id: Any, data: dict) -> None:
+    """Send what was really rendered back to this node's editor.
+
+    Best-effort by design: no server (the tests), a client that went away, or a node with
+    no id must never take a render down with them.
+    """
+    if not node_id:
+        return
+    try:
+        from server import PromptServer
+        PromptServer.instance.send_sync("nkd-timeline-meta",
+                                        {"node": str(node_id), **data})
+    except Exception:  # noqa: BLE001 - telemetry for the UI, never load-bearing
+        pass
+
+
 # ── The node ──────────────────────────────────────────────────────────────────
 
 class NKDTimeline(io.ComfyNode):
@@ -588,7 +723,7 @@ class NKDTimeline(io.ComfyNode):
                 "Lay several videos and audio tracks on a multi-track timeline and get "
                 "fps, frame count and resolution back as connectable sockets, so the "
                 "material can be coordinated before it enters the graph. Gaps in the "
-                "timeline are regions to generate: the `coverage` output is 0 there, "
+                "timeline are regions to generate: the `coverage` output is WHITE there, "
                 "ready to use as a temporal inpainting mask."
             ),
             inputs=[
@@ -606,6 +741,15 @@ class NKDTimeline(io.ComfyNode):
                     tooltip="Connect a video, an image sequence, a mask or audio - the "
                             "same socket takes any of them and the timeline puts it on "
                             "the right lane. More slots appear as you connect."),
+                # WIDGET ORDER DELIBERATELY REBUILT (Neko, 2026-08-09) - the same one-off
+                # break as the outputs below. `widgets_values` is a positional ARRAY in the
+                # saved workflow, so this repoints every stored value and the node has to be
+                # re-added. FROM HERE ON the append-only rule applies again: a widget
+                # inserted in the middle would make fps come back as the old start_frame.
+                # Read top to bottom as the order you set things up in: where material
+                # lands, what shape it comes out, how it is fitted, then time, then which
+                # model is going to eat it.
+                #
                 # The editor's data channel. socketless + multiline=False is mandatory:
                 # multiline creates a DOM textarea whose element survives being hidden.
                 io.String.Input("timeline", default="", socketless=True, multiline=False),
@@ -619,60 +763,103 @@ class NKDTimeline(io.ComfyNode):
                                        "higher track is the one you see. 'append' puts "
                                        "it after the previous one on the same track, to "
                                        "assemble a sequence."),
-                io.Float.Input("fps", default=24.0, min=1.0, max=240.0, step=0.01,
-                               tooltip="Timeline frame rate. Sources at a different rate "
-                                       "are resampled."),
-                io.Int.Input("start_frame", default=0, min=0, max=1_000_000),
-                io.Int.Input("frame_count", default=0, min=0, max=1_000_000,
-                             tooltip="0 = up to the end of the last clip."),
+                io.Combo.Input("aspect_ratio", options=ASPECT_MODES, default=ASPECT_CUSTOM,
+                               tooltip="'Custom' uses width/height below, which is what "
+                                       "this node always did. Any other ratio computes "
+                                       "them from the megapixel budget, and the monitor "
+                                       "follows immediately - no run needed."),
+                # The size group: the first pair shows on 'Custom', the second on any named
+                # ratio. The editor swaps which two are visible.
                 io.Int.Input("width", default=0, min=0, max=16384, step=8,
                              tooltip="0 = take the width of the first clip."),
                 io.Int.Input("height", default=0, min=0, max=16384, step=8,
                              tooltip="0 = take the height of the first clip."),
+                io.Float.Input("megapixels", default=1.0, min=0.05, max=16.0, step=0.05,
+                               tooltip="Pixel budget for the chosen ratio. Ignored when "
+                                       "aspect_ratio is 'Custom'."),
+                io.Int.Input("size_multiple", default=16, min=1, max=64, step=1,
+                             tooltip="Round the computed size to a multiple of this. Match "
+                                     "the model's canvas grid (MiniMax H3 uses 32) or it "
+                                     "resizes every frame again on its way in."),
                 io.Combo.Input("fit", options=["contain", "cover", "stretch"],
                                default="contain",
                                tooltip="How a clip is fitted when its aspect ratio does "
                                        "not match the output. The preview shows this "
                                        "live."),
-                io.Combo.Input("quantize", options=QUANTIZE_MODES, default=QUANTIZE_FREE,
-                               tooltip="Snap the frame count to the grid the model "
-                                       "requires. Wan, Hunyuan Video, Kandinsky, Cosmos "
-                                       "Predict and SCAIL use 4n+1; LTX and Cosmos 1 use "
-                                       "8n+1; Mochi uses 6n+1; MiniMax H3 uses 17n+5."),
+                io.Float.Input("fps", default=24.0, min=1.0, max=240.0, step=0.01,
+                               tooltip="Timeline frame rate. Sources at a different rate "
+                                       "are resampled."),
+                # Named `model` rather than `quantize` (Neko): what you pick here IS the
+                # model you are going to feed, and the frame-count grid is a consequence.
+                # Nobody looks for "quantize" when the question in their head is "which
+                # model is this for".
+                io.Combo.Input("model", options=QUANTIZE_MODES, default=QUANTIZE_FREE,
+                               tooltip="The model this timeline feeds. Its frame count is "
+                                       "snapped to the grid that model requires: Wan, "
+                                       "Hunyuan Video, Kandinsky, Cosmos Predict and SCAIL "
+                                       "use 4n+1; LTX and Cosmos 1 use 8n+1; Mochi uses "
+                                       "6n+1; MiniMax H3 uses 17n+5."),
                 io.Int.Input("quantize_n", default=8, min=1, max=256,
                              tooltip="Only used by 'custom (multiple of N)'."),
+                io.Int.Input("start_frame", default=0, min=0, max=1_000_000),
+                io.Int.Input("frame_count", default=0, min=0, max=1_000_000,
+                             tooltip="0 = up to the end of the last clip."),
                 io.Boolean.Input("clip_audio", default=True,
                                  tooltip="Include the videos' own audio in the mix."),
             ],
+            # ORDER DELIBERATELY REBUILT (Neko, 2026-08-09) - a ONE-OFF break.
+            #
+            # Sockets are wired by INDEX, so this repoints every saved link and the node has
+            # to be re-added by anyone who had it. Taken knowingly while the audience is
+            # still small; the append-only rule below applies again from here on.
+            # Grouped by what you reach for together: pictures, the three masks, sound, then
+            # the numbers, and the playhead pair last.
             outputs=[
                 io.Image.Output(display_name="images"),
-                io.Mask.Output(display_name="mask"),
-                io.Mask.Output(display_name="coverage"),
+                io.Mask.Output(display_name="mask",
+                               tooltip="The mask lane, and nothing else."),
+                # WHITE IN THE GAPS, black over material - the inpainting convention, not
+                # a report of what is covered. Flipped deliberately (Neko, 2026-08-09): the
+                # old polarity had to be inverted by hand before it was usable, which is
+                # exactly the step everybody forgot.
+                io.Mask.Output(display_name="coverage",
+                               tooltip="White where there is NO material, i.e. the stretches "
+                                       "the editor labels 'generate'. Feed it straight to a "
+                                       "temporal inpainting mask. For the gaps PLUS the mask "
+                                       "lane, use 'generate'."),
+                io.Mask.Output(display_name="generate",
+                               tooltip="Everything the model should generate: the mask "
+                                       "lane UNION the gaps. A gap is a region to "
+                                       "generate, so it belongs in the conditioning mask "
+                                       "- 'mask' alone leaves it black and nothing is "
+                                       "generated there. This is the socket for temporal "
+                                       "inpainting."),
                 io.Audio.Output(display_name="audio"),
-                io.Video.Output(display_name="video"),
-                io.Float.Output(display_name="fps"),
-                io.Int.Output(display_name="frame_count"),
+                # No VIDEO output. It only ever got split back into components downstream,
+                # and core's own Create Video makes one from `images` + `audio` in one node
+                # for the rare case that wants the container.
                 io.Int.Output(display_name="width"),
                 io.Int.Output(display_name="height"),
-                io.Int.Output(display_name="current_frame"),
-                # Appended at the END on purpose: inserting these next to the outputs
-                # they belong with would shift every later index and silently rewire
-                # saved workflows.
-                io.Image.Output(display_name="current_image"),
+                io.Float.Output(display_name="fps"),
+                io.Int.Output(display_name="frame_count"),
                 io.Float.Output(display_name="duration",
                                 tooltip="Length of the output range in seconds."),
+                io.Int.Output(display_name="current_frame"),
+                io.Image.Output(display_name="current_image"),
                 io.String.Output(display_name="markers",
                                  tooltip="Comma-separated indices of the freeze-frame "
                                          "markers (press M on a clip), counted INTO the "
                                          "'images' batch. Feed it to NKD Freeze Frames."),
             ],
+            # Needed to address the push below at THIS node's editor.
+            hidden=[io.Hidden.unique_id],
         )
 
     @classmethod
-    def execute(cls, media: io.Autogrow.Type, timeline: str,
-                import_mode: str, fps: float, start_frame: int, frame_count: int,
-                width: int, height: int, fit: str, quantize: str, quantize_n: int,
-                clip_audio: bool) -> io.NodeOutput:
+    def execute(cls, media: io.Autogrow.Type, timeline: str, import_mode: str,
+                aspect_ratio: str, width: int, height: int, megapixels: float,
+                size_multiple: int, fit: str, fps: float, model: str, quantize_n: int,
+                start_frame: int, frame_count: int, clip_audio: bool) -> io.NodeOutput:
         del import_mode   # placement happens in the editor; the backend reads the result
         sources, auds = build_sources(media)
 
@@ -706,25 +893,28 @@ class NKDTimeline(io.ComfyNode):
         span = timeline_span(clips, maskclips, auclips)
         start_frame = max(0, int(start_frame))
         count = int(frame_count) if frame_count else max(0, span - start_frame)
-        count = quantize_count(count, quantize, quantize_n)
+        count = quantize_count(count, model, quantize_n)
         if count <= 0:
             raise ValueError(
                 "NKD Timeline: the timeline is empty. Connect a video, image sequence or "
                 "mask, or set frame_count by hand.")
 
-        # Output resolution: that of the first clip unless stated.
-        if width <= 0 or height <= 0:
-            first = (clips or maskclips)
-            if first:
-                kind, obj = sources[first[0]["src"]]
-                if kind == "video":
-                    w0, h0 = obj.get_dimensions()
-                else:
-                    h0, w0 = int(obj.shape[1]), int(obj.shape[2])
+        # Output resolution. Resolved HERE, not on the way in: `As Source` needs the first
+        # clip's own dimensions, which only exist once the sources are built.
+        first = (clips or maskclips)
+        if first:
+            kind, obj = sources[first[0]["src"]]
+            if kind == "video":
+                w0, h0 = obj.get_dimensions()
             else:
-                w0, h0 = 512, 512
-            width = int(width) if width > 0 else int(w0)
-            height = int(height) if height > 0 else int(h0)
+                h0, w0 = int(obj.shape[1]), int(obj.shape[2])
+        else:
+            w0, h0 = 512, 512
+        width, height = resolve_resolution(aspect_ratio, megapixels, width, height,
+                                           size_multiple, int(w0), int(h0))
+        # Still 0 means Custom with nothing typed: fall back to the first clip as before.
+        width = int(width) if width > 0 else int(w0)
+        height = int(height) if height > 0 else int(h0)
 
         # `empty`, not `zeros`: at 1920x1080x294 this buffer is 6.8 GiB and MEMSETTING it
         # costs 2.4s - measured - only for the clips to overwrite it a moment later. The
@@ -763,6 +953,14 @@ class NKDTimeline(io.ComfyNode):
             if frames is None:
                 continue
             lo_i, hi_i = a - start_frame, b - start_frame
+            # Picture off, sound on. The span stays UNWRITTEN, so it reads as a gap and
+            # comes out of `generate` as a region to fill - while the audio below still
+            # rides along. That is "cut the middle out, refill it, keep the sound".
+            if clip.get("audioOnly"):
+                if clip_audio and audio is not None and not clip.get("muted"):
+                    sample_rate = _queue_clip_audio(audio_segments, clip, kind, obj,
+                                                    a, b, fps, audio, start_frame)                         or sample_rate
+                continue
             fitted = fit_frames(_to_rgb(frames), width, height, fit)
             mode = track_blend(tl["tracks"], clip["track"])
             if mode == "normal":
@@ -777,16 +975,8 @@ class NKDTimeline(io.ComfyNode):
             cover_rows[lo_i:hi_i] = 1.0
 
             if clip_audio and audio is not None and not clip.get("muted"):
-                wave = audio["waveform"]
-                sr = int(audio["sample_rate"])
-                sample_rate = sample_rate or sr
-                src_fps = source_meta(kind, obj, fps)[0]
-                s0 = source_frame(clip, a, src_fps, fps)
-                s1 = source_frame(clip, b - 1, src_fps, fps)
-                # The decoded window starts at min(s0,s1); the offset to `a` is the trim.
-                trim = int(round((s0 - min(s0, s1)) / src_fps * sr))
-                audio_segments.append((wave[0], sr,
-                                       int(round((a - start_frame) / fps * sr)), trim, 1.0))
+                sample_rate = _queue_clip_audio(audio_segments, clip, kind, obj,
+                                                a, b, fps, audio, start_frame) or sample_rate
 
         # Black out the frames no clip reached. This is what makes `torch.empty` above safe,
         # so it MUST stay ahead of every read of `out` - the mask lane and the audio mix do
@@ -830,8 +1020,6 @@ class NKDTimeline(io.ComfyNode):
         audio_out = {"waveform": mix_audio(audio_segments, total_samples, sample_rate),
                      "sample_rate": sample_rate}
 
-        video_out = InputImpl.VideoFromComponents(Types.VideoComponents(
-            images=out, audio=audio_out, frame_rate=Fraction(round(fps * 1000), 1000)))
         current = max(0, min(tl["playhead"], count - 1))
         # The frame under the playhead, as a one-image batch. Taken from `out`, so it is
         # the FULLY COMPOSITED frame - track blends and all - not a re-read of a source.
@@ -847,18 +1035,51 @@ class NKDTimeline(io.ComfyNode):
         markers = ", ".join(str(i) for i in marker_indices(
             [clips, maskclips, auclips], start_frame, count))
 
+        # Tell the editor what was ACTUALLY rendered.
+        #
+        # `width`/`height` can arrive through a link (a resolution selector, a maths node,
+        # a primitive), and a linked value simply does not exist in the browser: it is
+        # produced while the graph runs. Without this the monitor keeps guessing the aspect
+        # from the first source, so wiring a 9:16 selector left the preview stubbornly
+        # landscape. Pushing the resolved numbers back is the only thing that works for ANY
+        # upstream node - reading the origin's widgets only ever covers the nodes whose
+        # output IS a widget, which a computed selector's is not.
+        # `cls.hidden` is only populated by the runtime; calling execute() directly (the
+        # tests, or any script driving the node) leaves it None.
+        _push_meta(getattr(getattr(cls, "hidden", None), "unique_id", None), {
+            "width": int(width), "height": int(height),
+            "frame_count": int(count), "fps": float(fps),
+            "start_frame": int(start_frame),
+        })
+
         # Blown up to full size only now, and as a VIEW (stride 0 across H and W): no copy,
         # no allocation. Every ordinary tensor op reads it fine; a consumer that writes into
         # a mask IN PLACE gets a loud torch error rather than silent corruption, and can be
         # fed a `.contiguous()` copy at that point.
-        coverage = cover_rows.view(count, 1, 1).expand(count, height, width)
+        gap_rows = 1.0 - cover_rows
+        coverage = gap_rows.view(count, 1, 1).expand(count, height, width)
+
+        # "generate" = the mask lane UNION the gaps.
+        #
+        # A gap is a region to generate - that is the whole thesis of this node - so it
+        # belongs in the conditioning mask. `mask` on its own leaves it black, and a black
+        # mask means the model generates nothing exactly where there is nothing.
+        #
+        # With no mask lane the union IS the gaps, which are one value per frame, so it
+        # stays a stride-0 view and costs nothing. With a mask lane it has to be a real
+        # tensor: per pixel inside a covered frame, all-white in a gap.
         if mask_out is None:
             mask_out = torch.zeros((count, 1, 1),
                                    dtype=torch.float32).expand(count, height, width)
+            generate = gap_rows.view(count, 1, 1).expand(count, height, width)
+        else:
+            generate = torch.maximum(mask_out, gap_rows.view(count, 1, 1))
 
-        return io.NodeOutput(out, mask_out, coverage, audio_out, video_out,
-                             float(fps), int(count), int(width), int(height), int(current),
-                             current_image, float(duration), markers)
+        # Must match the schema's output order exactly - the runtime indexes this tuple by
+        # slot number, so a mismatch silently hands one socket's value to another.
+        return io.NodeOutput(out, mask_out, coverage, generate, audio_out,
+                             int(width), int(height), float(fps), int(count),
+                             float(duration), int(current), current_image, markers)
 
 
 def parse_frame_list(raw: str, total: int) -> list[int]:

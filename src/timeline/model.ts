@@ -22,6 +22,16 @@ export type Clip = {
   /** Silences this clip's own audio. Only meaningful where there is any. */
   muted?: boolean;
   /**
+   * Picture off, sound on: the clip contributes its audio and NOTHING to the image, so its
+   * span reads as a gap - a region to generate - while the sound plays straight through.
+   *
+   * This is what makes "cut out the middle and let the model refill it, keeping the audio"
+   * work without a separate audio lane for it. Deleting the middle clip outright would take
+   * its sound with it, and re-adding that sound would mean pointing an audio-lane clip at a
+   * video slot, which costs a second full video decode just to reach the audio track.
+   */
+  audioOnly?: boolean;
+  /**
    * Freeze-frame markers, as offsets from `start` in TIMELINE frames, sorted and unique.
    *
    * Anchored to the CLIP, not to the timeline: the point of a marker is "this exact frame
@@ -183,6 +193,76 @@ export function firstStop(step: number, offset: number): number {
 }
 
 /** Round a frame count DOWN to the nearest valid stop, never below the first one. */
+/**
+ * Twin of `resolve_resolution` in nkd_timeline.py - same table, same formula, same order
+ * as NKD Klein Presampling. Keep the two in step or the monitor previews an aspect the
+ * backend will not render. There is a parity table in tests/timeline_model.mjs.
+ */
+export const ASPECT_CUSTOM = "Custom";
+/** Keep the material's own shape, rescaled to the megapixel budget. Klein calls it "As
+ *  Reference"; here the reference is the first clip, so the name says source. */
+export const ASPECT_SOURCE = "As Source";
+export const ASPECT_RATIOS: Record<string, [number, number] | null> = {
+  [ASPECT_CUSTOM]: null,
+  [ASPECT_SOURCE]: null,
+  "1:1": [1, 1],
+  "2:3 Vertical": [2, 3], "3:4 Vertical": [3, 4], "3:5 Vertical": [3, 5],
+  "4:5 Vertical": [4, 5], "5:7 Vertical": [5, 7], "5:8 Vertical": [5, 8],
+  "7:9 Vertical": [7, 9], "9:16 Vertical": [9, 16], "9:19 Vertical": [9, 19],
+  "9:21 Vertical": [9, 21], "9:32 Vertical": [9, 32],
+  "3:2 Horizontal": [3, 2], "4:3 Horizontal": [4, 3], "5:3 Horizontal": [5, 3],
+  "5:4 Horizontal": [5, 4], "7:5 Horizontal": [7, 5], "8:5 Horizontal": [8, 5],
+  "9:7 Horizontal": [9, 7], "16:9 Horizontal": [16, 9], "19:9 Horizontal": [19, 9],
+  "21:9 Horizontal": [21, 9], "32:9 Horizontal": [32, 9],
+};
+
+/** Twin of `scale_to_megapixels`. Four aligned candidates, pick the closest in RATIO -
+ *  rounding each axis alone drifts the aspect enough to squash the picture visibly. */
+export function scaleToMegapixels(
+  width: number, height: number, targetPixels: number, multiple: number,
+): [number, number] {
+  const m = Math.max(1, Math.round(multiple));
+  if (!(width > 0) || !(height > 0)) return [m, m];
+  const aspect = width / height;
+  const hIdeal = Math.sqrt(targetPixels / aspect);
+  const wIdeal = hIdeal * aspect;
+  const snap = (v: number, up: boolean) =>
+    Math.max(1, Math.trunc(v / m) + (up ? 1 : 0)) * m;
+  let best: [number, number, number, number] | null = null;
+  for (const wUp of [false, true]) {
+    for (const hUp of [false, true]) {
+      const cw = snap(wIdeal, wUp);
+      const ch = snap(hIdeal, hUp);
+      const cand: [number, number, number, number] = [
+        Math.abs(cw / ch - aspect) / aspect,
+        Math.abs(cw * ch - targetPixels) / Math.max(1, targetPixels), cw, ch];
+      if (!best || cand[0] < best[0] || (cand[0] === best[0] && cand[1] < best[1])) {
+        best = cand;
+      }
+    }
+  }
+  return [best![2], best![3]];
+}
+
+export function resolveResolution(
+  aspect: string, megapixels: number, width: number, height: number, multiple: number,
+  srcW = 0, srcH = 0,
+): [number, number] {
+  const mp = Number.isFinite(megapixels) && megapixels > 0 ? megapixels : 1;
+  if (aspect === ASPECT_SOURCE) {
+    return srcW > 0 && srcH > 0
+      ? scaleToMegapixels(srcW, srcH, mp * 1048576, multiple)
+      : [Math.round(width), Math.round(height)];
+  }
+  const parts = ASPECT_RATIOS[aspect];
+  if (!parts) return [Math.round(width), Math.round(height)];
+  const m = Math.max(1, Math.round(multiple));
+  const up = (v: number) => Math.max(m, Math.ceil(Math.trunc(v) / m) * m);
+  const target = mp * 1048576;
+  const [w, h] = parts;
+  return [up(Math.sqrt((target * w) / h)), up(Math.sqrt((target * h) / w))];
+}
+
 export function quantizeCount(n: number, mode: QuantizeMode, k = 8): number {
   n = Math.max(0, int(n));
   const grid = quantizeGrid(mode, k);
@@ -277,6 +357,7 @@ function parseClipList(raw: any): Clip[] {
       trimIn: Math.max(0, int(c.trimIn)),
       length,
       ...(c.muted ? { muted: true } : {}),
+      ...(c.audioOnly ? { audioOnly: true } : {}),
       ...(markers.length ? { markers } : {}),
     });
   }
@@ -336,6 +417,7 @@ export function serialiseTimeline(t: Timeline): string {
     id: c.id, src: c.src, track: c.track,
     start: c.start, trimIn: c.trimIn, length: c.length,
     ...(c.muted ? { muted: true } : {}),   // omitted when false: keeps the JSON small
+    ...(c.audioOnly ? { audioOnly: true } : {}),
     ...(c.markers?.length ? { markers: c.markers } : {}),
   });
   return JSON.stringify({
@@ -517,6 +599,40 @@ export function trimEnd(clip: Clip, newEnd: number, srcFrames: number,
     : Number.MAX_SAFE_INTEGER;
   clip.length = Math.max(1, Math.min(Math.round(newEnd) - clip.start, maxLen));
   pruneMarkers(clip);   // whatever fell off the tail is gone with it
+}
+
+/**
+ * Blade: cut a clip in two at a timeline frame. Returns the new right-hand clip, or null
+ * when the frame is not strictly inside it (cutting at an edge is a no-op, not an error).
+ *
+ * The right half has to advance its `trimIn` by the frames the left half consumed, IN
+ * SOURCE CADENCE - a 30 fps source cut 24 timeline frames in has moved 30 source frames -
+ * or the second half plays from the wrong place.
+ *
+ * Markers are offsets from `start`, so they are partitioned: the ones past the cut move to
+ * the new clip rebased to ITS origin. Leaving them all on the left half would point them at
+ * pictures that half no longer contains.
+ */
+export function splitClip(clip: Clip, frame: number, srcFps: number, fps: number): Clip | null {
+  const at = Math.round(frame);
+  if (!(at > clip.start && at < clip.start + clip.length)) return null;
+  const ratio = fps > 0 ? srcFps / fps : 1;
+  const leftLen = at - clip.start;
+  const right: Clip = {
+    ...clip,
+    id: newId(),
+    start: at,
+    length: clip.length - leftLen,
+    trimIn: Math.max(0, clip.trimIn + Math.round(leftLen * ratio)),
+  };
+  const marks = clip.markers ?? [];
+  const rightMarks = marks.filter((m) => m >= leftLen).map((m) => m - leftLen);
+  clip.length = leftLen;
+  clip.markers = cleanMarkers(marks, clip.length);
+  if (!clip.markers.length) delete clip.markers;
+  right.markers = cleanMarkers(rightMarks, right.length);
+  if (!right.markers.length) delete right.markers;
+  return right;
 }
 
 /** Slip: move the content INSIDE the clip without touching position or duration.

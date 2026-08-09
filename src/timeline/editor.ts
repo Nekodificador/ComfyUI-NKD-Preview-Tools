@@ -17,7 +17,8 @@ import {
   QUANTIZE_FREE,
   BLEND_MODES, type BlendMode, type ImportMode,
   clipsAt, cropToRange, effectiveCount, fitRect, materialRange, moveClip, moveClipToLane,
-  clampClipsToSources, clipExtent, nativeFpsFor, newId, slotInUse, trimToPlayhead,
+  clampClipsToSources, clipExtent, nativeFpsFor, newId, slotInUse, splitClip,
+  trimToPlayhead,
   placementFor, quantizeStops, setTrackBlend, slipClip, snap, snapCandidates,
   MAX_ZOOM, snapFrameToGrid, sortClips, sourceFrame, timelineSpan, trackBlend, trimEnd,
   trimStart, viewWindow, markerFrames, toggleMarker,
@@ -130,7 +131,8 @@ type Lane = "video" | "mask" | "audio";
 /** Actions whose key can be rebound in ComfyUI settings. The transport (space, J/K/L)
  *  and the in/out marks (I/O) are the same in every editor, so they stay fixed. */
 export type KeyAction =
-  | "trimHead" | "trimTail" | "markIn" | "markOut" | "markClip" | "zoomFit" | "marker";
+  | "trimHead" | "trimTail" | "markIn" | "markOut" | "markClip" | "zoomFit" | "marker"
+  | "blade";
 
 type Hit =
   | { kind: "none" }
@@ -745,6 +747,25 @@ export class TimelineEditor {
           },
         });
       }
+      if (hit.lane === "video") {
+        // Picture off, sound on: the span becomes a region to generate while its own audio
+        // keeps playing. This is what "cut the middle out and refill it" needs, and it
+        // avoids inventing an audio lane that points back at a video slot.
+        items.push({
+          label: c.audioOnly ? "Restore picture" : "Audio only (picture becomes a gap)",
+          active: !!c.audioOnly,
+          on: () => {
+            this.pushUndo();
+            if (c.audioOnly) delete c.audioOnly; else c.audioOnly = true;
+            this.host.commit();
+            this.requestRender();
+          },
+        });
+      }
+      items.push({
+        label: "Split at playhead",
+        on: () => { this.select(c); this.bladeAtPlayhead(); },
+      });
       items.push({ label: "Delete", on: () => { this.select(c); this.deleteSelected(); } });
     }
 
@@ -845,6 +866,7 @@ export class TimelineEditor {
     else if (bound("markIn", "i")) this.setIn(this.playhead);
     else if (bound("markOut", "o")) this.setOut(this.playhead);
     else if (bound("markClip", "x")) this.markClip();
+    else if (bound("blade", "w")) this.bladeAtPlayhead();
     else if (bound("zoomFit", "f")) this.zoomFit();
     else switch (key) {
       case " ": this.transport.toggle(); break;
@@ -1133,6 +1155,42 @@ export class TimelineEditor {
     this.pushUndo();
     this.host.commit();
     return true;
+  }
+
+  /**
+   * Blade at the playhead - the razor every NLE has.
+   *
+   * Acts on the selection when there is one, otherwise on everything the playhead crosses
+   * in every lane, which is the same rule as Q/E and X. Cutting picture and sound in one
+   * keystroke is the point: cutting only the topmost clip would desync them.
+   */
+  private bladeAtPlayhead(): void {
+    const fps = this.host.getFps();
+    const at = this.playhead;
+    const made: Clip[] = [];
+    this.pushUndo();
+    for (const lane of [this.tl.clips, this.tl.masks,
+                        this.tl.audio as unknown as Clip[]]) {
+      // Snapshot: splitting appends to the same array we are walking.
+      for (const c of [...lane]) {
+        if (this.selection.size && !this.selection.has(c.id)) continue;
+        const right = splitClip(c, at, this.rateOf(c), fps);
+        if (right) { lane.push(right); made.push(right); }
+      }
+    }
+    if (!made.length) return;      // the playhead was not strictly inside anything
+    sortClips(this.tl);
+    // Select the right-hand halves: the usual next move is to delete the middle, and this
+    // is the piece the user just brought into existence.
+    this.selection.clear();
+    for (const c of made) this.selection.add(c.id);
+    this.host.commit();
+    this.requestRender();
+  }
+
+  /** Source frame rate for a clip, or the timeline's when it has none of its own. */
+  private rateOf(c: Clip): number {
+    return this.host.sourceFor(c.src)?.info?.fps ?? this.host.getFps();
   }
 
   private toggleMaskOverlay(): void {

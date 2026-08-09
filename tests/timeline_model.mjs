@@ -165,6 +165,101 @@ test("serialiseTimeline — round trip, no transient fields", () => {
   assert.equal(JSON.parse(M.serialiseTimeline(t)).ui.zoom, undefined);
 });
 
+test("resolveResolution — parity table with Python", () => {
+  // Generated from `resolve_resolution` in nkd_timeline.py. If one side moves, this fails,
+  // which is the point: the monitor would otherwise preview an aspect the backend will not
+  // render. Custom must pass width/height straight through - that is the old behaviour and
+  // the default, so a workflow saved before these widgets existed is untouched.
+  const CASES = [
+    ["16:9 Horizontal", 1.0, 16, [1376, 768]],
+    ["9:16 Vertical", 1.0, 16, [768, 1376]],
+    ["9:16 Vertical", 0.8, 32, [704, 1248]],
+    ["1:1", 2.0, 16, [1456, 1456]],
+    ["21:9 Horizontal", 0.5, 8, [1112, 480]],
+    ["32:9 Horizontal", 1.0, 64, [1984, 576]],
+    ["Custom", 1.0, 16, [1920, 1080]],
+  ];
+  for (const [aspect, mp, mult, want] of CASES) {
+    assert.deepEqual(M.resolveResolution(aspect, mp, 1920, 1080, mult), want,
+      `${aspect} @ ${mp}MP /${mult}`);
+  }
+  // The size_multiple has to actually bite: a 32-grid model must not get 16-grid numbers.
+  for (const mult of [8, 16, 32, 64]) {
+    const [w, h] = M.resolveResolution("9:16 Vertical", 1, 0, 0, mult);
+    assert.equal(w % mult, 0);
+    assert.equal(h % mult, 0);
+  }
+  // Junk megapixels must not produce NaN dimensions.
+  for (const bad of [0, -1, NaN, undefined]) {
+    const [w, h] = M.resolveResolution("1:1", bad, 0, 0, 16);
+    assert.ok(Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0, String(bad));
+  }
+  assert.equal(Object.keys(M.ASPECT_RATIOS).length, 25);   // same table as Python
+
+  // "As Source": keep the material's shape, rescale it to the budget. Parity table from
+  // `resolve_resolution` in Python.
+  const SRC = [
+    [1920, 1080, 0.5, 16, [960, 544]],
+    [1080, 1920, 0.5, 32, [544, 960]],
+    [2560, 1210, 2.0, 16, [2096, 992]],   // the awkward one the 4-candidate snap is for
+    [640, 480, 1.0, 8, [1184, 888]],
+  ];
+  for (const [sw, sh, mp, mult, want] of SRC) {
+    assert.deepEqual(M.resolveResolution("As Source", mp, 0, 0, mult, sw, sh), want,
+      `As Source ${sw}x${sh} @${mp}MP /${mult}`);
+    // Aspect drift has to stay tiny - that is the whole reason for the four candidates.
+    const [w, h] = want;
+    assert.ok(Math.abs((w / h) - (sw / sh)) / (sw / sh) < 0.02, `drift ${sw}x${sh}`);
+  }
+  // With no source yet it falls back to the typed width/height instead of guessing.
+  assert.deepEqual(M.resolveResolution("As Source", 1, 640, 480, 16, 0, 0), [640, 480]);
+});
+
+test("splitClip — the blade, its trim and its markers", () => {
+  // Same cadence: the right half starts where the left stopped reading.
+  let c = clip({ start: 10, trimIn: 4, length: 20 });
+  let right = M.splitClip(c, 16, 24, 24);
+  assert.deepEqual([c.start, c.length, c.trimIn], [10, 6, 4]);
+  assert.deepEqual([right.start, right.length, right.trimIn], [16, 14, 10]);
+  assert.notEqual(right.id, c.id);                    // a new clip, not an alias
+
+  // Different cadence: 6 timeline frames at 24 fps are 7.5 -> 8 source frames at 30.
+  // Getting this wrong makes the second half play from the wrong place, silently.
+  c = clip({ start: 10, trimIn: 4, length: 20 });
+  right = M.splitClip(c, 16, 30, 24);
+  assert.equal(right.trimIn, 4 + Math.round(6 * (30 / 24)));
+
+  // Outside, or exactly on an edge, is a no-op rather than a zero-length clip.
+  for (const at of [10, 30, 5, 99]) {
+    const k = clip({ start: 10, trimIn: 0, length: 20 });
+    assert.equal(M.splitClip(k, at, 24, 24), null, String(at));
+    assert.equal(k.length, 20);
+  }
+
+  // Markers are offsets from `start`, so they follow the picture they were put on.
+  c = clip({ start: 0, trimIn: 0, length: 20, markers: [2, 5, 12, 18] });
+  right = M.splitClip(c, 8, 24, 24);
+  assert.deepEqual(c.markers, [2, 5]);
+  assert.deepEqual(right.markers, [4, 10]);           // 12 and 18, rebased onto the new clip
+  // A half with none left must not carry an empty array into the JSON.
+  c = clip({ start: 0, trimIn: 0, length: 20, markers: [1, 2] });
+  right = M.splitClip(c, 10, 24, 24);
+  assert.equal(right.markers, undefined);
+
+  // audioOnly rides along: both halves keep the flag, and it survives a round trip.
+  const t = M.emptyTimeline();
+  t.clips = [clip({ id: "a", start: 0, trimIn: 0, length: 20, audioOnly: true })];
+  const r2 = M.splitClip(t.clips[0], 10, 24, 24);
+  assert.equal(r2.audioOnly, true);
+  t.clips.push(r2);
+  const back = M.parseTimeline(M.serialiseTimeline(t));
+  assert.equal(back.clips[0].audioOnly, true);
+  assert.equal(back.clips[1].audioOnly, true);
+  // ...and stays out of the JSON when it is off, like `muted`.
+  t.clips.forEach((k) => delete k.audioOnly);
+  assert.ok(!("audioOnly" in JSON.parse(M.serialiseTimeline(t)).clips[0]));
+});
+
 test("clipsAt — the higher track is the visible one", () => {
   const t = M.emptyTimeline();
   t.clips = [clip({ id: "lo", track: 0, start: 0, length: 20 }),

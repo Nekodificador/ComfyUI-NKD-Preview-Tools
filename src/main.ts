@@ -5,10 +5,11 @@
  * workflow and reaches Python untouched. The DOM widget is just a view (`serialize:false`).
  * Same pattern as the rest of the NKD ecosystem.
  */
-import { app as comfyApp } from "./comfyRuntime";
+import { app as comfyApp, api as comfyApi } from "./comfyRuntime";
 import {
   type FitMode, type ImportMode, type QuantizeMode, type Timeline,
   parseTimeline, quantizeCount, quantizeGrid, serialiseTimeline, slotInUse, viewState,
+  ASPECT_CUSTOM, QUANTIZE_CUSTOM, resolveResolution,
 } from "./timeline/model";
 import {
   PREVIEW_MAX_H, TimelineEditor, type KeyAction, type TimelineHost,
@@ -48,6 +49,8 @@ const KEY_SETTINGS: { action: KeyAction; id: string; label: string; def: string 
     label: "Mark clip (fit in/out to the clip)", def: "x" },
   { action: "marker", id: "NKD.Timeline.Key.Marker",
     label: "Freeze-frame marker at playhead (Shift+M toggles the mask overlay)", def: "m" },
+  { action: "blade", id: "NKD.Timeline.Key.Blade",
+    label: "Blade: split at the playhead", def: "w" },
   { action: "zoomFit", id: "NKD.Timeline.Key.ZoomFit", label: "Fit timeline", def: "f" },
 ];
 const KEY_SETTING_BY_ACTION = new Map(KEY_SETTINGS.map((k) => [k.action, k.id]));
@@ -70,7 +73,7 @@ const MAX_INSET = 48;
 
 // A console version stamp: a cached bundle is the number one confounder when debugging
 // frontend behaviour that "should" already be fixed.
-console.log("[NKD Timeline] rev 3.1.1");
+console.log("[NKD Timeline] rev 3.2.0");
 
 // ── Widget helpers ────────────────────────────────────────────────────────────
 
@@ -92,6 +95,21 @@ function hideWidget(w: any): void {
   w.draw = () => {};
   // Belt and braces for stale cached defs that still declare it multiline.
   if (w.element?.style) w.element.style.display = "none";
+}
+
+/**
+ * Show/hide a plain widget in BOTH renderers, reversibly.
+ *
+ * Not `hideWidget` above: that one is a one-way trapdoor for the data channel (it also
+ * kills `draw`). Here the row has to come back when the user picks Custom again.
+ */
+function setWidgetVisible(node: any, name: string, visible: boolean): void {
+  const w = findW(node, name);
+  if (!w) return;
+  w.hidden = !visible;                          // canvas (1.0)
+  if (w.options) w.options.hidden = !visible;   // Vue layout (2.0) reads it here
+  if (visible) delete w.computeSize;
+  else w.computeSize = () => [0, -4];           // collapse the row on canvas
 }
 
 /**
@@ -178,6 +196,8 @@ function restoreView(node: any, tl: Timeline): void {
 type SourceEntry = { ref: MediaRef; info: MediaInfo | null; label: string };
 type Host = TimelineHost & {
   clearSourceCache: () => void;
+  /** Store what the last run reported. True when it changed something worth redrawing. */
+  applyMeta: (m: { width: number; height: number }) => boolean;
   peekSource: (src: string) => SourceEntry | undefined;
   dropSource: (src: string) => void;
 };
@@ -195,6 +215,8 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
   };
 
   const srcCache = new Map<string, SourceEntry>();
+  // Filled by the "nkd-timeline-meta" push at the end of every run. See `getOutSize`.
+  let reported: { width: number; height: number } | null = null;
 
   const host: Host = {
     getTimeline: () => state.tl,
@@ -217,7 +239,7 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
     setStartFrame: (v) => setW("start_frame", Math.max(0, Math.round(v))),
     getFrameCount: () => Math.max(0, Math.round(numW("frame_count", 0))),
     setFrameCount: (v) => setW("frame_count", Math.max(0, Math.round(v))),
-    getQuantize: () => (findW(node, "quantize")?.value ?? "free") as QuantizeMode,
+    getQuantize: () => (findW(node, "model")?.value ?? "free") as QuantizeMode,
     getQuantizeN: () => Math.max(1, Math.round(numW("quantize_n", 8))),
     getFit: () => (findW(node, "fit")?.value ?? "contain") as FitMode,
     getImportMode: () => (findW(node, "import_mode")?.value ?? "stack") as ImportMode,
@@ -241,10 +263,33 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
         severity, summary, detail, life: 8000,
       });
     },
+    /**
+     * The output resolution, in order of how much it can be trusted.
+     *
+     * 1. The widgets, when they hold a real number.
+     * 2. What the last run REPORTED. This is the only thing that works when width/height
+     *    arrive through a LINK - a resolution selector, a maths node, a primitive - because
+     *    a linked value does not exist in the browser at all: it is produced while the
+     *    graph runs. Reading the upstream node's widgets instead would only ever cover the
+     *    nodes whose output IS a widget, and a computed selector's is not.
+     * 3. The first clip's own size, so a fresh node still previews something sane.
+     */
     getOutSize(): [number, number] {
-      const w = Math.round(numW("width", 0));
-      const h = Math.round(numW("height", 0));
+      // A named aspect ratio resolves in the browser, so the monitor turns vertical the
+      // moment you pick 9:16 - no run needed. 'Custom' falls through to the widgets.
+      // `As Source` needs the first clip's own size, which the editor already has cached
+      // from the probe - so this one also resolves live, no run needed.
+      const firstClip = state.tl.clips[0] ?? state.tl.masks[0];
+      const srcInfo = firstClip ? srcCache.get(firstClip.src)?.info : null;
+      const [w, h] = resolveResolution(
+        String(findW(node, "aspect_ratio")?.value ?? ASPECT_CUSTOM),
+        numW("megapixels", 1), Math.round(numW("width", 0)),
+        Math.round(numW("height", 0)), numW("size_multiple", 16),
+        srcInfo?.width ?? 0, srcInfo?.height ?? 0);
       if (w > 0 && h > 0) return [w, h];
+      if (reported && reported.width > 0 && reported.height > 0) {
+        return [reported.width, reported.height];
+      }
       const first = state.tl.clips[0];
       const info = first ? srcCache.get(first.src)?.info : null;
       return info ? [info.width, info.height] : [16, 9];
@@ -291,6 +336,14 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
       node.setDirtyCanvas(true, true);
     },
     clearSourceCache: () => srcCache.clear(),
+    applyMeta(m) {
+      if (!(m.width > 0 && m.height > 0)) return false;
+      if (reported && reported.width === m.width && reported.height === m.height) {
+        return false;
+      }
+      reported = { width: m.width, height: m.height };
+      return true;
+    },
     /** Read the cache WITHOUT resolving, so the swap detector can compare against it. */
     peekSource: (src: string) => srcCache.get(src),
     dropSource: (src: string) => { srcCache.delete(src); },
@@ -583,6 +636,26 @@ comfyApp.registerExtension({
       };
 
       /**
+       * What the backend actually rendered, pushed at the end of every run.
+       *
+       * This is what makes a LINKED width/height work: wire a resolution selector into
+       * them and the browser has no value at all to show, because that number is produced
+       * while the graph runs. One execution later the monitor knows the real aspect and
+       * the preview turns vertical, or whatever the selector said.
+       *
+       * The event is broadcast to every client, so filter by node id - several timelines
+       * in one workflow would otherwise adopt each other's resolution.
+       */
+      const onMeta = (e: any) => {
+        const d = e?.detail;
+        if (!d || String(d.node) !== String(node.id)) return;
+        if (!host.applyMeta(d)) return;
+        resizeToContent();          // the monitor's aspect drives the node's height
+        editor.requestRender();
+      };
+      comfyApi.addEventListener("nkd-timeline-meta", onMeta);
+
+      /**
        * Picking a different file in an upstream Load Video/Audio changes NO connection, so
        * `onConnectionsChange` never fires and the old media would stay on screen. Compare
        * the resolved reference instead, and drop just that source when it moves.
@@ -600,9 +673,41 @@ comfyApp.registerExtension({
         }
       };
 
+      /**
+       * `Custom` shows width/height; a named ratio shows the budget that computes them.
+       *
+       * Driven from the tick rather than from the widget callback because the tick is
+       * already the one path both renderers share for plain-widget edits, and it also
+       * covers the value arriving from a loaded workflow.
+       */
+      let lastAspect: string | null = null;
+      let lastModel: string | null = null;
+      const syncAspectWidgets = () => {
+        const aspect = String(findW(node, "aspect_ratio")?.value ?? ASPECT_CUSTOM);
+        const model = String(findW(node, "model")?.value ?? "");
+        if (aspect === lastAspect && model === lastModel) return;
+        lastAspect = aspect;
+        lastModel = model;
+        const custom = aspect === ASPECT_CUSTOM;
+        // Width/height are the CUSTOM pair. Every other choice - a named ratio or As
+        // Source - is driven by the megapixel budget instead.
+        setWidgetVisible(node, "width", custom);
+        setWidgetVisible(node, "height", custom);
+        setWidgetVisible(node, "megapixels", !custom);
+        setWidgetVisible(node, "size_multiple", !custom);
+        // `quantize_n` only means anything to the custom grid; floating there the rest of
+        // the time it just reads as a knob that does nothing.
+        setWidgetVisible(node, "quantize_n", model === QUANTIZE_CUSTOM);
+        // Vue keeps its own snapshot of the widget array and will not re-read it otherwise.
+        if (Array.isArray(node.widgets)) node.widgets = [...node.widgets];
+        resizeToContent();          // rows appeared or vanished: the node is a different height
+        editor.requestRender();     // and the monitor's aspect just changed
+      };
+
       // Vue Nodes never calls onDrawBackground, so a low-rate tick is the only common
       // path for reflecting fps / size / fit edits made in the plain widgets.
       const tick = window.setInterval(() => {
+        syncAspectWidgets();
         syncQuantumStep();
         detectSourceSwaps();
         // After a swap the new length only lands once the probe answers, so the clamp
@@ -616,6 +721,9 @@ comfyApp.registerExtension({
         window.clearInterval(tick);
         ro.disconnect();
         widthKeeper.release();
+        // The api emitter outlives the node; a listener holding this closure would keep
+        // the whole editor (canvases, video pool) alive for the rest of the session.
+        comfyApi.removeEventListener("nkd-timeline-meta", onMeta);
         editor.destroy();
         releaseUnused([]);
         origRemoved?.apply(this, args);
