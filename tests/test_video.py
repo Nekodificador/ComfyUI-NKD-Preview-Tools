@@ -20,8 +20,9 @@ import torch  # noqa: E402
 from PIL import Image as PILImage  # noqa: E402
 
 from nkd_video import (  # noqa: E402
-    FORMATS, _gif_palette, apply_version, encode_gif, encode_video,
-    has_version, next_version, resolve_tokens, version_pad,
+    FORMATS, PRORES_PROFILES, _gif_palette, apply_version, encode_gif,
+    encode_png_sequence, encode_video, encode_webp, has_version, next_version,
+    resolve_tokens, version_pad,
 )
 
 
@@ -64,16 +65,35 @@ def probe(path):
 
 
 def test_each_format_round_trips():
+    """Every format in the table must come back with the frame count, rate and size asked
+    for. Driven off FORMATS itself, so adding a format without a way to read it back fails
+    here rather than shipping."""
     images = ramp(12)
     for key, spec in FORMATS.items():
         with tempfile.TemporaryDirectory() as d:
+            if spec["ext"] == "png":
+                folder = os.path.join(d, "seq")
+                encode_png_sequence(images, folder, "shot", 4, None)
+                names = sorted(os.listdir(folder))
+                assert len(names) == 12, (key, names)
+                # Dot before the number: the convention every compositor reads as a sequence.
+                assert names[0] == "shot.0000.png", names[0]
+                with PILImage.open(os.path.join(folder, names[0])) as im:
+                    assert im.size == (48, 32), im.size
+                continue
             path = os.path.join(d, f"t.{spec['ext']}")
             if spec["vcodec"]:
-                encode_video(images, path, spec, 24.0, 23.0, None, None, None, None)
+                encode_video(images, path, spec, 24.0, 23.0, None, None, None, None,
+                             profile="hq")
                 got = probe(path)
                 assert got["frames"] == 12, (key, got)
                 assert abs(got["fps"] - 24.0) < 0.01, (key, got)
                 assert (got["width"], got["height"]) == (48, 32), (key, got)
+            elif spec["ext"] == "webp":
+                encode_webp(images, path, 24.0, 85, False, None)
+                with PILImage.open(path) as im:
+                    assert im.n_frames == 12, (key, im.n_frames)
+                    assert im.size == (48, 32), im.size
             else:
                 encode_gif(images, path, 24.0, 256, True, None)
                 with PILImage.open(path) as im:
@@ -83,18 +103,100 @@ def test_each_format_round_trips():
     print("  ok  test_each_format_round_trips")
 
 
+def test_prores_profiles_pick_the_right_pixel_format():
+    """The profile IS the quality setting for ProRes, and only 4444 carries alpha.
+
+    Also settles, by measurement, whether alpha survives here - it does NOT through vp9, and
+    guessing either way would be exactly the mistake that test pins down.
+    """
+    rgba = ramp(4, channels=4)
+    rgba[:, :, :24, 3] = 0.0                          # left half transparent
+    with tempfile.TemporaryDirectory() as d:
+        for profile, (_number, _requested) in PRORES_PROFILES.items():
+            path = os.path.join(d, f"{profile}.mov")
+            encode_video(rgba, path, FORMATS["mov / prores"], 24.0, 0, None, None, None,
+                         None, profile=profile)
+            with av.open(path) as c:
+                stored = c.streams.video[0].codec_context.pix_fmt
+                # Asserted on whether the format HAS an alpha plane, not on its exact name:
+                # prores_ks promotes the requested 10-bit to 12-bit on the way out, so the
+                # stored name is an encoder detail and pinning it tests the wrong thing.
+                assert stored.startswith("yuva") == (profile == "4444"), (profile, stored)
+                frame = next(c.decode(video=0)).to_ndarray(format="rgba")
+            left, right = int(frame[0, 0, 3]), int(frame[0, 40, 3])
+            if profile == "4444":
+                # The pack's ONE working alpha path. vp9 loses it; this keeps it.
+                assert left < 16 and right > 240, (profile, left, right)
+            else:
+                assert left > 240, (profile, "alpha where the profile has no plane")
+    print("  ok  test_prores_profiles_pick_the_right_pixel_format")
+
+
+def test_pingpong_doubles_the_clip_minus_the_shared_ends():
+    """N frames out and back is 2N-2, not 2N: repeating the first and last would stutter at
+    the turn."""
+    import folder_paths
+    import nkd_video
+
+    with tempfile.TemporaryDirectory() as out:
+        orig = folder_paths.get_output_directory
+        folder_paths.get_output_directory = lambda: out
+        try:
+            def go(pingpong):
+                r = nkd_video.NKDVideoViewer.execute(
+                    images=ramp(10), fps=24.0,
+                    format={"format": "mp4 / h264", "crf": 30.0, "preset": "veryfast"},
+                    filename_prefix=f"pp/{pingpong}", save_output=True, pingpong=pingpong,
+                    versioning="off", version=1, numbering="none")
+                return r.ui.as_dict()["nkd_meta"][0]["frame_count"], probe(r.result[1])
+            assert go(False) [0] == 10
+            frames, got = go(True)
+            assert frames == 18, frames                 # 10 out + 8 back
+            assert got["frames"] == 18, got             # and it reached the FILE
+        finally:
+            folder_paths.get_output_directory = orig
+            nkd_video._ENCODED.clear()
+    print("  ok  test_pingpong_doubles_the_clip_minus_the_shared_ends")
+
+
+def test_poster_is_written_for_formats_no_browser_opens():
+    """h265, ProRes and a sequence have no browser preview, so the node would show an empty
+    box. One PNG of the first frame answers "did it render what I meant?"."""
+    import nkd_video
+    images = ramp(5)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "p.png")
+        nkd_video.write_poster(images, path)
+        with PILImage.open(path) as im:
+            assert im.size == (48, 32), im.size
+    # And the table has to agree about which formats need one.
+    assert {k for k, v in FORMATS.items() if v["preview"] == "none"} == {
+        "mov / prores", "png sequence"}
+    # h265 is not in the table at all: libx265 crashes the process in this build. See
+    # FORMATS - if it ever comes back, this line is the reminder to re-measure first.
+    assert "mp4 / h265" not in FORMATS
+    # Everything with no preview must have a poster, or the node shows an empty box.
+    assert all(v["poster"] for v in FORMATS.values() if v["preview"] == "none")
+    assert {k for k, v in FORMATS.items() if v["preview"] == "video"} == {
+        "mp4 / h264", "webm / vp9"}
+    print("  ok  test_poster_is_written_for_formats_no_browser_opens")
+
+
 def test_audio_is_muxed_only_where_the_container_takes_it():
-    """A GIF has nowhere to put sound; handing it audio must not blow up."""
+    """Every container that declares an audio codec must actually carry the track.
+
+    Driven off the table, so a format added without an audio path shows up here. GIF, WebP
+    and a PNG sequence have nowhere to put sound at all - they just must not blow up.
+    """
     images = ramp(24)
     for key, spec in FORMATS.items():
+        if not spec["vcodec"]:
+            continue                       # still formats: covered by the round-trip test
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, f"t.{spec['ext']}")
-            if spec["vcodec"]:
-                encode_video(images, path, spec, 24.0, 23.0, None, tone(1.0), None, None)
-                assert probe(path)["audio"] == 1, key
-            else:
-                encode_gif(images, path, 24.0, 128, False, None)
-                assert os.path.getsize(path) > 0, key
+            encode_video(images, path, spec, 24.0, 23.0, None, tone(1.0), None, None,
+                         profile="hq")
+            assert probe(path)["audio"] == 1, key
     print("  ok  test_audio_is_muxed_only_where_the_container_takes_it")
 
 
@@ -356,6 +458,65 @@ def test_bumping_the_version_copies_instead_of_re_encoding():
             folder_paths.get_output_directory = orig_dir
             nkd_video._ENCODED.clear()
     print("  ok  test_bumping_the_version_copies_instead_of_re_encoding")
+
+
+def test_execute_wires_up_every_format():
+    """Through the real `execute`, once per format.
+
+    The encoders are covered above; what this pins is the WIRING - that a sequence lands in
+    a folder of its own, that formats with no browser preview get a poster written and the
+    UI payload points at it while `filepath` still points at the render, and that nothing
+    in the table reaches `execute` without a branch to handle it.
+    """
+    import folder_paths
+    import nkd_video
+
+    opts = {
+        "mp4 / h264": {"crf": 30.0, "preset": "veryfast"},
+        "webm / vp9": {"crf": 40.0},
+        "mov / prores": {"profile": "proxy"},
+        "gif": {"colors": 64, "dither": False},
+        "webp": {"quality": 60, "lossless": False},
+        "png sequence": {"padding": 4},
+    }
+    assert set(opts) == set(FORMATS), "a format was added without a case here"
+
+    with tempfile.TemporaryDirectory() as out:
+        orig = folder_paths.get_output_directory
+        folder_paths.get_output_directory = lambda: out
+        try:
+            for key, extra in opts.items():
+                r = nkd_video.NKDVideoViewer.execute(
+                    images=ramp(4), fps=24.0, format={"format": key, **extra},
+                    filename_prefix=f"f/{key.split('/')[0].strip()}", save_output=True,
+                    pingpong=False, versioning="off", version=1, numbering="none")
+                ui = r.ui.as_dict()
+                shown, meta = ui["nkd_video"][0], ui["nkd_meta"][0]
+                assert meta["preview"] == FORMATS[key]["preview"], key
+                assert meta["size"] > 0, key
+                # `filepath`, the second output, is always the RENDER - never the poster.
+                rendered = r.result[1]
+                assert os.path.exists(rendered), (key, rendered)
+                if key == "png sequence":
+                    assert os.path.isdir(rendered), key
+                    frames = [f for f in os.listdir(rendered) if not f.endswith("poster.png")]
+                    assert len(frames) == 4, (key, frames)
+                else:
+                    assert os.path.isfile(rendered), key
+                    assert rendered.endswith("." + FORMATS[key]["ext"]), key
+                # The UI ref always names the RENDER; the poster rides alongside in the
+                # metadata, because whether it is needed is the browser's call (h265) and
+                # the download button must never hand over a still instead of the video.
+                assert not shown["filename"].endswith("poster.png"), (key, shown)
+                needs_poster = FORMATS[key]["poster"]
+                assert bool(meta["poster"]) == needs_poster, (key, meta["poster"])
+                if needs_poster:
+                    on_disk = os.path.join(out, shown["subfolder"], meta["poster"])
+                    assert os.path.isfile(on_disk), (key, on_disk)
+        finally:
+            folder_paths.get_output_directory = orig
+            nkd_video._ENCODED.clear()
+    print("  ok  test_execute_wires_up_every_format")
 
 
 def test_node_token_falls_back_to_a_clean_name():

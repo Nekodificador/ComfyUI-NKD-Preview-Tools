@@ -35,7 +35,14 @@ export interface VideoInfo {
   frame_count: number;
   width: number;
   height: number;
-  playable: boolean;
+  /** What the browser can do with the file: a seekable <video>, a still <img> that
+   *  animates, or nothing at all (h265, ProRes, a PNG sequence) - in which case the
+   *  backend wrote a poster frame and `filename` points at that instead. */
+  preview: "video" | "image" | "none";
+  /** MIME + codec string to ask `canPlayType` about, when `preview` is "video". */
+  mime?: string | null;
+  /** Fallback still, relative to the same subfolder, when the browser cannot play it. */
+  poster?: string | null;
   format: string;
   size: number;
   /** Absolute path on the server, for the copy button. */
@@ -210,7 +217,7 @@ export class VideoViewer {
     this.stage.style.aspectRatio = `${info.width} / ${info.height}`;
     this.stage.style.maxWidth = `${Math.round(PREVIEW_MAX_H * aspect)}px`;
 
-    if (info.playable) {
+    if (this.playable) {
       this.still.style.display = "none";
       this.video.style.display = "";
       if (this.video.src !== url) this.video.src = url;
@@ -220,15 +227,24 @@ export class VideoViewer {
         width: info.width, height: info.height,
       }, () => this.draw());
     } else {
-      // A GIF cannot be scrubbed - the format has no seekable stream. Saying so beats
-      // shipping a scrub bar that silently does nothing.
+      // Everything else is a still. A GIF or WebP animates on its own but has no seekable
+      // stream, so it IS the file; ProRes, a PNG sequence - and h265 where this browser
+      // will not decode it - have no viewable file at all, so the backend's poster stands
+      // in. Either way the transport has nothing to drive, and saying so beats shipping a
+      // scrub bar that silently does nothing.
       this.video.removeAttribute("src");
       this.video.load();
       this.video.style.display = "none";
       this.still.style.display = "";
-      this.still.src = url;
+      this.still.src = info.poster
+        ? viewUrl({ ...ref, filename: info.poster })
+        : url;
     }
-    const where = `${ref.type}/${ref.subfolder ? ref.subfolder + "/" : ""}${ref.filename}`;
+    // The path line and the download button always point at the RENDER, never at the
+    // poster: the poster is a preview artefact, not the thing that was asked for.
+    const shown = ref.filename;
+    this.link.setAttribute("download", shown);
+    const where = `${ref.type}/${ref.subfolder ? ref.subfolder + "/" : ""}${shown}`;
     this.pathLine.textContent = where;
     this.pathLine.dataset.full = info.path || where;
     this.syncButtons();
@@ -457,7 +473,20 @@ export class VideoViewer {
     this.syncButtons();
   }
 
-  private get playable(): boolean { return !!this.info?.playable; }
+  /**
+   * Can THIS browser actually play it?
+   *
+   * Not a property of the file. h265 is patent-encumbered, so browsers ship no software
+   * decoder and defer to the GPU: the same mp4 plays here and shows nothing on the next
+   * machine. Asking `canPlayType` is the only honest answer, and it costs nothing - so the
+   * backend states the codec and this decides.
+   */
+  private get playable(): boolean {
+    if (this.info?.preview !== "video") return false;
+    const mime = this.info.mime;
+    if (!mime) return true;
+    return this.video.canPlayType(mime) !== "";
+  }
 
   // ── Wiring ──────────────────────────────────────────────────────────────────
 
@@ -658,7 +687,7 @@ export class VideoViewer {
     const info = this.info;
     if (!info) { this.status.textContent = "no video yet"; return; }
 
-    if (this.ref && info.playable) {
+    if (this.ref && this.playable) {
       ctx.drawImage(this.buildStrip(w, dpr), 0, 0, w, SCRUB_H);
 
       const px = (this.frame / Math.max(1, info.frame_count - 1)) * w;
@@ -670,13 +699,18 @@ export class VideoViewer {
       ctx.fillStyle = "rgba(255,255,255,0.25)";
       ctx.font = "11px system-ui, sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText(`${info.format} — not scrubbable`, w / 2, SCRUB_H / 2 + 4);
+      // Say WHY there is no scrub bar, per format. "Nothing happens when I drag" is the
+      // worst possible answer, and both cases are the format's doing, not a missing feature.
+      ctx.fillText(info.preview === "image"
+        ? `${info.format} — plays, but has no seekable stream`
+        : `${info.format} — no browser preview, showing the first frame`,
+        w / 2, SCRUB_H / 2 + 4);
       ctx.textAlign = "left";
     }
 
     const rate = this.video.playbackRate !== 1 && !this.video.paused
       ? ` · ${this.video.playbackRate}x` : "";
-    this.status.textContent = info.playable
+    this.status.textContent = this.playable
       ? `f ${this.frame} / ${info.frame_count - 1} · ${info.fps.toFixed(2)} fps · `
         + `${info.width}x${info.height} · ${humanSize(info.size)}${rate}`
       : `${info.frame_count} frames · ${info.width}x${info.height} · ${humanSize(info.size)}`;

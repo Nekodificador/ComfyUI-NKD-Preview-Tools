@@ -128,15 +128,58 @@ def has_version(prefix: str) -> bool:
 # ── Formats ───────────────────────────────────────────────────────────────────
 # The key IS the combo label, so it reads as "container / codec" the way an export dialog
 # does. Everything downstream keys off this table rather than off scattered ifs.
+# `preview` says what the BROWSER can do with the result, which is not the same question as
+# what the format is good for:
+#   video - a seekable <video>: the full scrubbing viewer.
+#   image - an <img>: it animates, but the format has no seekable stream, so no scrub.
+#   none  - nothing the browser will open. A poster frame is written alongside so the node
+#           still shows what was rendered instead of a broken box.
+#
+# `mime` is what the VIEWER asks `canPlayType` about, rather than the backend deciding: what
+# a browser will play is a property of the MACHINE, not of the file. Costs nothing and keeps
+# the judgement where the answer actually lives.
 FORMATS = {
-    "mp4 / h264": {"ext": "mp4", "vcodec": "libx264", "acodec": "aac"},
-    "webm / vp9": {"ext": "webm", "vcodec": "libvpx-vp9", "acodec": "libopus"},
-    "gif": {"ext": "gif", "vcodec": None, "acodec": None},
+    "mp4 / h264": {"ext": "mp4", "vcodec": "libx264", "acodec": "aac", "preview": "video",
+                   "mime": 'video/mp4; codecs="avc1.42E01E"', "poster": False},
+    # ── h265 is DELIBERATELY ABSENT. Do not add it back without re-measuring. ──
+    # libx265 in this PyAV build corrupts the heap (Windows 0xc0000374) and takes the whole
+    # process down with it. Measured: 0/5 encodes survived in one stress run, 1-3 of 5 in
+    # others - non-deterministic, and it kills ComfyUI, not just the node. Every x265-params
+    # combination was tried (`pools=none`, `frame-threads=1`, `log-level=none`); none helped,
+    # so it is not the thread pool. h264, vp9 and ProRes all survive 5/5 in the same harness.
+    # A crash that eats a render in progress cannot be made safe with a warning label.
+    "webm / vp9": {"ext": "webm", "vcodec": "libvpx-vp9", "acodec": "libopus",
+                   "preview": "video", "mime": 'video/webm; codecs="vp9"', "poster": False},
+    # ProRes is the one case with no argument: no browser implements it and none will. It is
+    # an editing intermediate at hundreds of Mbit/s, not a delivery format. Measured here:
+    # `canPlayType('video/quicktime; codecs="apcn"')` comes back empty.
+    "mov / prores": {"ext": "mov", "vcodec": "prores_ks", "acodec": "pcm_s16le",
+                     "preview": "none", "mime": None, "poster": True},
+    "gif": {"ext": "gif", "vcodec": None, "acodec": None, "preview": "image",
+            "mime": None, "poster": False},
+    "webp": {"ext": "webp", "vcodec": None, "acodec": None, "preview": "image",
+             "mime": None, "poster": False},
+    "png sequence": {"ext": "png", "vcodec": None, "acodec": None, "preview": "none",
+                     "mime": None, "poster": True},
 }
 
-# Formats the browser can play back with a seekable `<video>`. A GIF is shown as an <img>
-# instead: no scrub, which is a limitation of the format and not something to paper over.
-PLAYABLE = {"mp4", "webm"}
+# prores_ks profile numbers, straight from ffmpeg.
+#
+# **4444 is the pack's only working alpha path.** Measured: a half-transparent clip encoded
+# and read back keeps alpha 0 on one side and 255 on the other - which vp9 does NOT (see
+# `encode_video`).
+#
+# The pixel format here is what the encoder is ASKED for, which is not what ends up in the
+# file: request `yuva444p10le` and prores_ks writes `yuva444p12le`. Requesting 12 directly
+# fails to open at all (EINVAL), so this is the value that has to be here - a test pinning
+# the stored format instead would be pinning the wrong one.
+PRORES_PROFILES = {
+    "proxy": (0, "yuv422p10le"),
+    "lt": (1, "yuv422p10le"),
+    "standard": (2, "yuv422p10le"),
+    "hq": (3, "yuv422p10le"),
+    "4444": (4, "yuva444p10le"),
+}
 
 
 # ── Re-encode avoidance ───────────────────────────────────────────────────────
@@ -264,16 +307,22 @@ def _write_audio(container, prepared) -> None:
 
 def encode_video(images: torch.Tensor, path: str, spec: dict, fps: float,
                  crf: float, preset: str | None, audio: dict | None,
-                 metadata: dict | None, pbar: comfy.utils.ProgressBar | None) -> None:
-    """h264 / vp9 through PyAV.
+                 metadata: dict | None, pbar: comfy.utils.ProgressBar | None,
+                 profile: str | None = None) -> None:
+    """h264 / vp9 / ProRes through PyAV.
 
-    **RGBA input is flattened, including on vp9.** The core's `SaveWEBM` sets `yuva420p`
-    and implies transparency works; measured here it does not survive. WebM carries a vp9
-    alpha plane in `BlockAdditional`, which the ffmpeg CLI assembles as a second stream -
-    libavformat does not do it, so nothing PyAV can express produces it. Verified by
-    encoding a half-transparent clip and reading it back: every pixel came out opaque, with
-    and without `auto-alt-ref 0`. Promising alpha here would be a lie that only shows up
-    once someone composites the result.
+    **Alpha survives on ProRes 4444 and nowhere else.** Both halves measured, not assumed,
+    by encoding a half-transparent clip and reading it back:
+
+    - **ProRes 4444: yes.** Comes back with alpha 0 on one side and 255 on the other.
+    - **vp9: no**, however it is asked. WebM carries a vp9 alpha plane in `BlockAdditional`,
+      which the ffmpeg CLI assembles as a second stream; libavformat does not, so nothing
+      PyAV can express produces it - with or without `auto-alt-ref 0`. The core's `SaveWEBM`
+      sets `yuva420p` and implies otherwise.
+    - h264 has no alpha path at all.
+
+    Everywhere except 4444 the alpha is flattened. Promising it would be a lie that only
+    turns up once someone composites the result.
     """
     # mp4 drops any tag it does not recognise unless `use_metadata_tags` is on, so without
     # this the embedded prompt silently vanishes. `faststart` earns its place separately:
@@ -291,18 +340,28 @@ def encode_video(images: torch.Tensor, path: str, spec: dict, fps: float,
             spec["vcodec"], rate=Fraction(round(fps * 1000), 1000))
         stream.width = images.shape[2]
         stream.height = images.shape[1]
-        stream.pix_fmt = "yuv420p"
         stream.bit_rate = 0
-        stream.options = {"crf": str(int(crf))}
-        if preset and spec["vcodec"] == "libx264":
-            stream.options["preset"] = preset
+        alpha = False
+        if spec["vcodec"] == "prores_ks":
+            # ProRes is quality-by-PROFILE, not by crf: the profile picks the bitrate class
+            # and the pixel format together, and 4444 is the only one with an alpha plane.
+            number, pix_fmt = PRORES_PROFILES.get(profile or "hq", PRORES_PROFILES["hq"])
+            stream.pix_fmt = pix_fmt
+            stream.options = {"profile": str(number)}
+            alpha = number == 4 and images.shape[-1] == 4
+        else:
+            stream.pix_fmt = "yuv420p"
+            stream.options = {"crf": str(int(crf))}
+            if preset and spec["vcodec"] == "libx264":
+                stream.options["preset"] = preset
         # Before the first mux, or the stream misses the header. See _add_audio_stream.
         prepared = _add_audio_stream(
             container, audio, spec["acodec"], len(images) / max(fps, 1e-6))
 
+        fmt = "rgba" if alpha else "rgb24"
         for frame in images:
-            packet = stream.encode(
-                av.VideoFrame.from_ndarray(_to_u8(frame, 3), format="rgb24"))
+            packet = stream.encode(av.VideoFrame.from_ndarray(
+                _to_u8(frame, 4 if alpha else 3), format=fmt))
             container.mux(packet)
             if pbar:
                 pbar.update(1)
@@ -343,6 +402,54 @@ def encode_gif(images: torch.Tensor, path: str, fps: float, colors: int, dither:
             pbar.update(1)
     frames[0].save(path, save_all=True, append_images=frames[1:], loop=0,
                    duration=max(1, round(1000 / max(fps, 1e-6))), disposal=2)
+
+
+def encode_webp(images: torch.Tensor, path: str, fps: float, quality: int, lossless: bool,
+                pbar: comfy.utils.ProgressBar | None) -> None:
+    """Animated WebP. No palette to worry about - it is a true-colour format, unlike GIF."""
+    frames = []
+    for frame in images:
+        frames.append(PILImage.fromarray(_to_u8(frame, 3), "RGB"))
+        if pbar:
+            pbar.update(1)
+    frames[0].save(path, save_all=True, append_images=frames[1:], loop=0,
+                   duration=max(1, round(1000 / max(fps, 1e-6))),
+                   quality=max(0, min(100, quality)), lossless=bool(lossless), method=4)
+
+
+def encode_png_sequence(images: torch.Tensor, folder: str, stem: str, pad: int,
+                        pbar: comfy.utils.ProgressBar | None) -> str:
+    """One PNG per frame, `stem.0001.png`, in a folder of their own.
+
+    Numbered with a DOT before the frame number, which is the convention every compositor
+    reads as an image sequence (`shot_v001.0001.png`); an underscore makes it look like part
+    of the name. Returns the folder, because here the folder IS the output.
+    """
+    os.makedirs(folder, exist_ok=True)
+    for i, frame in enumerate(images):
+        PILImage.fromarray(_to_u8(frame, 3), "RGB").save(
+            os.path.join(folder, f"{stem}.{i:0{pad}d}.png"), compress_level=4)
+        if pbar:
+            pbar.update(1)
+    return folder
+
+
+def _tree_size(path: str) -> int:
+    """Bytes on disk, whether the output is one file or a folder of frames."""
+    if os.path.isdir(path):
+        return sum(os.path.getsize(os.path.join(path, f)) for f in os.listdir(path)
+                   if os.path.isfile(os.path.join(path, f)))
+    return os.path.getsize(path) if os.path.isfile(path) else 0
+
+
+def write_poster(images: torch.Tensor, path: str) -> None:
+    """A single PNG of the first frame, for formats no browser will open.
+
+    ProRes and a PNG sequence cannot go in a `<video>` or an `<img>`, and a node that
+    renders for thirty seconds and then shows an empty box reads as broken. One frame is
+    cheap and answers the only question the preview needs to: did it render what I meant?
+    """
+    PILImage.fromarray(_to_u8(images[0], 3), "RGB").save(path, compress_level=4)
 
 
 # ── Node ──────────────────────────────────────────────────────────────────────
@@ -393,9 +500,24 @@ class NKDVideoViewer(io.ComfyNode):
                         io.DynamicCombo.Option("webm / vp9", [
                             io.Float.Input("crf", default=32.0, min=0.0, max=63.0, step=1.0),
                         ]),
+                        io.DynamicCombo.Option("mov / prores", [
+                            io.Combo.Input(
+                                "profile", options=list(PRORES_PROFILES), default="hq",
+                                tooltip="Editing codec: big files, no generation loss. "
+                                        "4444 is the one that keeps an alpha channel."),
+                        ]),
                         io.DynamicCombo.Option("gif", [
                             io.Int.Input("colors", default=256, min=2, max=256),
                             io.Boolean.Input("dither", default=True),
+                        ]),
+                        io.DynamicCombo.Option("webp", [
+                            io.Int.Input("quality", default=85, min=0, max=100),
+                            io.Boolean.Input("lossless", default=False),
+                        ]),
+                        io.DynamicCombo.Option("png sequence", [
+                            io.Int.Input("padding", default=4, min=1, max=8,
+                                         tooltip="Digits in the frame number: "
+                                                 "shot.0001.png"),
                         ]),
                     ],
                 ),
@@ -564,8 +686,11 @@ class NKDVideoViewer(io.ComfyNode):
         # Nuke, and is the point of pinning a version by hand.
         versioned = used_version is not None
         stem = filename if (numbering == "none" or versioned) else f"{filename}_{counter:05}_"
+        # A PNG sequence is a FOLDER of files, so it gets one of its own rather than
+        # scattering a few hundred frames next to whatever else lives there.
+        seq_dir = os.path.join(full_folder, stem) if spec["ext"] == "png" else None
         file = f"{stem}.{spec['ext']}"
-        path = os.path.join(full_folder, file)
+        path = seq_dir if seq_dir else os.path.join(full_folder, file)
 
         metadata = None
         if not args.disable_metadata:
@@ -576,18 +701,42 @@ class NKDVideoViewer(io.ComfyNode):
 
         # Same bytes as last time? Copy them. Bumping a version must not cost a re-encode.
         node_key = str(cls.hidden.unique_id) if cls.hidden is not None else "-"
+        # A sequence is a directory, so `copy2` cannot stand in for the encode; copytree can,
+        # but only onto a path that does not exist yet.
         reuse = reusable_render(node_key, src_images, src_audio, settings, spec["ext"])
-        if reuse and os.path.abspath(reuse) != os.path.abspath(path):
-            shutil.copy2(reuse, path)
+        same_place = reuse and os.path.abspath(reuse) == os.path.abspath(path)
+        opts = format or {}
+        if reuse and not same_place:
+            if seq_dir:
+                shutil.copytree(reuse, path, dirs_exist_ok=True)
+            else:
+                shutil.copy2(reuse, path)
         elif not reuse:
             pbar = comfy.utils.ProgressBar(len(images))
-            if spec["vcodec"]:
-                encode_video(images, path, spec, fps, (format or {}).get("crf", 19.0),
-                             (format or {}).get("preset"), audio, metadata, pbar)
+            if seq_dir:
+                encode_png_sequence(images, seq_dir, stem,
+                                    int(opts.get("padding", 4)), pbar)
+            elif spec["vcodec"]:
+                encode_video(images, path, spec, fps, opts.get("crf", 19.0),
+                             opts.get("preset"), audio, metadata, pbar,
+                             profile=opts.get("profile"))
+            elif spec["ext"] == "webp":
+                encode_webp(images, path, fps, int(opts.get("quality", 85)),
+                            bool(opts.get("lossless", False)), pbar)
             else:
-                encode_gif(images, path, fps, (format or {}).get("colors", 256),
-                           bool((format or {}).get("dither", True)), pbar)
+                encode_gif(images, path, fps, int(opts.get("colors", 256)),
+                           bool(opts.get("dither", True)), pbar)
         remember_render(node_key, src_images, src_audio, settings, spec["ext"], path)
+
+        # A fallback still, for anything the browser cannot open.
+        preview = spec["preview"]
+        poster_file = None
+        if spec["poster"]:
+            poster_file = f"{stem}.poster.png"
+            write_poster(images, os.path.join(
+                seq_dir if seq_dir else full_folder, poster_file))
+            if seq_dir:
+                poster_file = f"{stem}/{poster_file}"
 
         result = {
             "filename": file,
@@ -599,9 +748,13 @@ class NKDVideoViewer(io.ComfyNode):
             "frame_count": len(images),
             "width": int(images.shape[2]),
             "height": int(images.shape[1]),
-            "playable": spec["ext"] in PLAYABLE,
+            "preview": preview,
+            # The viewer asks canPlayType about this and falls back to the poster if the
+            # answer is no. Only the browser can settle it — see FORMATS.
+            "mime": spec["mime"],
+            "poster": poster_file,
             "format": key,
-            "size": os.path.getsize(path),
+            "size": _tree_size(path),
             "path": path,
             "version": used_version,
         }

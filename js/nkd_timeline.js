@@ -3376,7 +3376,7 @@ class VideoViewer {
     const aspect = info.width / Math.max(1, info.height);
     this.stage.style.aspectRatio = `${info.width} / ${info.height}`;
     this.stage.style.maxWidth = `${Math.round(PREVIEW_MAX_H * aspect)}px`;
-    if (info.playable) {
+    if (this.playable) {
       this.still.style.display = "none";
       this.video.style.display = "";
       if (this.video.src !== url) this.video.src = url;
@@ -3392,9 +3392,11 @@ class VideoViewer {
       this.video.load();
       this.video.style.display = "none";
       this.still.style.display = "";
-      this.still.src = url;
+      this.still.src = info.poster ? viewUrl({ ...ref, filename: info.poster }) : url;
     }
-    const where = `${ref.type}/${ref.subfolder ? ref.subfolder + "/" : ""}${ref.filename}`;
+    const shown = ref.filename;
+    this.link.setAttribute("download", shown);
+    const where = `${ref.type}/${ref.subfolder ? ref.subfolder + "/" : ""}${shown}`;
     this.pathLine.textContent = where;
     this.pathLine.dataset.full = info.path || where;
     this.syncButtons();
@@ -3619,9 +3621,20 @@ class VideoViewer {
     });
     this.syncButtons();
   }
+  /**
+   * Can THIS browser actually play it?
+   *
+   * Not a property of the file. h265 is patent-encumbered, so browsers ship no software
+   * decoder and defer to the GPU: the same mp4 plays here and shows nothing on the next
+   * machine. Asking `canPlayType` is the only honest answer, and it costs nothing - so the
+   * backend states the codec and this decides.
+   */
   get playable() {
     var _a;
-    return !!((_a = this.info) == null ? void 0 : _a.playable);
+    if (((_a = this.info) == null ? void 0 : _a.preview) !== "video") return false;
+    const mime = this.info.mime;
+    if (!mime) return true;
+    return this.video.canPlayType(mime) !== "";
   }
   // ── Wiring ──────────────────────────────────────────────────────────────────
   pushState() {
@@ -3845,7 +3858,7 @@ class VideoViewer {
       this.status.textContent = "no video yet";
       return;
     }
-    if (this.ref && info.playable) {
+    if (this.ref && this.playable) {
       ctx.drawImage(this.buildStrip(w, dpr), 0, 0, w, SCRUB_H);
       const px = this.frame / Math.max(1, info.frame_count - 1) * w;
       ctx.fillStyle = "rgba(74,180,255,0.20)";
@@ -3856,11 +3869,15 @@ class VideoViewer {
       ctx.fillStyle = "rgba(255,255,255,0.25)";
       ctx.font = "11px system-ui, sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText(`${info.format} — not scrubbable`, w / 2, SCRUB_H / 2 + 4);
+      ctx.fillText(
+        info.preview === "image" ? `${info.format} — plays, but has no seekable stream` : `${info.format} — no browser preview, showing the first frame`,
+        w / 2,
+        SCRUB_H / 2 + 4
+      );
       ctx.textAlign = "left";
     }
     const rate = this.video.playbackRate !== 1 && !this.video.paused ? ` · ${this.video.playbackRate}x` : "";
-    this.status.textContent = info.playable ? `f ${this.frame} / ${info.frame_count - 1} · ${info.fps.toFixed(2)} fps · ${info.width}x${info.height} · ${humanSize(info.size)}${rate}` : `${info.frame_count} frames · ${info.width}x${info.height} · ${humanSize(info.size)}`;
+    this.status.textContent = this.playable ? `f ${this.frame} / ${info.frame_count - 1} · ${info.fps.toFixed(2)} fps · ${info.width}x${info.height} · ${humanSize(info.size)}${rate}` : `${info.frame_count} frames · ${info.width}x${info.height} · ${humanSize(info.size)}`;
   }
   destroy() {
     if (this.raf) cancelAnimationFrame(this.raf);
