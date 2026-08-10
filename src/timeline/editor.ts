@@ -1481,6 +1481,11 @@ export class TimelineEditor {
     const h = this.trackCount * TRACK_H;
     const end = start + count;
     const spans = this.tl.clips
+      // An `audioOnly` clip contributes sound and NO picture, so its span is a region to
+      // generate - which is exactly what the backend does (nkd_timeline.py, the `audioOnly`
+      // branch skips writing pixels). Counting it as material here made the editor lie
+      // about the one thing that flag exists to do.
+      .filter((c) => !c.audioOnly)
       .map((c) => [Math.max(c.start, start), Math.min(c.start + c.length, end)] as const)
       .filter(([a, b]) => b > a)
       .sort((p, q) => p[0] - q[0]);
@@ -1523,7 +1528,10 @@ export class TimelineEditor {
     // Barely-rounded corners and a FLAT fill: an NLE clip is a solid block, and a
     // gradient on every clip turns a dense timeline into mush.
     ctx.roundRect(x, y, w, h, 2);
-    ctx.fillStyle = lane === "audio" ? C.audioFill
+    // An `audioOnly` clip BEHAVES like an audio clip - it contributes sound and its picture
+    // is a hole - so it reads like one, whichever lane it happens to sit on.
+    const soundOnly = !!c.audioOnly && lane !== "audio";
+    ctx.fillStyle = lane === "audio" || soundOnly ? C.audioFill
       : lane === "mask" ? C.maskFill : C.clipFill;
     ctx.fill();
     ctx.clip();
@@ -1534,7 +1542,7 @@ export class TimelineEditor {
     const selected = this.selection.has(c.id);
     if (h > CLIP_HEAD_H + 4) {
       ctx.fillStyle = selected ? C.accent
-        : lane === "audio" ? C.audioHead
+        : lane === "audio" || soundOnly ? C.audioHead
         : lane === "mask" ? C.maskHead : C.clipHead;
       ctx.fillRect(x, y, w, CLIP_HEAD_H);
     }
@@ -1543,16 +1551,30 @@ export class TimelineEditor {
     const body = y + (h > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
     const bodyH = y + h - body;
     if (src && bodyH > 6) {
-      if (lane === "audio") this.drawWaveform(ctx, c, src.ref, x, body, w, bodyH);
-      else if (src.info) this.drawFilmstrip(ctx, c, src.ref, src.info, x, body, w, bodyH);
+      // The waveform is what this clip actually contributes, so it replaces the filmstrip.
+      // A video clip's trimIn counts SOURCE frames, so the wave needs the SOURCE rate.
+      if (lane === "audio") {
+        this.drawWaveform(ctx, c, src.ref, x, body, w, bodyH, this.host.getFps());
+      } else if (soundOnly) {
+        this.drawWaveform(ctx, c, src.ref, x, body, w, bodyH,
+          src.info?.fps || this.host.getFps());
+      } else if (src.info) {
+        this.drawFilmstrip(ctx, c, src.ref, src.info, x, body, w, bodyH);
+      }
     }
+    // Diagonal hatch over the body: "the picture here is a hole", the same thing the amber
+    // `generate` wash says about the track underneath.
+    if (soundOnly) this.drawHatch(ctx, x, y, w, h);
 
     if (w > 26) {
       ctx.fillStyle = selected ? "#0d1b24" : src ? C.clipName : C.dim;
       ctx.font = "10px system-ui, sans-serif";
       ctx.textBaseline = "middle";
-      ctx.fillText(this.ellipsise(ctx, src?.label ?? `${c.src} (no source)`, w - 12),
-        x + 5, y + CLIP_HEAD_H / 2);
+      // The colour and the hatch carry the signal at any width; the word is what makes it
+      // unambiguous, so it only shows when there is room to spare beside the name.
+      const label = (src?.label ?? `${c.src} (no source)`)
+        + (soundOnly && w > 150 ? "  ·  audio only" : "");
+      ctx.fillText(this.ellipsise(ctx, label, w - 12), x + 5, y + CLIP_HEAD_H / 2);
     }
     // Frame-rate warning: without it the resampling happens silently.
     const info = src?.info;
@@ -1646,8 +1668,14 @@ export class TimelineEditor {
   }
 
   /** Peaks across the clip's own trimmed span, so trimming re-reads the wave. */
+  /**
+   * @param trimRate  fps that `c.trimIn` is counted in. An audio clip trims in TIMELINE
+   *   frames, a video clip in SOURCE frames - passing the timeline rate for a video whose
+   *   source runs at another cadence slides the whole wave off the picture it belongs to.
+   */
   private drawWaveform(ctx: CanvasRenderingContext2D, c: Clip, ref: MediaRef,
-                       x: number, y: number, w: number, h: number): void {
+                       x: number, y: number, w: number, h: number,
+                       trimRate: number): void {
     ensureAudio(ref, () => this.requestRender());
     const peaks = peaksFor(ref);
     const buf = audioBufferFor(ref);
@@ -1655,9 +1683,9 @@ export class TimelineEditor {
     // Scale from the DECODED DURATION, not from a probed frame count: an audio file has
     // no video stream, so the probe never returns one and the wave would be drawn against
     // the bucket count instead of against real time.
-    const totalFrames = Math.max(1, buf.duration * this.host.getFps());
-    const from = c.trimIn / totalFrames;
-    const to = (c.trimIn + c.length) / totalFrames;
+    const total = Math.max(1e-6, buf.duration);
+    const from = c.trimIn / Math.max(1, trimRate) / total;
+    const to = from + c.length / this.host.getFps() / total;
     const mid = y + h / 2;
     ctx.fillStyle = "rgba(150,215,255,0.85)";
     for (let px = 0; px < w; px++) {
@@ -1670,6 +1698,23 @@ export class TimelineEditor {
     }
     ctx.fillStyle = "rgba(255,255,255,0.25)";
     ctx.fillRect(x, mid, w, 1);
+  }
+
+  /** Amber diagonals, the same colour the `generate` wash uses: this stretch produces no
+   *  picture. Called inside `drawClip`'s clip region, so it never bleeds past the block. */
+  private drawHatch(ctx: CanvasRenderingContext2D, x: number, y: number,
+                    w: number, h: number): void {
+    const step = 8;
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,209,102,0.22)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = -h; i < w; i += step) {
+      ctx.moveTo(x + i, y + h);
+      ctx.lineTo(x + i + h, y);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   private drawSpeaker(ctx: CanvasRenderingContext2D, x: number, y: number,

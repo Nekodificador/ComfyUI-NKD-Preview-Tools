@@ -81,6 +81,64 @@ const CSS = `
 .nkd-tl-menu-item.on::after { content: " ✓"; }
 /* Container query, not a media query: the node resizes, the window does not. */
 @container (max-width: 330px) { .nkd-tl-status { display: none; } }
+
+/* 😺NKD Video Viewer. Shares .nkd-tl-bar/-btn/-status above rather than restating them. */
+.nkd-vid-stage {
+  /* aspect-ratio gives the height; max-width is set from JS so widening the node does not
+     grow the picture (a portrait clip would otherwise turn the node into a column). */
+  width: 100%; margin: 0 auto; position: relative;
+  background: #000; border: 1px solid #3a3d46; border-radius: 6px;
+  overflow: hidden;
+}
+.nkd-vid-el {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%; object-fit: contain; display: block;
+}
+.nkd-vid-scrub {
+  width: 100%; height: 44px; display: block;
+  border: 1px solid #3a3d46; border-radius: 6px;
+  cursor: pointer; touch-action: none;   /* the drag is ours, not the browser's scroll */
+}
+.nkd-vid a.nkd-tl-btn { text-decoration: none; }
+.nkd-vid-path {
+  font: 11px ui-monospace, monospace; color: rgba(255,255,255,0.40);
+  padding: 0 2px; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.nkd-vid-path:hover { color: #4ab4ff; }
+.nkd-vid-path:empty { display: none; }
+/* A/B compare. The reference is a second <video> stacked on top and clipped back, so the
+   composite is the browser's, not an approximation. */
+.nkd-vid-ref { z-index: 1; pointer-events: none; }
+.nkd-vid-divider {
+  position: absolute; top: 0; bottom: 0; width: 2px; z-index: 2;
+  background: #4ab4ff; box-shadow: 0 0 6px rgba(0,0,0,0.6);
+  pointer-events: none;
+}
+.nkd-vid-divider::before, .nkd-vid-divider::after {
+  content: ""; position: absolute; left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent;
+}
+.nkd-vid-divider::before { top: 50%; margin-top: -14px; border-bottom-color: #4ab4ff; }
+.nkd-vid-divider::after { top: 50%; margin-top: 4px; border-top-color: #4ab4ff; }
+
+/* Full screen: the whole widget goes, so the transport and the compare controls come with
+   it. The picture takes whatever is left and letterboxes itself.
+   !important is not decoration here - max-width and aspect-ratio are written INLINE from
+   JS (the height cap that stops a wide node growing the monitor), and inline wins over a
+   plain rule. In full screen that cap is exactly what has to go. */
+.nkd-vid:fullscreen {
+  display: flex; flex-direction: column; gap: 6px;
+  width: 100vw; height: 100vh; box-sizing: border-box;
+  padding: 8px; background: #000;
+}
+.nkd-vid:fullscreen .nkd-vid-stage {
+  flex: 1 1 auto; min-height: 0;
+  max-width: none !important; aspect-ratio: auto !important;
+  border: 0; border-radius: 0;
+}
+.nkd-vid:fullscreen .nkd-vid-scrub { flex: 0 0 auto; }
+.nkd-vid:fullscreen .nkd-tl-bar { flex: 0 0 auto; }
 `;
 
 export function ensureStyles(): void {

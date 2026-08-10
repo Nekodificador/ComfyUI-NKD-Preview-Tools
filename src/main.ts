@@ -21,6 +21,10 @@ import {
 } from "./timeline/media";
 import { ensureStyles } from "./timeline/styles";
 import { registerFreezeFrames, syncAllFreezeNodes } from "./freezeFrames";
+import { registerVideoViewer } from "./video/register";
+import {
+  MAX_INSET, ROW_SAFETY, findW, hideWidget, keepDomWidgetSized, setWidgetVisible,
+} from "./domHost";
 
 const NODE_NAME = "NKDTimeline";
 const EXT_NAME = "NKD.PreviewTools.Timeline";
@@ -64,121 +68,9 @@ function readSetting(id: string, fallback: string): string {
     return fallback;
   }
 }
-// The canvas renderer reserves the widget row a few px short (rounding), which shows up as
-// a clipped bottom edge. `inset` MEASURES that shortfall, so this is only the cushion for
-// sub-pixel rounding on top of it - and whatever is put here is, by definition, the empty
-// strip left under the toolbar. It was 8, which is exactly the margin that looked wrong.
-const ROW_SAFETY = 2;
-const MAX_INSET = 48;
-
 // A console version stamp: a cached bundle is the number one confounder when debugging
 // frontend behaviour that "should" already be fixed.
 console.log("[NKD Timeline] rev 3.2.0");
-
-// ── Widget helpers ────────────────────────────────────────────────────────────
-
-const findW = (node: any, name: string) =>
-  node.widgets?.find((w: any) => w.name === name);
-
-/**
- * Hide a tracking widget in BOTH renderers.
- *
- * Deliberately does NOT set `type = "hidden"`: that stops the value from serialising, and
- * `timeline` is exactly the value that must survive a save. `hidden = true` hides it in
- * both renderers AND still serialises.
- */
-function hideWidget(w: any): void {
-  if (!w) return;
-  w.hidden = true;                          // canvas (1.0) and Vue (2.0)
-  if (w.options) w.options.hidden = true;   // Vue layout reads it here
-  w.computeSize = () => [0, -4];            // collapse the row on canvas
-  w.draw = () => {};
-  // Belt and braces for stale cached defs that still declare it multiline.
-  if (w.element?.style) w.element.style.display = "none";
-}
-
-/**
- * Show/hide a plain widget in BOTH renderers, reversibly.
- *
- * Not `hideWidget` above: that one is a one-way trapdoor for the data channel (it also
- * kills `draw`). Here the row has to come back when the user picks Custom again.
- */
-function setWidgetVisible(node: any, name: string, visible: boolean): void {
-  const w = findW(node, name);
-  if (!w) return;
-  w.hidden = !visible;                          // canvas (1.0)
-  if (w.options) w.options.hidden = !visible;   // Vue layout (2.0) reads it here
-  if (visible) delete w.computeSize;
-  else w.computeSize = () => [0, -4];           // collapse the row on canvas
-}
-
-/**
- * Works around the DOM-widget WIDTH bug in the classic renderer: on selection or
- * re-layout, ComfyUI mis-sizes the host `div.dom-widget` - it either balloons to the graph
- * canvas width or collapses to about half - while `node.size[0]` stays correct. Vue mode
- * is fine. So detect "broken" from the PARENT host width (independent of whatever width we
- * force, hence no oscillation) and pin back to `node.size[0]` minus a self-calibrated
- * inset. The 250 ms poll matters: the ResizeObserver does NOT fire when ComfyUI re-lays
- * out the host, which is precisely when it breaks.
- */
-function keepDomWidgetSized(
-  node: any, container: HTMLElement,
-): { release: () => void; margin: () => number } {
-  const MAX_MARGIN = 40;
-  let enforcing = false;
-  // The gutter ComfyUI leaves between the node's border and the widget column. Starts at
-  // LiteGraph's own 15 and is re-measured from the real layout below. Exposed because the
-  // node's MINIMUM WIDTH has to include it: clamping the node to MIN_W alone leaves the
-  // host at MIN_W - margin, the container's `min-width` then overflows it to the right, and
-  // the widget ends up flush against the right border while the left keeps its gutter.
-  let goodMargin = 15;
-  const vueMode = () => !!(window as any).LiteGraph?.vueNodesMode;
-  const clamp = () => {
-    if (enforcing) return;
-    // Vue Nodes ignores computeSize for the minimum width and reads the element's inline
-    // min-width instead, so it has to be set on the node element itself.
-    if (vueMode()) {
-      if (container.style.width) container.style.width = "";
-      const el = document.querySelector(`[data-node-id="${node.id}"]`) as HTMLElement | null;
-      if (el && el.style.minWidth !== `${MIN_W}px`) el.style.minWidth = `${MIN_W}px`;
-      return;
-    }
-    const nodeW = node.size?.[0];
-    if (!nodeW) return;
-    const hostW = container.parentElement?.clientWidth ?? 0;
-    const broken = hostW > 0 && (hostW > nodeW * 1.2 || hostW < nodeW * 0.7);
-    if (!broken) {
-      if (container.style.width) {
-        enforcing = true;
-        container.style.width = "";
-        requestAnimationFrame(() => { enforcing = false; });
-      }
-      const cw = container.clientWidth;
-      if (cw > 0 && cw <= nodeW && cw >= nodeW - MAX_MARGIN) goodMargin = nodeW - cw;
-      return;
-    }
-    const ref = Math.round(nodeW - goodMargin);
-    if (ref > 0 && Math.abs(container.clientWidth - ref) > 2) {
-      enforcing = true;
-      container.style.boxSizing = "border-box";
-      container.style.width = `${ref}px`;
-      requestAnimationFrame(() => { enforcing = false; });
-    }
-  };
-  clamp();
-  const ro = new ResizeObserver(clamp);
-  ro.observe(container);
-  const origResize = node.onResize;
-  node.onResize = function (this: any, ...args: any[]) {
-    origResize?.apply(this, args);
-    clamp();
-  };
-  const iv = window.setInterval(clamp, 250);
-  return {
-    release: () => { ro.disconnect(); clearInterval(iv); },
-    margin: () => goodMargin,
-  };
-}
 
 // ── Host: everything the editor needs to know about the node ──────────────────
 
@@ -432,7 +324,7 @@ comfyApp.registerExtension({
       });
       void domWidget;
 
-      const widthKeeper = keepDomWidgetSized(node, container);
+      const widthKeeper = keepDomWidgetSized(node, container, MIN_W);
       /**
        * MIN_W is what the CONTENT needs; the node also has to pay for the gutter ComfyUI
        * leaves around the widget column.
@@ -737,3 +629,4 @@ comfyApp.registerExtension({
 
 // The Freeze Frames companion: its own extension, registered from the same bundle.
 registerFreezeFrames();
+registerVideoViewer();

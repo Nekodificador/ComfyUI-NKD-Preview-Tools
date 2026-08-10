@@ -633,30 +633,30 @@ function probe(ref) {
 const cachedInfo = (ref) => infoCache.get(refKey(ref));
 const pool = /* @__PURE__ */ new Map();
 function makePooled(ref) {
-  const el = document.createElement("video");
-  el.src = viewUrl(ref);
-  el.muted = true;
-  el.playsInline = true;
-  el.preload = "auto";
-  el.crossOrigin = "anonymous";
+  const el2 = document.createElement("video");
+  el2.src = viewUrl(ref);
+  el2.muted = true;
+  el2.playsInline = true;
+  el2.preload = "auto";
+  el2.crossOrigin = "anonymous";
   const entry = {
-    el,
+    el: el2,
     good: document.createElement("canvas"),
     hasGood: false,
     wantTime: -1,
     seeking: false,
     guard: 0
   };
-  el.addEventListener("loadedmetadata", () => applySeek(entry));
-  el.addEventListener("seeked", () => {
+  el2.addEventListener("loadedmetadata", () => applySeek(entry));
+  el2.addEventListener("seeked", () => {
     window.clearTimeout(entry.guard);
     entry.seeking = false;
     captureGood(entry);
-    if (entry.wantTime >= 0 && Math.abs(entry.wantTime - el.currentTime) > 1e-3) {
+    if (entry.wantTime >= 0 && Math.abs(entry.wantTime - el2.currentTime) > 1e-3) {
       applySeek(entry);
     }
   });
-  el.addEventListener("loadeddata", () => {
+  el2.addEventListener("loadeddata", () => {
     captureGood(entry);
     onPooledReady == null ? void 0 : onPooledReady();
     ensureAudio(ref, () => onPooledReady == null ? void 0 : onPooledReady());
@@ -664,12 +664,12 @@ function makePooled(ref) {
   return entry;
 }
 function captureGood(p) {
-  const { el, good } = p;
-  if (!el.videoWidth || !el.videoHeight) return;
-  if (good.width !== el.videoWidth) good.width = el.videoWidth;
-  if (good.height !== el.videoHeight) good.height = el.videoHeight;
+  const { el: el2, good } = p;
+  if (!el2.videoWidth || !el2.videoHeight) return;
+  if (good.width !== el2.videoWidth) good.width = el2.videoWidth;
+  if (good.height !== el2.videoHeight) good.height = el2.videoHeight;
   try {
-    good.getContext("2d").drawImage(el, 0, 0);
+    good.getContext("2d").drawImage(el2, 0, 0);
     p.hasGood = true;
   } catch {
   }
@@ -752,40 +752,40 @@ function ensureThumbnails(ref, info, onFrame) {
   const strip = [];
   thumbCache.set(key, strip);
   const job = new Promise((resolve) => {
-    const el = document.createElement("video");
-    el.src = viewUrl(ref);
-    el.muted = true;
-    el.preload = "auto";
-    el.crossOrigin = "anonymous";
+    const el2 = document.createElement("video");
+    el2.src = viewUrl(ref);
+    el2.muted = true;
+    el2.preload = "auto";
+    el2.crossOrigin = "anonymous";
     const duration = info.duration || 1;
     const n = thumbCount(duration);
     let i = 0;
     let timer = 0;
     const done = () => {
       window.clearTimeout(timer);
-      el.removeAttribute("src");
-      el.load();
+      el2.removeAttribute("src");
+      el2.load();
       resolve();
     };
     const grab = () => {
       if (i >= n) return done();
-      el.currentTime = (i + 0.5) / n * duration;
+      el2.currentTime = (i + 0.5) / n * duration;
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         i += 1;
         grab();
       }, 2e3);
     };
-    el.addEventListener("seeked", () => {
+    el2.addEventListener("seeked", () => {
       window.clearTimeout(timer);
-      if (el.videoWidth && el.videoHeight) {
+      if (el2.videoWidth && el2.videoHeight) {
         const h = 64;
         const c = document.createElement("canvas");
         c.height = h;
-        c.width = Math.max(1, Math.round(el.videoWidth / el.videoHeight * h));
+        c.width = Math.max(1, Math.round(el2.videoWidth / el2.videoHeight * h));
         try {
-          c.getContext("2d").drawImage(el, 0, 0, c.width, c.height);
-          strip.push({ time: el.currentTime, canvas: c });
+          c.getContext("2d").drawImage(el2, 0, 0, c.width, c.height);
+          strip.push({ time: el2.currentTime, canvas: c });
           onFrame();
         } catch {
         }
@@ -793,8 +793,8 @@ function ensureThumbnails(ref, info, onFrame) {
       i += 1;
       grab();
     });
-    el.addEventListener("error", done);
-    el.addEventListener("loadeddata", grab, { once: true });
+    el2.addEventListener("error", done);
+    el2.addEventListener("loadeddata", grab, { once: true });
   }).finally(() => thumbJobs.delete(key));
   thumbJobs.set(key, job);
   return strip;
@@ -851,7 +851,7 @@ function computePeaks(buf) {
 }
 const peaksFor = (ref) => peakCache.get(refKey(ref));
 const audioBufferFor = (ref) => audioCache.get(refKey(ref));
-const SHUTTLE = [1, 2, 4, 8];
+const SHUTTLE$1 = [1, 2, 4, 8];
 class Transport {
   constructor(host) {
     __publicField(this, "host");
@@ -911,8 +911,8 @@ class Transport {
       this.play(dir);
       return;
     }
-    const i = SHUTTLE.indexOf(Math.abs(cur));
-    this.play(dir * SHUTTLE[Math.min(SHUTTLE.length - 1, i + 1)]);
+    const i = SHUTTLE$1.indexOf(Math.abs(cur));
+    this.play(dir * SHUTTLE$1[Math.min(SHUTTLE$1.length - 1, i + 1)]);
   }
   play(speed) {
     var _a;
@@ -1050,7 +1050,7 @@ const IO_BAR_TOP = RULER_H - IO_BAR_H;
 const IO_GRAB_PX = 7;
 const CLIP_HEAD_H = 15;
 const MUTE_BOX = 16;
-const PREVIEW_MAX_H = 260;
+const PREVIEW_MAX_H$1 = 260;
 const TRACK_H = 46;
 const MASK_H = 30;
 const AUDIO_H = 34;
@@ -2322,7 +2322,7 @@ class TimelineEditor {
     const top = RULER_H;
     const h = this.trackCount * TRACK_H;
     const end = start + count;
-    const spans = this.tl.clips.map((c) => [Math.max(c.start, start), Math.min(c.start + c.length, end)]).filter(([a, b]) => b > a).sort((p, q) => p[0] - q[0]);
+    const spans = this.tl.clips.filter((c) => !c.audioOnly).map((c) => [Math.max(c.start, start), Math.min(c.start + c.length, end)]).filter(([a, b]) => b > a).sort((p, q) => p[0] - q[0]);
     let cursor = start;
     const paint = (a, b) => {
       if (b <= a) return;
@@ -2345,6 +2345,7 @@ class TimelineEditor {
     paint(cursor, end);
   }
   drawClip(ctx, c, lane) {
+    var _a;
     const x = this.xOf(c.start);
     const w = Math.max(2, this.xOf(c.start + c.length) - x);
     const y = this.laneTop(lane, c.track) + 3;
@@ -2354,30 +2355,43 @@ class TimelineEditor {
     ctx.save();
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, 2);
-    ctx.fillStyle = lane === "audio" ? C.audioFill : lane === "mask" ? C.maskFill : C.clipFill;
+    const soundOnly = !!c.audioOnly && lane !== "audio";
+    ctx.fillStyle = lane === "audio" || soundOnly ? C.audioFill : lane === "mask" ? C.maskFill : C.clipFill;
     ctx.fill();
     ctx.clip();
     const selected = this.selection.has(c.id);
     if (h > CLIP_HEAD_H + 4) {
-      ctx.fillStyle = selected ? C.accent : lane === "audio" ? C.audioHead : lane === "mask" ? C.maskHead : C.clipHead;
+      ctx.fillStyle = selected ? C.accent : lane === "audio" || soundOnly ? C.audioHead : lane === "mask" ? C.maskHead : C.clipHead;
       ctx.fillRect(x, y, w, CLIP_HEAD_H);
     }
     const src = this.host.sourceFor(c.src);
     const body = y + (h > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
     const bodyH = y + h - body;
     if (src && bodyH > 6) {
-      if (lane === "audio") this.drawWaveform(ctx, c, src.ref, x, body, w, bodyH);
-      else if (src.info) this.drawFilmstrip(ctx, c, src.ref, src.info, x, body, w, bodyH);
+      if (lane === "audio") {
+        this.drawWaveform(ctx, c, src.ref, x, body, w, bodyH, this.host.getFps());
+      } else if (soundOnly) {
+        this.drawWaveform(
+          ctx,
+          c,
+          src.ref,
+          x,
+          body,
+          w,
+          bodyH,
+          ((_a = src.info) == null ? void 0 : _a.fps) || this.host.getFps()
+        );
+      } else if (src.info) {
+        this.drawFilmstrip(ctx, c, src.ref, src.info, x, body, w, bodyH);
+      }
     }
+    if (soundOnly) this.drawHatch(ctx, x, y, w, h);
     if (w > 26) {
       ctx.fillStyle = selected ? "#0d1b24" : src ? C.clipName : C.dim;
       ctx.font = "10px system-ui, sans-serif";
       ctx.textBaseline = "middle";
-      ctx.fillText(
-        this.ellipsise(ctx, (src == null ? void 0 : src.label) ?? `${c.src} (no source)`, w - 12),
-        x + 5,
-        y + CLIP_HEAD_H / 2
-      );
+      const label = ((src == null ? void 0 : src.label) ?? `${c.src} (no source)`) + (soundOnly && w > 150 ? "  ·  audio only" : "");
+      ctx.fillText(this.ellipsise(ctx, label, w - 12), x + 5, y + CLIP_HEAD_H / 2);
     }
     const info = src == null ? void 0 : src.info;
     const fps = this.host.getFps();
@@ -2458,14 +2472,19 @@ class TimelineEditor {
     ctx.globalAlpha = 1;
   }
   /** Peaks across the clip's own trimmed span, so trimming re-reads the wave. */
-  drawWaveform(ctx, c, ref, x, y, w, h) {
+  /**
+   * @param trimRate  fps that `c.trimIn` is counted in. An audio clip trims in TIMELINE
+   *   frames, a video clip in SOURCE frames - passing the timeline rate for a video whose
+   *   source runs at another cadence slides the whole wave off the picture it belongs to.
+   */
+  drawWaveform(ctx, c, ref, x, y, w, h, trimRate) {
     ensureAudio(ref, () => this.requestRender());
     const peaks = peaksFor(ref);
     const buf = audioBufferFor(ref);
     if (!peaks || !buf) return;
-    const totalFrames = Math.max(1, buf.duration * this.host.getFps());
-    const from = c.trimIn / totalFrames;
-    const to = (c.trimIn + c.length) / totalFrames;
+    const total = Math.max(1e-6, buf.duration);
+    const from = c.trimIn / Math.max(1, trimRate) / total;
+    const to = from + c.length / this.host.getFps() / total;
     const mid = y + h / 2;
     ctx.fillStyle = "rgba(150,215,255,0.85)";
     for (let px = 0; px < w; px++) {
@@ -2480,6 +2499,21 @@ class TimelineEditor {
     }
     ctx.fillStyle = "rgba(255,255,255,0.25)";
     ctx.fillRect(x, mid, w, 1);
+  }
+  /** Amber diagonals, the same colour the `generate` wash uses: this stretch produces no
+   *  picture. Called inside `drawClip`'s clip region, so it never bleeds past the block. */
+  drawHatch(ctx, x, y, w, h) {
+    const step = 8;
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,209,102,0.22)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = -h; i < w; i += step) {
+      ctx.moveTo(x + i, y + h);
+      ctx.lineTo(x + i + h, y);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
   drawSpeaker(ctx, x, y, muted, hot) {
     const s = MUTE_BOX;
@@ -2566,7 +2600,7 @@ class TimelineEditor {
     var _a;
     const [ow, oh] = this.host.getOutSize();
     this.preview.style.aspectRatio = `${Math.max(1, ow)} / ${Math.max(1, oh)}`;
-    this.preview.style.maxWidth = `${Math.round(PREVIEW_MAX_H * (Math.max(1, ow) / Math.max(1, oh)))}px`;
+    this.preview.style.maxWidth = `${Math.round(PREVIEW_MAX_H$1 * (Math.max(1, ow) / Math.max(1, oh)))}px`;
     const h = this.preview.clientHeight;
     if (!this.syncSize(this.preview, this.pctx, h)) return;
     const w = this.preview.clientWidth;
@@ -2759,13 +2793,71 @@ const CSS = `
 .nkd-tl-menu-item.on::after { content: " ✓"; }
 /* Container query, not a media query: the node resizes, the window does not. */
 @container (max-width: 330px) { .nkd-tl-status { display: none; } }
+
+/* 😺NKD Video Viewer. Shares .nkd-tl-bar/-btn/-status above rather than restating them. */
+.nkd-vid-stage {
+  /* aspect-ratio gives the height; max-width is set from JS so widening the node does not
+     grow the picture (a portrait clip would otherwise turn the node into a column). */
+  width: 100%; margin: 0 auto; position: relative;
+  background: #000; border: 1px solid #3a3d46; border-radius: 6px;
+  overflow: hidden;
+}
+.nkd-vid-el {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%; object-fit: contain; display: block;
+}
+.nkd-vid-scrub {
+  width: 100%; height: 44px; display: block;
+  border: 1px solid #3a3d46; border-radius: 6px;
+  cursor: pointer; touch-action: none;   /* the drag is ours, not the browser's scroll */
+}
+.nkd-vid a.nkd-tl-btn { text-decoration: none; }
+.nkd-vid-path {
+  font: 11px ui-monospace, monospace; color: rgba(255,255,255,0.40);
+  padding: 0 2px; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.nkd-vid-path:hover { color: #4ab4ff; }
+.nkd-vid-path:empty { display: none; }
+/* A/B compare. The reference is a second <video> stacked on top and clipped back, so the
+   composite is the browser's, not an approximation. */
+.nkd-vid-ref { z-index: 1; pointer-events: none; }
+.nkd-vid-divider {
+  position: absolute; top: 0; bottom: 0; width: 2px; z-index: 2;
+  background: #4ab4ff; box-shadow: 0 0 6px rgba(0,0,0,0.6);
+  pointer-events: none;
+}
+.nkd-vid-divider::before, .nkd-vid-divider::after {
+  content: ""; position: absolute; left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent;
+}
+.nkd-vid-divider::before { top: 50%; margin-top: -14px; border-bottom-color: #4ab4ff; }
+.nkd-vid-divider::after { top: 50%; margin-top: 4px; border-top-color: #4ab4ff; }
+
+/* Full screen: the whole widget goes, so the transport and the compare controls come with
+   it. The picture takes whatever is left and letterboxes itself.
+   !important is not decoration here - max-width and aspect-ratio are written INLINE from
+   JS (the height cap that stops a wide node growing the monitor), and inline wins over a
+   plain rule. In full screen that cap is exactly what has to go. */
+.nkd-vid:fullscreen {
+  display: flex; flex-direction: column; gap: 6px;
+  width: 100vw; height: 100vh; box-sizing: border-box;
+  padding: 8px; background: #000;
+}
+.nkd-vid:fullscreen .nkd-vid-stage {
+  flex: 1 1 auto; min-height: 0;
+  max-width: none !important; aspect-ratio: auto !important;
+  border: 0; border-radius: 0;
+}
+.nkd-vid:fullscreen .nkd-vid-scrub { flex: 0 0 auto; }
+.nkd-vid:fullscreen .nkd-tl-bar { flex: 0 0 auto; }
 `;
 function ensureStyles() {
   if (document.getElementById(STYLE_ID)) return;
-  const el = document.createElement("style");
-  el.id = STYLE_ID;
-  el.textContent = CSS;
-  document.head.appendChild(el);
+  const el2 = document.createElement("style");
+  el2.id = STYLE_ID;
+  el2.textContent = CSS;
+  document.head.appendChild(el2);
 }
 const FREEZE_NODE = "NKDFreezeFrames";
 const FIXED_OUTPUTS = 2;
@@ -2889,6 +2981,880 @@ function registerFreezeFrames() {
     }
   });
 }
+const ROW_SAFETY = 2;
+const MAX_INSET = 48;
+const findW = (node, name) => {
+  var _a;
+  return (_a = node.widgets) == null ? void 0 : _a.find((w) => w.name === name);
+};
+function hideWidget(w) {
+  var _a;
+  if (!w) return;
+  w.hidden = true;
+  if (w.options) w.options.hidden = true;
+  w.computeSize = () => [0, -4];
+  w.draw = () => {
+  };
+  if ((_a = w.element) == null ? void 0 : _a.style) w.element.style.display = "none";
+}
+function setWidgetVisible(node, name, visible) {
+  const w = findW(node, name);
+  if (!w) return;
+  w.hidden = !visible;
+  if (w.options) w.options.hidden = !visible;
+  if (visible) delete w.computeSize;
+  else w.computeSize = () => [0, -4];
+}
+function keepDomWidgetSized(node, container, minW) {
+  const MAX_MARGIN = 40;
+  let enforcing = false;
+  let goodMargin = 15;
+  const vueMode = () => {
+    var _a;
+    return !!((_a = window.LiteGraph) == null ? void 0 : _a.vueNodesMode);
+  };
+  const clamp = () => {
+    var _a, _b;
+    if (enforcing) return;
+    if (vueMode()) {
+      if (container.style.width) container.style.width = "";
+      const el2 = document.querySelector(`[data-node-id="${node.id}"]`);
+      if (el2 && el2.style.minWidth !== `${minW}px`) el2.style.minWidth = `${minW}px`;
+      return;
+    }
+    const nodeW = (_a = node.size) == null ? void 0 : _a[0];
+    if (!nodeW) return;
+    const hostW = ((_b = container.parentElement) == null ? void 0 : _b.clientWidth) ?? 0;
+    const broken = hostW > 0 && (hostW > nodeW * 1.2 || hostW < nodeW * 0.7);
+    if (!broken) {
+      if (container.style.width) {
+        enforcing = true;
+        container.style.width = "";
+        requestAnimationFrame(() => {
+          enforcing = false;
+        });
+      }
+      const cw = container.clientWidth;
+      if (cw > 0 && cw <= nodeW && cw >= nodeW - MAX_MARGIN) goodMargin = nodeW - cw;
+      return;
+    }
+    const ref = Math.round(nodeW - goodMargin);
+    if (ref > 0 && Math.abs(container.clientWidth - ref) > 2) {
+      enforcing = true;
+      container.style.boxSizing = "border-box";
+      container.style.width = `${ref}px`;
+      requestAnimationFrame(() => {
+        enforcing = false;
+      });
+    }
+  };
+  clamp();
+  const ro = new ResizeObserver(clamp);
+  ro.observe(container);
+  const origResize = node.onResize;
+  node.onResize = function(...args) {
+    origResize == null ? void 0 : origResize.apply(this, args);
+    clamp();
+  };
+  const iv = window.setInterval(clamp, 250);
+  return {
+    release: () => {
+      ro.disconnect();
+      clearInterval(iv);
+    },
+    margin: () => goodMargin
+  };
+}
+function mountDomWidget(node, opts) {
+  const container = document.createElement("div");
+  container.style.width = "100%";
+  container.style.minWidth = `${opts.minWidth}px`;
+  container.appendChild(opts.root);
+  let measured = 0;
+  let inset = 0;
+  const heightFor = () => (measured > 0 ? measured : opts.estimate()) + ROW_SAFETY + inset;
+  node.addDOMWidget(opts.name, opts.type, container, {
+    getValue: opts.getValue ?? (() => ""),
+    setValue: opts.setValue ?? (() => {
+    }),
+    serialize: false,
+    hideOnZoom: false,
+    getMinHeight: heightFor,
+    getMaxHeight: heightFor,
+    getHeight: heightFor
+  });
+  const widthKeeper = keepDomWidgetSized(node, container, opts.minWidth);
+  const minNodeWidth = () => opts.minWidth + widthKeeper.margin();
+  const resizeToContent = () => {
+    node.setSize([Math.max(node.size[0], minNodeWidth()), node.computeSize()[1]]);
+    node.setDirtyCanvas(true, true);
+  };
+  let settling = false;
+  const calibrate = () => {
+    var _a;
+    const hostH = ((_a = container.parentElement) == null ? void 0 : _a.clientHeight) ?? 0;
+    if (hostH < 1) return false;
+    const gap = Math.min(MAX_INSET, Math.max(0, Math.round(heightFor() - hostH)));
+    if (Math.abs(gap - inset) <= 1) return false;
+    inset = gap;
+    return true;
+  };
+  const ro = new ResizeObserver(() => {
+    var _a;
+    if (settling) return;
+    if ((_a = document.fullscreenElement) == null ? void 0 : _a.contains(opts.root)) return;
+    const h = opts.root.offsetHeight;
+    if (h < 1) return;
+    const grew = Math.abs(h - measured) > 1;
+    if (grew) measured = h;
+    if (!calibrate() && !grew) return;
+    settling = true;
+    resizeToContent();
+    requestAnimationFrame(() => {
+      settling = false;
+    });
+  });
+  ro.observe(opts.root);
+  const origResize = node.onResize;
+  node.onResize = function(size) {
+    var _a;
+    origResize == null ? void 0 : origResize.apply(this, arguments);
+    const min = minNodeWidth();
+    if (size[0] < min) size[0] = min;
+    size[1] = this.computeSize(size[0])[1];
+    (_a = opts.onResize) == null ? void 0 : _a.call(opts);
+  };
+  const origComputeSize = node.computeSize.bind(node);
+  node.computeSize = function() {
+    const sz = origComputeSize();
+    const needed = heightFor();
+    if (sz[1] < needed) sz[1] = needed;
+    const min = minNodeWidth();
+    if (sz[0] < min) sz[0] = min;
+    return sz;
+  };
+  let tries = 0;
+  const settleInitial = () => {
+    measured = opts.root.offsetHeight || 0;
+    resizeToContent();
+    if (measured < 1 && tries++ < 30) requestAnimationFrame(settleInitial);
+  };
+  requestAnimationFrame(settleInitial);
+  return {
+    container,
+    resizeToContent,
+    minNodeWidth,
+    release: () => {
+      ro.disconnect();
+      widthKeeper.release();
+    }
+  };
+}
+const COMPARE_ORDER = ["off", "wipe", "difference"];
+const REF_DRIFT_S = 0.25;
+const PREVIEW_MAX_H = 260;
+const SCRUB_H = 44;
+const SHUTTLE = [1, 2, 4, 8];
+const el = (tag, cls, parent) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  parent == null ? void 0 : parent.appendChild(node);
+  return node;
+};
+function button(parent, icon, title, onClick) {
+  const b = el("button", "nkd-tl-btn", parent);
+  b.title = title;
+  b.appendChild(el("i", icon));
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onClick();
+  });
+  return b;
+}
+const humanSize = (bytes) => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+class VideoViewer {
+  constructor(state) {
+    __publicField(this, "root");
+    __publicField(this, "stage");
+    __publicField(this, "video");
+    __publicField(this, "still");
+    // GIF has no seekable stream; show it as-is
+    __publicField(this, "scrub");
+    __publicField(this, "status");
+    __publicField(this, "playBtn");
+    __publicField(this, "loopBtn");
+    __publicField(this, "muteBtn");
+    __publicField(this, "link");
+    __publicField(this, "pathLine");
+    __publicField(this, "ref", null);
+    __publicField(this, "info", null);
+    __publicField(this, "raf", 0);
+    __publicField(this, "dragging", false);
+    /** Coalesced seek target in seconds, -1 when nothing is pending. See `applySeek`. */
+    __publicField(this, "want", -1);
+    __publicField(this, "seeking", false);
+    __publicField(this, "guard", 0);
+    /** Pre-rendered filmstrip. Only the playhead moves while scrubbing, so rebuilding the
+     *  strip on every pointermove is pure waste - and it is the expensive half of a draw. */
+    __publicField(this, "strip", document.createElement("canvas"));
+    __publicField(this, "stripKey", "");
+    /** The before/after layer: a second `<video>` stacked over the first. */
+    __publicField(this, "refVideo");
+    __publicField(this, "divider");
+    __publicField(this, "compareBtn");
+    __publicField(this, "compare", "off");
+    __publicField(this, "wipe", 0.5);
+    // 0..1, how much of the reference is showing
+    __publicField(this, "holding", false);
+    // hold B: reference full-frame
+    __publicField(this, "hasRef", false);
+    /** Persisted on the node, not in a widget: what the viewer is doing does not change what
+     *  the graph produces, and an input would re-encode the video on every toggle. */
+    __publicField(this, "onState", null);
+    __publicField(this, "onHeightChange", null);
+    this.root = el("div", "nkd-tl nkd-vid");
+    this.root.tabIndex = 0;
+    this.stage = el("div", "nkd-vid-stage", this.root);
+    this.video = el("video", "nkd-vid-el", this.stage);
+    this.video.playsInline = true;
+    this.video.preload = "auto";
+    this.video.loop = (state == null ? void 0 : state.loop) !== false;
+    this.video.muted = !!(state == null ? void 0 : state.muted);
+    this.still = el("img", "nkd-vid-el", this.stage);
+    this.still.style.display = "none";
+    this.refVideo = el("video", "nkd-vid-el nkd-vid-ref", this.stage);
+    this.refVideo.playsInline = true;
+    this.refVideo.muted = true;
+    this.refVideo.preload = "auto";
+    this.divider = el("div", "nkd-vid-divider", this.stage);
+    this.compare = (state == null ? void 0 : state.compare) ?? "off";
+    if (typeof (state == null ? void 0 : state.wipe) === "number") this.wipe = state.wipe;
+    this.scrub = el("canvas", "nkd-vid-scrub", this.root);
+    const bar = el("div", "nkd-tl-bar", this.root);
+    this.playBtn = button(bar, "pi pi-play", "Play / pause (Space)", () => this.toggle());
+    button(bar, "pi pi-step-backward", "Previous frame (←)", () => this.step(-1));
+    button(bar, "pi pi-step-forward", "Next frame (→)", () => this.step(1));
+    this.loopBtn = button(bar, "pi pi-replay", "Loop", () => {
+      this.video.loop = !this.video.loop;
+      this.syncButtons();
+      this.pushState();
+    });
+    this.muteBtn = button(bar, "pi pi-volume-up", "Mute", () => {
+      this.video.muted = !this.video.muted;
+      this.syncButtons();
+      this.pushState();
+    });
+    button(bar, "pi pi-window-maximize", "Full screen (F)", () => this.toggleFullscreen());
+    this.compareBtn = button(
+      bar,
+      "pi pi-arrows-h",
+      "Compare against the reference: off / wipe / difference (C). Hold B to see it whole.",
+      () => this.cycleCompare()
+    );
+    button(bar, "pi pi-bookmark", "Use this render as the reference", () => {
+      void this.setAsReference();
+    });
+    this.link = el("a", "nkd-tl-btn", bar);
+    this.link.title = "Save a copy";
+    this.link.appendChild(el("i", "pi pi-download"));
+    this.status = el("div", "nkd-tl-status", bar);
+    this.status.textContent = "no video yet";
+    this.pathLine = el("div", "nkd-vid-path", this.root);
+    this.pathLine.title = "Click to copy the full path";
+    this.pathLine.addEventListener("click", () => {
+      var _a;
+      void ((_a = navigator.clipboard) == null ? void 0 : _a.writeText(this.pathLine.dataset.full || ""));
+      const was = this.pathLine.textContent;
+      this.pathLine.textContent = "copied";
+      window.setTimeout(() => {
+        this.pathLine.textContent = was;
+      }, 900);
+    });
+    this.syncButtons();
+    if (this.compare !== "off") void this.loadReference();
+    else this.applyCompare();
+    this.wire();
+  }
+  // ── Source ──────────────────────────────────────────────────────────────────
+  setSource(ref, info) {
+    var _a;
+    this.ref = ref;
+    this.info = info;
+    this.stripKey = "";
+    this.want = -1;
+    this.seeking = false;
+    window.clearTimeout(this.guard);
+    const url = viewUrl(ref);
+    this.link.href = url;
+    this.link.setAttribute("download", ref.filename);
+    const aspect = info.width / Math.max(1, info.height);
+    this.stage.style.aspectRatio = `${info.width} / ${info.height}`;
+    this.stage.style.maxWidth = `${Math.round(PREVIEW_MAX_H * aspect)}px`;
+    if (info.playable) {
+      this.still.style.display = "none";
+      this.video.style.display = "";
+      if (this.video.src !== url) this.video.src = url;
+      ensureThumbnails(ref, {
+        fps: info.fps,
+        frame_count: info.frame_count,
+        duration: info.frame_count / Math.max(1e-6, info.fps),
+        width: info.width,
+        height: info.height
+      }, () => this.draw());
+    } else {
+      this.video.removeAttribute("src");
+      this.video.load();
+      this.video.style.display = "none";
+      this.still.style.display = "";
+      this.still.src = url;
+    }
+    const where = `${ref.type}/${ref.subfolder ? ref.subfolder + "/" : ""}${ref.filename}`;
+    this.pathLine.textContent = where;
+    this.pathLine.dataset.full = info.path || where;
+    this.syncButtons();
+    this.draw();
+    if (this.compare !== "off") void this.loadReference();
+    (_a = this.onHeightChange) == null ? void 0 : _a.call(this);
+  }
+  // ── Compare ─────────────────────────────────────────────────────────────────
+  /** Fetch whatever the global reference slot currently points at. */
+  async loadReference() {
+    try {
+      const r = await api.fetchApi("/nkd/ref/get_video");
+      if (!r.ok) {
+        this.hasRef = false;
+        this.applyCompare();
+        return;
+      }
+      const ref = await r.json();
+      const url = viewUrl(ref);
+      if (this.refVideo.src !== url) this.refVideo.src = url;
+      this.hasRef = true;
+    } catch {
+      this.hasRef = false;
+    }
+    this.applyCompare();
+  }
+  /** Nominate the render on screen as the reference, so the next run can be wiped
+   *  against it. Without this you would have to re-queue the graph through a Reference
+   *  node just to nominate the thing you are already looking at. */
+  async setAsReference() {
+    if (!this.ref) return;
+    try {
+      await api.fetchApi("/nkd/ref/set_video", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(this.ref)
+      });
+      await this.loadReference();
+      this.flash("reference set");
+    } catch {
+      this.flash("could not set reference");
+    }
+  }
+  cycleCompare() {
+    const next = COMPARE_ORDER[(COMPARE_ORDER.indexOf(this.compare) + 1) % COMPARE_ORDER.length];
+    this.compare = next;
+    if (next !== "off" && !this.hasRef) void this.loadReference();
+    else this.applyCompare();
+    this.pushState();
+  }
+  applyCompare() {
+    const on = this.compare !== "off" && this.hasRef;
+    const showing = on || this.holding && this.hasRef;
+    this.refVideo.style.display = showing ? "" : "none";
+    this.refVideo.style.mixBlendMode = on && this.compare === "difference" ? "difference" : "normal";
+    const clip = this.holding || this.compare === "difference" ? "none" : `inset(0 ${(1 - this.wipe) * 100}% 0 0)`;
+    this.refVideo.style.clipPath = clip;
+    this.divider.style.display = on && this.compare === "wipe" && !this.holding ? "" : "none";
+    this.divider.style.left = `${this.wipe * 100}%`;
+    this.compareBtn.classList.toggle("on", this.compare !== "off");
+    this.compareBtn.firstElementChild.className = this.compare === "difference" ? "pi pi-clone" : "pi pi-arrows-h";
+    if (showing) this.syncReference(true);
+  }
+  /**
+   * Keep the reference on the same MOMENT as the current clip.
+   *
+   * Driven from the main element rather than bound to it: matched by time, corrected only
+   * past the drift threshold, and told to play or pause alongside. Seeking it every frame
+   * is what would turn a smooth comparison into a slideshow.
+   */
+  syncReference(force = false) {
+    if (this.refVideo.style.display === "none" || this.refVideo.readyState < 1) return;
+    const t = this.video.currentTime;
+    if (force || Math.abs(this.refVideo.currentTime - t) > REF_DRIFT_S) {
+      try {
+        this.refVideo.currentTime = t;
+      } catch {
+      }
+    }
+    if (this.video.paused && !this.refVideo.paused) this.refVideo.pause();
+    else if (!this.video.paused && this.refVideo.paused) {
+      this.refVideo.playbackRate = this.video.playbackRate;
+      void this.refVideo.play().catch(() => {
+      });
+    }
+  }
+  /**
+   * Full screen takes the WHOLE widget, not just the picture.
+   *
+   * Sending only the stage is what left the transport, the scrub bar and the compare
+   * controls behind on the page - a full-screen player you cannot scrub is a wallpaper. The
+   * root also carries the key handler, so it has to be focused once it is up or Space and
+   * the arrows would go to the page instead.
+   */
+  toggleFullscreen() {
+    var _a, _b, _c;
+    if (document.fullscreenElement === this.root) {
+      void ((_a = document.exitFullscreen) == null ? void 0 : _a.call(document).catch(() => {
+      }));
+      return;
+    }
+    void ((_c = (_b = this.root).requestFullscreen) == null ? void 0 : _c.call(_b).then(() => {
+      this.root.focus();
+      this.draw();
+    }).catch(() => {
+    }));
+  }
+  flash(text) {
+    const was = this.pathLine.textContent;
+    this.pathLine.textContent = text;
+    window.setTimeout(() => {
+      this.pathLine.textContent = was;
+    }, 1200);
+  }
+  // ── Transport ───────────────────────────────────────────────────────────────
+  get fps() {
+    var _a;
+    return Math.max(1e-6, ((_a = this.info) == null ? void 0 : _a.fps) ?? 24);
+  }
+  /** Where the playhead IS, or where it is heading while a seek is in flight.
+   *
+   *  Reading `currentTime` alone made the readout and the playhead lag a drag by however
+   *  long the decode took; the pending target is what the user actually asked for. */
+  get frame() {
+    const t = this.want >= 0 ? this.want : this.video.currentTime;
+    return Math.floor(t * this.fps + 1e-4);
+  }
+  seekFrame(f) {
+    var _a;
+    const last = Math.max(0, (((_a = this.info) == null ? void 0 : _a.frame_count) ?? 1) - 1);
+    const clamped = Math.max(0, Math.min(last, f));
+    this.want = (clamped + 0.5) / this.fps;
+    this.applySeek();
+  }
+  /**
+   * Ask for the pending time, but only one seek at a time.
+   *
+   * Assigning `currentTime` on every pointermove is what makes a scrub lag: dozens of
+   * requests a second land on an element that can service exactly one, and an h264 seek is
+   * expensive. Coalescing means the element always works towards the LATEST position and
+   * the intermediate ones are simply dropped - the same trick `media.ts` uses for the
+   * timeline, which is why that one scrubs smoothly.
+   *
+   * Two guards that are not optional:
+   * - `readyState < 1`: assigning `currentTime` before metadata is IGNORED silently, so no
+   *   `seeked` ever fires. Setting `seeking = true` around that wedges the element for the
+   *   rest of the session. `loadedmetadata` retries instead.
+   * - the watchdog: one lost `seeked` must not make every later seek short-circuit forever.
+   */
+  applySeek() {
+    if (this.seeking || this.want < 0) return;
+    if (this.video.readyState < 1) return;
+    this.seeking = true;
+    try {
+      this.video.currentTime = this.want;
+    } catch {
+      this.seeking = false;
+      return;
+    }
+    window.clearTimeout(this.guard);
+    this.guard = window.setTimeout(() => {
+      this.seeking = false;
+      this.applySeek();
+    }, 2e3);
+  }
+  step(delta) {
+    if (!this.playable) return;
+    this.video.pause();
+    this.seekFrame(this.frame + delta);
+    this.syncButtons();
+  }
+  toggle() {
+    if (!this.playable) return;
+    if (this.video.paused) {
+      this.video.playbackRate = 1;
+      void this.video.play().catch(() => {
+      });
+    } else {
+      this.video.pause();
+    }
+    this.syncButtons();
+  }
+  /** J and L walk the shuttle speeds. Reverse is not offered: no browser plays a stream
+   *  backwards, and faking it with a seek per frame is what makes a preview stutter. */
+  shuttle(dir) {
+    if (!this.playable) return;
+    if (dir < 0) {
+      this.step(-1);
+      return;
+    }
+    const i = SHUTTLE.indexOf(this.video.playbackRate);
+    this.video.playbackRate = SHUTTLE[Math.min(SHUTTLE.length - 1, i + 1)] ?? 1;
+    if (this.video.paused) void this.video.play().catch(() => {
+    });
+    this.syncButtons();
+  }
+  get playable() {
+    var _a;
+    return !!((_a = this.info) == null ? void 0 : _a.playable);
+  }
+  // ── Wiring ──────────────────────────────────────────────────────────────────
+  pushState() {
+    var _a;
+    (_a = this.onState) == null ? void 0 : _a.call(this, {
+      loop: this.video.loop,
+      muted: this.video.muted,
+      compare: this.compare,
+      wipe: this.wipe
+    });
+  }
+  wire() {
+    const tick = () => {
+      this.draw();
+      this.syncReference();
+      this.raf = this.video.paused ? 0 : requestAnimationFrame(tick);
+    };
+    this.video.addEventListener("play", () => {
+      this.want = -1;
+      this.syncButtons();
+      if (!this.raf) this.raf = requestAnimationFrame(tick);
+    });
+    this.video.addEventListener("pause", () => {
+      this.syncButtons();
+      this.draw();
+    });
+    this.video.addEventListener("seeked", () => {
+      window.clearTimeout(this.guard);
+      this.seeking = false;
+      if (this.want >= 0 && Math.abs(this.want - this.video.currentTime) > 1e-3) {
+        this.applySeek();
+      } else {
+        this.want = -1;
+      }
+      this.draw();
+      this.syncReference(true);
+    });
+    this.video.addEventListener("loadedmetadata", () => {
+      this.applySeek();
+      this.draw();
+    });
+    const at = (e) => {
+      var _a;
+      const r = this.scrub.getBoundingClientRect();
+      const t = Math.max(0, Math.min(1, (e.clientX - r.left) / Math.max(1, r.width)));
+      this.seekFrame(Math.round(t * ((((_a = this.info) == null ? void 0 : _a.frame_count) ?? 1) - 1)));
+      this.draw();
+    };
+    this.scrub.addEventListener("pointerdown", (e) => {
+      if (!this.playable) return;
+      this.dragging = true;
+      this.scrub.setPointerCapture(e.pointerId);
+      this.video.pause();
+      at(e);
+    });
+    this.scrub.addEventListener("pointermove", (e) => {
+      if (this.dragging) at(e);
+    });
+    this.scrub.addEventListener("pointerup", (e) => {
+      this.dragging = false;
+      this.scrub.releasePointerCapture(e.pointerId);
+    });
+    let wiping = false;
+    const setWipe = (e) => {
+      const r = this.stage.getBoundingClientRect();
+      this.wipe = Math.max(0, Math.min(1, (e.clientX - r.left) / Math.max(1, r.width)));
+      this.applyCompare();
+    };
+    this.stage.addEventListener("pointerdown", (e) => {
+      if (this.compare !== "wipe" || !this.hasRef) return;
+      wiping = true;
+      this.stage.setPointerCapture(e.pointerId);
+      setWipe(e);
+    });
+    this.stage.addEventListener("pointermove", (e) => {
+      if (wiping) setWipe(e);
+    });
+    this.stage.addEventListener("pointerup", (e) => {
+      if (!wiping) return;
+      wiping = false;
+      this.stage.releasePointerCapture(e.pointerId);
+      this.pushState();
+    });
+    this.root.addEventListener("keyup", (e) => {
+      if (e.key.toLowerCase() === "b" && this.holding) {
+        this.holding = false;
+        this.applyCompare();
+      }
+    });
+    this.root.addEventListener("keydown", (e) => {
+      const k = e.key.toLowerCase();
+      const handled = () => {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      if (k === "b") {
+        if (!e.repeat) {
+          if (!this.hasRef) void this.loadReference();
+          this.holding = true;
+          this.applyCompare();
+        }
+        handled();
+        return;
+      }
+      if (k === "c") {
+        this.cycleCompare();
+        handled();
+        return;
+      }
+      if (k === "f") {
+        this.toggleFullscreen();
+        handled();
+        return;
+      }
+      if (k === " ") {
+        this.toggle();
+        handled();
+      } else if (k === "arrowleft") {
+        this.step(e.shiftKey ? -10 : -1);
+        handled();
+      } else if (k === "arrowright") {
+        this.step(e.shiftKey ? 10 : 1);
+        handled();
+      } else if (k === "l") {
+        this.shuttle(1);
+        handled();
+      } else if (k === "j") {
+        this.shuttle(-1);
+        handled();
+      } else if (k === "k") {
+        this.video.pause();
+        this.syncButtons();
+        handled();
+      } else if (k === "home") {
+        this.seekFrame(0);
+        handled();
+      } else if (k === "end") {
+        this.seekFrame(Number.MAX_SAFE_INTEGER);
+        handled();
+      }
+    });
+    new ResizeObserver(() => this.draw()).observe(this.scrub);
+    document.addEventListener("fullscreenchange", () => {
+      this.stripKey = "";
+      requestAnimationFrame(() => this.draw());
+    });
+  }
+  syncButtons() {
+    const icon = this.playBtn.firstElementChild;
+    icon.className = this.video.paused ? "pi pi-play" : "pi pi-pause";
+    this.loopBtn.classList.toggle("on", this.video.loop);
+    this.muteBtn.firstElementChild.className = this.video.muted ? "pi pi-volume-off" : "pi pi-volume-up";
+    this.muteBtn.classList.toggle("on", this.video.muted);
+  }
+  // ── Scrub bar ───────────────────────────────────────────────────────────────
+  /** Height the widget needs, so the node can wrap around it before anything is measured. */
+  estimateHeight(width) {
+    const aspect = this.info ? this.info.width / Math.max(1, this.info.height) : 16 / 9;
+    return Math.min(Math.round((width - 24) / aspect), PREVIEW_MAX_H) + SCRUB_H + 40;
+  }
+  /**
+   * The filmstrip, rendered once and reused.
+   *
+   * Rebuilt only when the width, the source or the number of available stills changes -
+   * `thumbnailAt` scans the whole strip for every column, so doing this per pointermove was
+   * the other half of the scrub lag. The count is in the key because stills arrive
+   * progressively: the strip fills in as they land, then stops changing.
+   */
+  buildStrip(w, dpr) {
+    const info = this.info;
+    const duration = info.frame_count / this.fps;
+    const step = 48;
+    const columns = Math.ceil(w / step);
+    let have = 0;
+    for (let i = 0; i < columns; i++) {
+      if (thumbnailAt(this.ref, (i + 0.5) / columns * duration)) have++;
+    }
+    const key = `${this.ref.filename}|${Math.round(w)}|${dpr}|${have}`;
+    if (key === this.stripKey) return this.strip;
+    this.stripKey = key;
+    this.strip.width = Math.max(1, Math.round(w * dpr));
+    this.strip.height = Math.round(SCRUB_H * dpr);
+    const sctx = this.strip.getContext("2d");
+    sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    sctx.fillStyle = "#111318";
+    sctx.fillRect(0, 0, w, SCRUB_H);
+    for (let x = 0; x < w; x += step) {
+      const thumb = thumbnailAt(this.ref, (x + step / 2) / w * duration);
+      if (!thumb) continue;
+      const tw = Math.min(step, w - x);
+      sctx.drawImage(
+        thumb,
+        0,
+        0,
+        thumb.width * (tw / step),
+        thumb.height,
+        x,
+        0,
+        tw,
+        SCRUB_H
+      );
+    }
+    sctx.fillStyle = "rgba(0,0,0,0.35)";
+    sctx.fillRect(0, 0, w, SCRUB_H);
+    return this.strip;
+  }
+  draw() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = this.scrub.clientWidth || 1;
+    if (this.scrub.width !== Math.round(w * dpr)) {
+      this.scrub.width = Math.round(w * dpr);
+      this.scrub.height = Math.round(SCRUB_H * dpr);
+    }
+    const ctx = this.scrub.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, SCRUB_H);
+    ctx.fillStyle = "#111318";
+    ctx.fillRect(0, 0, w, SCRUB_H);
+    const info = this.info;
+    if (!info) {
+      this.status.textContent = "no video yet";
+      return;
+    }
+    if (this.ref && info.playable) {
+      ctx.drawImage(this.buildStrip(w, dpr), 0, 0, w, SCRUB_H);
+      const px = this.frame / Math.max(1, info.frame_count - 1) * w;
+      ctx.fillStyle = "rgba(74,180,255,0.20)";
+      ctx.fillRect(0, 0, px, SCRUB_H);
+      ctx.fillStyle = "#4ab4ff";
+      ctx.fillRect(Math.round(px) - 1, 0, 2, SCRUB_H);
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,0.25)";
+      ctx.font = "11px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(`${info.format} — not scrubbable`, w / 2, SCRUB_H / 2 + 4);
+      ctx.textAlign = "left";
+    }
+    const rate = this.video.playbackRate !== 1 && !this.video.paused ? ` · ${this.video.playbackRate}x` : "";
+    this.status.textContent = info.playable ? `f ${this.frame} / ${info.frame_count - 1} · ${info.fps.toFixed(2)} fps · ${info.width}x${info.height} · ${humanSize(info.size)}${rate}` : `${info.frame_count} frames · ${info.width}x${info.height} · ${humanSize(info.size)}`;
+  }
+  destroy() {
+    if (this.raf) cancelAnimationFrame(this.raf);
+    this.video.removeAttribute("src");
+    this.video.load();
+  }
+}
+const NODE_NAME$1 = "NKDVideoViewer";
+const MIN_W$1 = 320;
+const STATE_PROP = "nkdVideoView";
+const NAMING_TEMPLATES = [
+  ["Simple (dated folder)", "video/%date:yyyy-MM-dd%/%node%"],
+  ["Versioned (Nuke layout)", "video/%node%/v%v###%/%node%_v%v###%"],
+  ["Dated + versioned", "video/%node%/%date:yyyy-MM-dd%/%node%_v%v###%"],
+  ["Flat", "video/%node%"]
+];
+function applyTemplate(node, tpl) {
+  var _a, _b;
+  const prefix = findW(node, "filename_prefix");
+  if (!prefix) return;
+  prefix.value = tpl;
+  (_a = prefix.callback) == null ? void 0 : _a.call(prefix, tpl);
+  const versioning = findW(node, "versioning");
+  if (versioning && tpl.includes("%v#") && versioning.value === "off") {
+    versioning.value = "auto (next free)";
+    (_b = versioning.callback) == null ? void 0 : _b.call(versioning, versioning.value);
+  }
+  node.setDirtyCanvas(true, true);
+}
+function wireNaming(node) {
+  const versioning = findW(node, "versioning");
+  const syncVersion = () => {
+    const mode = (versioning == null ? void 0 : versioning.value) ?? "off";
+    setWidgetVisible(node, "version", mode === "manual");
+    setWidgetVisible(node, "numbering", mode === "off");
+    node.setDirtyCanvas(true, true);
+  };
+  if (versioning) {
+    const orig = versioning.callback;
+    versioning.callback = function() {
+      const r = orig == null ? void 0 : orig.apply(this, arguments);
+      syncVersion();
+      return r;
+    };
+  }
+  syncVersion();
+}
+function registerVideoViewer() {
+  app.registerExtension({
+    name: "NKD.PreviewTools.Video",
+    getNodeMenuItems(node) {
+      if (node.comfyClass !== NODE_NAME$1) return [];
+      return NAMING_TEMPLATES.map(([label, tpl]) => ({
+        content: `⎘ Name: ${label}`,
+        callback: () => applyTemplate(node, tpl)
+      }));
+    },
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+      if ((nodeData == null ? void 0 : nodeData.name) !== NODE_NAME$1) return;
+      if (nodeType.prototype.__nkdVideoWrapped) return;
+      nodeType.prototype.__nkdVideoWrapped = true;
+      const origCreated = nodeType.prototype.onNodeCreated;
+      nodeType.prototype.onNodeCreated = function() {
+        var _a;
+        const result = origCreated == null ? void 0 : origCreated.apply(this, arguments);
+        ensureStyles();
+        const node = this;
+        wireNaming(node);
+        const viewer = new VideoViewer((_a = node.properties) == null ? void 0 : _a[STATE_PROP]);
+        viewer.onState = (s) => {
+          node.properties = node.properties || {};
+          node.properties[STATE_PROP] = s;
+        };
+        const mounted = mountDomWidget(node, {
+          name: "nkd_video",
+          type: "NKD_VIDEO",
+          root: viewer.root,
+          minWidth: MIN_W$1,
+          estimate: () => {
+            var _a2;
+            return viewer.estimateHeight(Math.max(((_a2 = node.size) == null ? void 0 : _a2[0]) ?? MIN_W$1, MIN_W$1));
+          },
+          onResize: () => viewer.draw()
+        });
+        viewer.onHeightChange = () => requestAnimationFrame(mounted.resizeToContent);
+        const adopt = (message) => {
+          var _a2, _b;
+          const ref = (_a2 = message == null ? void 0 : message.nkd_video) == null ? void 0 : _a2[0];
+          const info = (_b = message == null ? void 0 : message.nkd_meta) == null ? void 0 : _b[0];
+          if (!ref || !info) return;
+          viewer.setSource(ref, info);
+        };
+        const origExecuted = node.onExecuted;
+        node.onExecuted = function(message) {
+          origExecuted == null ? void 0 : origExecuted.apply(this, arguments);
+          adopt(message);
+        };
+        const origRemoved = node.onRemoved;
+        node.onRemoved = function() {
+          viewer.destroy();
+          mounted.release();
+          origRemoved == null ? void 0 : origRemoved.apply(this, arguments);
+        };
+        return result;
+      };
+    }
+  });
+}
 const NODE_NAME = "NKDTimeline";
 const EXT_NAME = "NKD.PreviewTools.Timeline";
 const MIN_W = 380;
@@ -2939,91 +3905,7 @@ function readSetting(id, fallback) {
     return fallback;
   }
 }
-const ROW_SAFETY = 2;
-const MAX_INSET = 48;
 console.log("[NKD Timeline] rev 3.2.0");
-const findW = (node, name) => {
-  var _a;
-  return (_a = node.widgets) == null ? void 0 : _a.find((w) => w.name === name);
-};
-function hideWidget(w) {
-  var _a;
-  if (!w) return;
-  w.hidden = true;
-  if (w.options) w.options.hidden = true;
-  w.computeSize = () => [0, -4];
-  w.draw = () => {
-  };
-  if ((_a = w.element) == null ? void 0 : _a.style) w.element.style.display = "none";
-}
-function setWidgetVisible(node, name, visible) {
-  const w = findW(node, name);
-  if (!w) return;
-  w.hidden = !visible;
-  if (w.options) w.options.hidden = !visible;
-  if (visible) delete w.computeSize;
-  else w.computeSize = () => [0, -4];
-}
-function keepDomWidgetSized(node, container) {
-  const MAX_MARGIN = 40;
-  let enforcing = false;
-  let goodMargin = 15;
-  const vueMode = () => {
-    var _a;
-    return !!((_a = window.LiteGraph) == null ? void 0 : _a.vueNodesMode);
-  };
-  const clamp = () => {
-    var _a, _b;
-    if (enforcing) return;
-    if (vueMode()) {
-      if (container.style.width) container.style.width = "";
-      const el = document.querySelector(`[data-node-id="${node.id}"]`);
-      if (el && el.style.minWidth !== `${MIN_W}px`) el.style.minWidth = `${MIN_W}px`;
-      return;
-    }
-    const nodeW = (_a = node.size) == null ? void 0 : _a[0];
-    if (!nodeW) return;
-    const hostW = ((_b = container.parentElement) == null ? void 0 : _b.clientWidth) ?? 0;
-    const broken = hostW > 0 && (hostW > nodeW * 1.2 || hostW < nodeW * 0.7);
-    if (!broken) {
-      if (container.style.width) {
-        enforcing = true;
-        container.style.width = "";
-        requestAnimationFrame(() => {
-          enforcing = false;
-        });
-      }
-      const cw = container.clientWidth;
-      if (cw > 0 && cw <= nodeW && cw >= nodeW - MAX_MARGIN) goodMargin = nodeW - cw;
-      return;
-    }
-    const ref = Math.round(nodeW - goodMargin);
-    if (ref > 0 && Math.abs(container.clientWidth - ref) > 2) {
-      enforcing = true;
-      container.style.boxSizing = "border-box";
-      container.style.width = `${ref}px`;
-      requestAnimationFrame(() => {
-        enforcing = false;
-      });
-    }
-  };
-  clamp();
-  const ro = new ResizeObserver(clamp);
-  ro.observe(container);
-  const origResize = node.onResize;
-  node.onResize = function(...args) {
-    origResize == null ? void 0 : origResize.apply(this, args);
-    clamp();
-  };
-  const iv = window.setInterval(clamp, 250);
-  return {
-    release: () => {
-      ro.disconnect();
-      clearInterval(iv);
-    },
-    margin: () => goodMargin
-  };
-}
 const VIEW_PROP = "nkdView";
 function restoreView(node, tl) {
   var _a;
@@ -3230,7 +4112,7 @@ app.registerExtension({
         var _a2;
         const w = Math.max(((_a2 = node.size) == null ? void 0 : _a2[0]) ?? MIN_W, MIN_W);
         const [ow, oh] = host.getOutSize();
-        return Math.min(Math.round((w - 24) * (oh / Math.max(1, ow))), PREVIEW_MAX_H) + editor.timelineHeight + 40;
+        return Math.min(Math.round((w - 24) * (oh / Math.max(1, ow))), PREVIEW_MAX_H$1) + editor.timelineHeight + 40;
       };
       const heightFor = () => (measured > 0 ? measured : estimate()) + ROW_SAFETY + inset;
       node.addDOMWidget("nkd_timeline", "NKD_TIMELINE", container, {
@@ -3247,7 +4129,7 @@ app.registerExtension({
         getMaxHeight: heightFor,
         getHeight: heightFor
       });
-      const widthKeeper = keepDomWidgetSized(node, container);
+      const widthKeeper = keepDomWidgetSized(node, container, MIN_W);
       const minNodeWidth = () => MIN_W + widthKeeper.margin();
       const resizeToContent = () => {
         node.setSize([Math.max(node.size[0], minNodeWidth()), node.computeSize()[1]]);
@@ -3455,3 +4337,4 @@ app.registerExtension({
   }
 });
 registerFreezeFrames();
+registerVideoViewer();
