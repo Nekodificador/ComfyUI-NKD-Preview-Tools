@@ -1,5 +1,7 @@
 # ComfyUI NKD Preview Tools
 
+https://github.com/user-attachments/assets/78d28bc2-f906-4d7c-a819-9dc31b7005ac
+
 Preview tools for [ComfyUI](https://github.com/comfyanonymous/ComfyUI):
 
 - **NKD Popup Preview** — preview generated images in a persistent floating popup window, ideal for multi-monitor setups.
