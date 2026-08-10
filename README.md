@@ -4,6 +4,7 @@ Preview tools for [ComfyUI](https://github.com/comfyanonymous/ComfyUI):
 
 - **NKD Popup Preview** — preview generated images in a persistent floating popup window, ideal for multi-monitor setups.
 - **NKD Timeline** — lay several videos and audio tracks on a multi-track timeline and get fps, frame count and resolution back as connectable sockets.
+- **NKD Video Viewer** — save your video in the format you need and watch it in a player you can actually scrub, loop and compare against a previous take.
 
 
 https://github.com/user-attachments/assets/e52f40df-36a2-4027-8f7b-1e987ed2615f
@@ -34,9 +35,17 @@ https://github.com/user-attachments/assets/75a9a3de-9ded-4d41-95f2-3de4421d63ac
 - **Multi-track**: place, trim and slip clips on a timeline; higher tracks sit on top.
 - **The numbers are sockets**: `fps`, `frame_count`, `duration`, `width`, `height` and `current_frame` come out as real outputs, so the rest of the graph can be coordinated with them. They are also normal widgets, so they can be driven *from* other nodes.
 - **`current_image`** hands back the fully composited frame under the playhead, so scrubbing drives the rest of the graph.
-- **Gaps are regions to generate**: the `coverage` mask is 0 wherever the timeline is empty, ready to use as a temporal inpainting mask.
+- **Gaps are regions to generate**: the `coverage` mask is white wherever the timeline is empty, so it goes straight into a temporal inpainting workflow with nothing to invert first.
 - **Frame quantising**: snap the range to what the model needs (`4n+1`, `8n+1` or a multiple of N), with the valid stops drawn on the ruler.
 - **Mismatched frame rates are flagged** on the clip instead of being resampled silently.
+
+### NKD Video Viewer
+- **A player, not a thumbnail**: drag the scrub bar frame by frame, step with the arrows, shuttle with J/K/L, loop it, and go full screen with the controls still there. There is a filmstrip along the scrub bar so you can find a shot by looking at it.
+- **Float it**: send the whole viewer to its own window and drag it to a second monitor, then keep working on the graph.
+- **Six formats**: mp4/h264, webm/vp9, mov/ProRes (proxy through 4444, which keeps alpha), GIF, animated WebP and a PNG image sequence. Only the settings of the format you picked are shown.
+- **Name and version your output**: tokens for the node's own title, resolution, fps and the date, plus automatic `v001`, `v002` versioning that picks the next free number. Naming templates are in the node's right-click menu.
+- **Changing the version does not re-render**: the same render is reused, so it is instant. And if nothing changed upstream, no new version is written at all.
+- **Before and after**: wipe between the render and a reference, look at the difference, or hold B to see the reference whole. One button makes what is on screen the reference for the next run.
 
 ## 🛠️ Installation
 
