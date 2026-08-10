@@ -2851,6 +2851,14 @@ const CSS = `
 }
 .nkd-vid:fullscreen .nkd-vid-scrub { flex: 0 0 auto; }
 .nkd-vid:fullscreen .nkd-tl-bar { flex: 0 0 auto; }
+
+/* Stand-in left in the node while the viewer is off in its own window. Without it the
+   widget row collapses and the node just looks broken. */
+.nkd-vid-away {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 90px; border: 1px dashed #3a3d46; border-radius: 6px;
+  color: rgba(255,255,255,0.35); font: 12px system-ui, sans-serif;
+}
 `;
 function ensureStyles() {
   if (document.getElementById(STYLE_ID)) return;
@@ -3103,6 +3111,7 @@ function mountDomWidget(node, opts) {
     var _a;
     if (settling) return;
     if ((_a = document.fullscreenElement) == null ? void 0 : _a.contains(opts.root)) return;
+    if (opts.root.ownerDocument !== document) return;
     const h = opts.root.offsetHeight;
     if (h < 1) return;
     const grew = Math.abs(h - measured) > 1;
@@ -3148,6 +3157,76 @@ function mountDomWidget(node, opts) {
       ro.disconnect();
       widthKeeper.release();
     }
+  };
+}
+function adoptStyles(target) {
+  const baseTag = target.createElement("base");
+  baseTag.href = document.baseURI;
+  target.head.appendChild(baseTag);
+  for (const node of document.querySelectorAll('link[rel="stylesheet"], style')) {
+    target.head.appendChild(node.cloneNode(true));
+  }
+  const base = target.createElement("style");
+  base.textContent = "html,body{margin:0;padding:0;height:100%;background:#16181d;overflow:hidden}.nkd-vid{height:100%;box-sizing:border-box;padding:6px;display:flex;flex-direction:column;gap:6px}.nkd-vid .nkd-vid-stage{flex:1 1 auto;min-height:0;max-width:none!important;aspect-ratio:auto!important}";
+  target.head.appendChild(base);
+}
+async function openPopout(root, title, onMoved) {
+  const home = root.parentElement;
+  if (!home) return null;
+  const placeholder = document.createElement("div");
+  placeholder.className = "nkd-vid-away";
+  placeholder.textContent = "playing in a floating window";
+  const width = Math.max(480, Math.round(root.clientWidth) || 640);
+  const height = Math.max(360, Math.round(root.offsetHeight) || 480);
+  let win = null;
+  const pip = window.documentPictureInPicture;
+  try {
+    win = pip ? await pip.requestWindow({ width, height }) : null;
+  } catch {
+    win = null;
+  }
+  if (!win) {
+    win = window.open(
+      "",
+      "nkd-video-viewer",
+      `popup=yes,width=${width},height=${height}`
+    );
+  }
+  if (!win) return null;
+  const doc = win.document;
+  adoptStyles(doc);
+  doc.title = title;
+  home.appendChild(placeholder);
+  doc.body.appendChild(root);
+  root.focus();
+  onMoved();
+  let open = true;
+  const closeOnExit = () => {
+    try {
+      win == null ? void 0 : win.close();
+    } catch {
+    }
+  };
+  const goHome = () => {
+    if (!open) return;
+    open = false;
+    window.removeEventListener("beforeunload", closeOnExit);
+    home.appendChild(root);
+    placeholder.remove();
+    onMoved();
+  };
+  win.addEventListener("pagehide", goHome);
+  win.addEventListener("beforeunload", goHome);
+  window.addEventListener("beforeunload", closeOnExit);
+  return {
+    close: () => {
+      try {
+        win == null ? void 0 : win.close();
+      } catch {
+      }
+      goHome();
+    },
+    isOpen: () => open
   };
 }
 const COMPARE_ORDER = ["off", "wipe", "difference"];
@@ -3208,6 +3287,7 @@ class VideoViewer {
     __publicField(this, "holding", false);
     // hold B: reference full-frame
     __publicField(this, "hasRef", false);
+    __publicField(this, "popout", null);
     /** Persisted on the node, not in a widget: what the viewer is doing does not change what
      *  the graph produces, and an input would re-encode the video on every toggle. */
     __publicField(this, "onState", null);
@@ -3245,6 +3325,12 @@ class VideoViewer {
       this.pushState();
     });
     button(bar, "pi pi-window-maximize", "Full screen (F)", () => this.toggleFullscreen());
+    button(
+      bar,
+      "pi pi-external-link",
+      "Float in its own window — drag it to a second monitor",
+      () => void this.togglePopout()
+    );
     this.compareBtn = button(
       bar,
       "pi pi-arrows-h",
@@ -3415,6 +3501,34 @@ class VideoViewer {
       this.draw();
     }).catch(() => {
     }));
+  }
+  /**
+   * Send the viewer to its own window, or bring it back.
+   *
+   * The `<video>` survives the move but does not keep playing across it, so the position
+   * and the play state are carried over by hand - landing back at frame 0 after popping out
+   * would lose the shot you were looking at.
+   */
+  async togglePopout() {
+    var _a;
+    if ((_a = this.popout) == null ? void 0 : _a.isOpen()) {
+      this.popout.close();
+      this.popout = null;
+      return;
+    }
+    const at = this.video.currentTime;
+    const wasPlaying = !this.video.paused;
+    const restore = () => {
+      this.stripKey = "";
+      this.want = at;
+      this.seeking = false;
+      this.applySeek();
+      if (wasPlaying) void this.video.play().catch(() => {
+      });
+      this.draw();
+    };
+    this.popout = await openPopout(this.root, "😺NKD Video Viewer", restore);
+    if (!this.popout) this.flash("the browser refused a floating window");
   }
   flash(text) {
     const was = this.pathLine.textContent;

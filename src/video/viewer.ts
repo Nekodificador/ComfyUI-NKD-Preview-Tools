@@ -13,6 +13,7 @@
  */
 import { api } from "../comfyRuntime";
 import { type MediaRef, ensureThumbnails, thumbnailAt, viewUrl } from "../timeline/media";
+import { type Popout, openPopout } from "./popout";
 
 export type CompareMode = "off" | "wipe" | "difference";
 const COMPARE_ORDER: CompareMode[] = ["off", "wipe", "difference"];
@@ -105,6 +106,7 @@ export class VideoViewer {
   private wipe = 0.5;                    // 0..1, how much of the reference is showing
   private holding = false;               // hold B: reference full-frame
   private hasRef = false;
+  private popout: Popout | null = null;
   /** Persisted on the node, not in a widget: what the viewer is doing does not change what
    *  the graph produces, and an input would re-encode the video on every toggle. */
   onState: ((s: { loop: boolean; muted: boolean; compare: CompareMode;
@@ -152,6 +154,9 @@ export class VideoViewer {
       this.pushState();
     });
     button(bar, "pi pi-window-maximize", "Full screen (F)", () => this.toggleFullscreen());
+    button(bar, "pi pi-external-link",
+      "Float in its own window — drag it to a second monitor",
+      () => void this.togglePopout());
     this.compareBtn = button(bar, "pi pi-arrows-h",
       "Compare against the reference: off / wipe / difference (C). Hold B to see it whole.",
       () => this.cycleCompare());
@@ -334,6 +339,33 @@ export class VideoViewer {
         this.draw();                 // the scrub bar has a whole new width to fill
       })
       .catch(() => { /* denied by the browser */ });
+  }
+
+  /**
+   * Send the viewer to its own window, or bring it back.
+   *
+   * The `<video>` survives the move but does not keep playing across it, so the position
+   * and the play state are carried over by hand - landing back at frame 0 after popping out
+   * would lose the shot you were looking at.
+   */
+  private async togglePopout(): Promise<void> {
+    if (this.popout?.isOpen()) {
+      this.popout.close();
+      this.popout = null;
+      return;
+    }
+    const at = this.video.currentTime;
+    const wasPlaying = !this.video.paused;
+    const restore = () => {
+      this.stripKey = "";              // the strip was built for the old width
+      this.want = at;
+      this.seeking = false;
+      this.applySeek();
+      if (wasPlaying) void this.video.play().catch(() => {});
+      this.draw();
+    };
+    this.popout = await openPopout(this.root, "😺NKD Video Viewer", restore);
+    if (!this.popout) this.flash("the browser refused a floating window");
   }
 
   private flash(text: string): void {

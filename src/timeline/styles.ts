@@ -139,6 +139,14 @@ const CSS = `
 }
 .nkd-vid:fullscreen .nkd-vid-scrub { flex: 0 0 auto; }
 .nkd-vid:fullscreen .nkd-tl-bar { flex: 0 0 auto; }
+
+/* Stand-in left in the node while the viewer is off in its own window. Without it the
+   widget row collapses and the node just looks broken. */
+.nkd-vid-away {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 90px; border: 1px dashed #3a3d46; border-radius: 6px;
+  color: rgba(255,255,255,0.35); font: 12px system-ui, sans-serif;
+}
 `;
 
 export function ensureStyles(): void {

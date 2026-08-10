@@ -207,10 +207,13 @@ export function mountDomWidget(node: any, opts: MountOpts): Mounted {
 
   const ro = new ResizeObserver(() => {
     if (settling) return;
-    // While the content is full screen it is the size of the DISPLAY, and adopting that
-    // would blow the graph node up to 1080 px tall - and leave it there, since exiting
-    // full screen only shrinks the content back, it does not undo a node resize.
+    // Two ways the content stops representing the node's size, and adopting either would
+    // blow the node up and LEAVE it there - coming back only shrinks the content, it does
+    // not undo a `setSize`.
+    //   - full screen: the content is the size of the display.
+    //   - popped out: the content lives in another document entirely, sized by that window.
     if (document.fullscreenElement?.contains(opts.root)) return;
+    if (opts.root.ownerDocument !== document) return;
     const h = opts.root.offsetHeight;   // offsetHeight, NOT getBoundingClientRect:
     if (h < 1) return;                  // gBCR is screen space and scales with zoom
     const grew = Math.abs(h - measured) > 1;
