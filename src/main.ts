@@ -16,8 +16,8 @@ import {
 } from "./timeline/editor";
 import {
   type MediaInfo, type MediaRef,
-  audioBufferFor, bustCaches, cachedInfo, ensureAudio, forget, probe, releaseUnused,
-  resolveSource, slotKind,
+  adoptStrip, audioBufferFor, bustCaches, cachedInfo, ensureAudio, forget, probe,
+  releaseUnused, resolveSource, slotKind,
 } from "./timeline/media";
 import { ensureStyles } from "./timeline/styles";
 import { registerFreezeFrames, syncAllFreezeNodes } from "./freezeFrames";
@@ -86,12 +86,19 @@ function restoreView(node: any, tl: Timeline): void {
 }
 
 type SourceEntry = { ref: MediaRef; info: MediaInfo | null; label: string };
+/** One tensor slot's contact sheet, as pushed by `nkd-timeline-meta`. */
+type StripMeta = MediaInfo & { filename: string; subfolder: string; type: string;
+                               tiles: number; cols: number };
 type Host = TimelineHost & {
   clearSourceCache: () => void;
   /** Store what the last run reported. True when it changed something worth redrawing. */
   applyMeta: (m: { width: number; height: number }) => boolean;
   peekSource: (src: string) => SourceEntry | undefined;
   dropSource: (src: string) => void;
+  /** File the filmstrips a run wrote for its tensor slots. True when anything changed. */
+  applyStrips: (t: Record<string, StripMeta> | undefined, onReady: () => void) => boolean;
+  /** Drop strips for slots that are no longer connected. */
+  pruneStrips: (live: Set<string>) => void;
 };
 
 function makeHost(node: any, state: { tl: Timeline }): Host {
@@ -107,6 +114,11 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
   };
 
   const srcCache = new Map<string, SourceEntry>();
+  // Filmstrips for the slots that arrive as TENSORS, written by the backend at the end of
+  // a run. Kept apart from `srcCache` because they are the only thing that can describe
+  // those slots: walking the graph finds whatever file sits upstream, which is a wholly
+  // different picture once a node has computed the mask.
+  const strips = new Map<string, SourceEntry>();
   // Filled by the "nkd-timeline-meta" push at the end of every run. See `getOutSize`.
   let reported: { width: number; height: number } | null = null;
 
@@ -187,12 +199,25 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
       return info ? [info.width, info.height] : [16, 9];
     },
     sourceFor(src: string) {
+      // A computed slot describes itself; nothing upstream can be trusted to.
+      const strip = strips.get(src);
+      if (strip) return strip;
       const hit = srcCache.get(src);
       if (hit) {
         if (!hit.info) hit.info = cachedInfo(hit.ref) ?? null;
         return hit;
       }
-      const ref = resolveSource(node, src);
+      // TENSOR slots only accept a file from the node they are DIRECTLY wired to.
+      // Walking further up finds a loader whose content the chain has since changed -
+      // that is how a SAM3 mask ended up labelled with the video's filename and the
+      // overlay tinted the picture while claiming to be the mask. A plain block is a
+      // better answer than a confident wrong one; the contact sheet fills it in after a
+      // run. VIDEO keeps the full walk: there the object IS that file.
+      const kind = slotKind(node, src);
+      // VIDEO and AUDIO keep the full walk: whatever the chain does to them, the bytes
+      // still come from that file, and the audio of a `Get Video Components` IS the
+      // loader's audio. IMAGE and MASK stop at the node they are directly wired to.
+      const ref = resolveSource(node, src, kind === "image" || kind === "mask" ? 0 : 6);
       if (!ref) return null;
       const entry: SourceEntry = { ref, info: cachedInfo(ref) ?? null, label: ref.filename };
       srcCache.set(src, entry);
@@ -235,6 +260,39 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
       }
       reported = { width: m.width, height: m.height };
       return true;
+    },
+    applyStrips(tensors, onReady) {
+      let changed = false;
+      for (const [slot, t] of Object.entries(tensors ?? {})) {
+        if (!t?.filename || !(t.tiles > 0)) continue;
+        const prev = strips.get(slot);
+        if (prev?.ref.filename === t.filename) continue;
+        // A fresh name every run on purpose (HTTP caching), so the old sheet is dead
+        // weight the moment a new one lands.
+        if (prev) forget(prev.ref);
+        const ref: MediaRef = {
+          filename: t.filename, subfolder: t.subfolder ?? "", type: t.type ?? "temp",
+        };
+        const info: MediaInfo = {
+          fps: t.fps, frame_count: t.frame_count, duration: t.duration,
+          width: t.width, height: t.height,
+        };
+        // Named for what it is. The upstream file's name was the old lie.
+        strips.set(slot, { ref, info, label: `${slot} · computed` });
+        adoptStrip(ref, info, t.tiles, Math.max(1, t.cols || t.tiles), onReady);
+        changed = true;
+      }
+      return changed;
+    },
+    pruneStrips(live) {
+      // ponytail: a slot rewired to a DIFFERENT computed source keeps the old strip until
+      // the next run. Detecting that needs an identity the graph does not expose, and one
+      // stale filmstrip until the next execution is cheaper than a probe per tick.
+      for (const slot of [...strips.keys()]) {
+        if (live.has(slot)) continue;
+        forget(strips.get(slot)!.ref);
+        strips.delete(slot);
+      }
     },
     /** Read the cache WITHOUT resolving, so the swap detector can compare against it. */
     peekSource: (src: string) => srcCache.get(src),
@@ -446,10 +504,43 @@ comfyApp.registerExtension({
        * Connections: when a new Load Video is wired in, probe its duration and drop it at
        * the end of track 0 by itself, so the node does something sensible untouched.
        */
+      /**
+       * Where a newly connected sound belongs when its picture is already on the timeline.
+       *
+       * The two arrive on separate sockets - VHS hands out IMAGE and AUDIO apart, and so
+       * does `Get Video Components` - so nothing links them and the sound was appended to
+       * the end of the timeline, nowhere near its own picture.
+       *
+       * Paired by the FILE BOTH DESCEND FROM, walked without a depth limit. That walk is
+       * exactly the one `sourceFor` refuses for a tensor slot, and for good reason: as a
+       * source of PIXELS it lies, because the chain has since changed them. As an
+       * IDENTITY it is still true - a rescaled frame and its audio came out of the same
+       * loader - and identity is all this needs.
+       */
+      const twinOf = (slot: string) => {
+        const origin = resolveSource(node, slot, 6)?.filename;
+        if (!origin) return undefined;
+        const fps = host.getFps();
+        for (const c of [...state.tl.clips, ...state.tl.masks]) {
+          if (resolveSource(node, c.src, 6)?.filename !== origin) continue;
+          // A video clip's trimIn counts SOURCE frames; audio has no cadence of its own
+          // and runs at the timeline's. A tensor twin reports the timeline rate, so the
+          // ratio is 1 and this is a no-op there - which is correct.
+          const srcFps = host.sourceFor(c.src)?.info?.fps || fps;
+          return {
+            start: c.start,
+            trimIn: Math.max(0, Math.round(c.trimIn * (fps / srcFps))),
+            length: c.length,
+          };
+        }
+        return undefined;
+      };
+
       const syncSlots = () => {
         host.clearSourceCache();
         const { videos, images, masks, audios } = host.connectedSlots();
         const live = new Set([...videos, ...images, ...masks, ...audios]);
+        host.pruneStrips(live);
         if (editor.pruneToSlots(live)) host.commit();
 
         // `slotInUse` spans every lane on purpose: a video the user reinterpreted as a
@@ -492,8 +583,8 @@ comfyApp.registerExtension({
           if (!src) continue;
           const place = () => {
             const buf = audioBufferFor(src.ref);
-            editor.addClipForSlot(slot,
-              buf ? Math.round(buf.duration * host.getFps()) : fallback, "audio");
+            const len = buf ? Math.round(buf.duration * host.getFps()) : fallback;
+            editor.addClipForSlot(slot, len, "audio", twinOf(slot));
           };
           if (audioBufferFor(src.ref)) place();
           else ensureAudio(src.ref, place);
@@ -541,8 +632,17 @@ comfyApp.registerExtension({
       const onMeta = (e: any) => {
         const d = e?.detail;
         if (!d || String(d.node) !== String(node.id)) return;
-        if (!host.applyMeta(d)) return;
-        resizeToContent();          // the monitor's aspect drives the node's height
+        // The strips ride along on the same push and must be taken FIRST: `applyMeta`
+        // short-circuits when the resolution has not moved, which is the common case.
+        const gotStrips = host.applyStrips(d.tensors, () => {
+          // Now that a computed slot finally has a real length, a clip placed on the old
+          // guess can be brought inside it.
+          editor.retightenToSources();
+          editor.requestRender();
+        });
+        const gotSize = host.applyMeta(d);
+        if (!gotStrips && !gotSize) return;
+        if (gotSize) resizeToContent();   // the monitor's aspect drives the node's height
         editor.requestRender();
       };
       comfyApi.addEventListener("nkd-timeline-meta", onMeta);

@@ -54,6 +54,7 @@ export function bustCaches(): void {
 /** Forget one source, used when a slot silently starts pointing somewhere else. */
 export function forget(ref: MediaRef): void {
   const key = refKey(ref);
+  stripRefs.delete(key);
   infoCache.delete(key);
   thumbCache.delete(key);
   audioCache.delete(key);
@@ -82,8 +83,9 @@ const looksLikeFile = (v: unknown): v is string =>
  * se dibuja como marcador de posición. El empuje de metadatos en ejecución vía websocket
  * cubre ese caso restante — fase 3, no ahora.
  */
-export function resolveSource(node: any, slotName: string, depth = 0): MediaRef | null {
-  if (depth > 6) return null;
+export function resolveSource(node: any, slotName: string, maxDepth = 6,
+                              depth = 0): MediaRef | null {
+  if (depth > maxDepth) return null;
   const slot = node?.inputs?.find((i: any) => i.name === slotName || i.name?.endsWith(`.${slotName}`));
   if (!slot || slot.link == null) return null;
   const link = node.graph?.links?.[slot.link];
@@ -108,7 +110,7 @@ export function resolveSource(node: any, slotName: string, depth = 0): MediaRef 
   // Sin fichero propio: seguir subiendo por su primera entrada conectada.
   for (const inp of src.inputs ?? []) {
     if (inp.link == null) continue;
-    const up = resolveSource(src, inp.name, depth + 1);
+    const up = resolveSource(src, inp.name, maxDepth, depth + 1);
     if (up) return up;
   }
   return null;
@@ -286,10 +288,25 @@ export function videoFor(ref: MediaRef): HTMLVideoElement {
 
 /** Pide un instante. Coalescente: durante un arrastre llegan decenas de peticiones por
  *  segundo y el `<video>` solo puede atender una a la vez. */
-export function seekTo(ref: MediaRef, seconds: number): void {
+export function seekTo(ref: MediaRef, seconds: number, tolerance = 0.02): void {
   const p = pool.get(refKey(ref)) ?? makePooled(ref);
   pool.set(refKey(ref), p);
-  p.wantTime = Math.max(0, seconds);
+  const want = Math.max(0, seconds);
+  // Pedir el instante en el que el elemento YA está no puede cambiar un píxel, y ocupa el
+  // decodificador igual. Medido antes de esto: 78 de 78 seeks en reposo y 340 de 468
+  // arrastrando eran exactamente eso. `tolerance` es medio frame de la FUENTE, que es lo
+  // que "el mismo frame" significa; la pasa el llamante, que es quien sabe su cadencia.
+  //
+  // Esto es lo ÚNICO que sobrevivió del intento de borrar el canvas `good`. Aquel canvas
+  // resultó no ser deuda: es lo que permite que una capa siga aportando imagen mientras
+  // busca, y sin él el overlay de máscara desaparece durante el movimiento y la imagen
+  // avanza a tirones. Medir el desperdicio no basta para saber qué se puede quitar.
+  if (p.el.readyState >= 1 && !p.seeking
+      && Math.abs(p.el.currentTime - want) < tolerance) {
+    p.wantTime = want;
+    return;
+  }
+  p.wantTime = want;
   applySeek(p);
 }
 
@@ -325,6 +342,24 @@ export function pauseAllVideos(): void {
   for (const p of pool.values()) {
     if (!p.el.paused) p.el.pause();
   }
+}
+
+const stripRefs = new Set<string>();
+
+/**
+ * The picture to draw for a source at `seconds`, whatever kind of source it is.
+ *
+ * The single place that knows a TENSOR source has no video element behind it. Pointing
+ * the pool at its contact sheet would spawn a `<video>` on a PNG: no error, no `seeked`,
+ * just a slot that never draws - so route strips to their stills and leave the pool to
+ * the sources that actually have a file to seek.
+ */
+export function pictureAt(ref: MediaRef, seconds: number,
+                          playing: boolean): CanvasImageSource | null {
+  if (stripRefs.has(refKey(ref))) return thumbnailAt(ref, seconds);
+  if (playing) followPlayback(ref, seconds);
+  else seekTo(ref, seconds, 0.02);
+  return frameSource(ref);
 }
 
 export function frameSource(ref: MediaRef): CanvasImageSource | null {
@@ -428,6 +463,57 @@ export function ensureThumbnails(ref: MediaRef, info: MediaInfo,
   return strip;
 }
 
+/** Which source frame tile `i` shows. Mirrors `strip_frame` in nkd_timeline.py. */
+export const stripFrame = (i: number, tiles: number, n: number): number =>
+  Math.min(n - 1, Math.floor(((i + 0.5) * n) / tiles));
+
+/**
+ * Take a contact sheet the backend wrote for a TENSOR source and file it as that source's
+ * thumbnails, so everything downstream treats it like any other filmstrip.
+ *
+ * An IMAGE/MASK input has no file, so none of the machinery above can reach it - the
+ * pooled `<video>`, the probe and the thumbnailer all start from a URL. The backend writes
+ * one PNG per tensor slot at the end of a run and this seeds both caches from it, which is
+ * why the entry is registered (empty) UP FRONT: otherwise `ensureThumbnails` would spawn a
+ * `<video>` job against a PNG.
+ *
+ * Laid out as a GRID, because at one tile per frame a single row would run tens of
+ * thousands of pixels wide and hit the browser's image size limits.
+ */
+export function adoptStrip(ref: MediaRef, info: MediaInfo, tiles: number, cols: number,
+                           onReady: () => void): void {
+  const key = refKey(ref);
+  stripRefs.add(key);
+  if (thumbCache.has(key)) return;
+  infoCache.set(key, info);
+  const strip: Thumb[] = [];
+  thumbCache.set(key, strip);
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.onload = () => {
+    const rows = Math.max(1, Math.ceil(tiles / cols));
+    const tw = img.width / cols;
+    const th = img.height / rows;
+    for (let i = 0; i < tiles; i++) {
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(tw));
+      c.height = Math.max(1, Math.round(th));
+      c.getContext("2d")!.drawImage(
+        img, Math.round((i % cols) * tw), Math.round(Math.floor(i / cols) * th),
+        c.width, c.height, 0, 0, c.width, c.height);
+      // The EXACT frame this tile came from, by the same formula Python used to pick it.
+      // Deriving the time from the tile's position instead lands half a tile off, and
+      // `thumbnailAt` then hands the overlay a mask from the neighbouring frame.
+      strip.push({
+        time: stripFrame(i, tiles, info.frame_count) / (info.fps || 1),
+        canvas: c,
+      });
+    }
+    onReady();
+  };
+  img.src = viewUrl(ref);
+}
+
 /** Nearest still to `seconds`, or null while the strip is still empty. */
 export function thumbnailAt(ref: MediaRef, seconds: number): HTMLCanvasElement | null {
   const strip = thumbCache.get(refKey(ref));
@@ -468,18 +554,36 @@ export const PEAK_BUCKETS = 400;
  */
 export function ensureAudio(ref: MediaRef, onDone: () => void): void {
   const key = refKey(ref);
-  if (audioCache.has(key) || audioJobs.has(key)) return;
+  // `onDone` fires in EVERY case, including "already decoded" and "someone else is
+  // already fetching this". Returning early without it is a silent trap the moment a
+  // file's picture and sound arrive on two different sockets - exactly what VHS's loader
+  // and `Get Video Components` do: whoever asks second has the callback that PLACES ITS
+  // CLIP dropped on the floor, so there is no waveform, no sound and no error.
+  if (audioCache.has(key)) {
+    onDone();
+    return;
+  }
+  const flight = audioJobs.get(key);
+  if (flight) {
+    void flight.then(() => onDone());
+    return;
+  }
   const job = fetch(viewUrl(ref))
     .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error("fetch failed"))))
     .then((buf) => audioContext().decodeAudioData(buf))
     .then((decoded) => {
       audioCache.set(key, decoded);
       peakCache.set(key, computePeaks(decoded));
-      onDone();
       return decoded;
     })
     .catch(() => null)               // no audio track, or a codec the browser refuses
-    .finally(() => audioJobs.delete(key));
+    .finally(() => {
+      audioJobs.delete(key);
+      // Even on failure. A clip whose sound this browser cannot decode still has to
+      // appear: the backend reads the file itself and will happily mix it, so refusing
+      // to place the clip would lose audio from the RENDER over a preview limitation.
+      onDone();
+    });
   audioJobs.set(key, job);
 }
 

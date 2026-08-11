@@ -779,6 +779,46 @@ export function clampClipsToSources(t: Timeline, fps: number,
 }
 
 /**
+ * The inverse of `clampClipsToSources`: open clips out to the whole of their source.
+ *
+ * A clip lands at a GUESSED length whenever its real one could not be known when it was
+ * placed - a tensor from another node, an IMAGE out of VHS's loader. The true figure only
+ * arrives with the execute-time push, and by then hunting the right edge of every clip
+ * across a long timeline is busywork. This drops the trim and takes each clip to its full
+ * extent in one go, on the understanding that the cuts get made afterwards.
+ *
+ * `ids` limits it to a selection. That is not a nicety: without it, opening a picture clip
+ * to its real length also unrolls a three-minute music bed sitting on the audio lane, and
+ * the view zooms out to fit something nobody asked about. (Neko.)
+ *
+ * `start` is left alone either way: where a clip sits is a decision the user made, and the
+ * ask is to see all of the material, not to re-stack the timeline.
+ */
+export function expandClipsToSources(t: Timeline, fps: number,
+                                     srcFramesFor: (src: string) => number | null,
+                                     rateFor: (src: string) => number,
+                                     ids?: Set<string>): boolean {
+  let changed = false;
+  for (const lane of allLanes(t)) {
+    for (const c of lane) {
+      if (ids && !ids.has(c.id)) continue;
+      const srcFrames = srcFramesFor(c.src);
+      if (srcFrames === null || srcFrames <= 0) continue;
+      const ratio = (rateFor(c.src) || fps) / (fps || 1);
+      const full = Math.max(1, Math.floor(srcFrames / (ratio || 1)));
+      if (c.trimIn === 0 && c.length === full) continue;
+      // Markers are offsets from `start` and the clip only grows here, so they stay put -
+      // except where a dropped trim slides the picture under them.
+      if (c.trimIn !== 0) c.markers = [];
+      c.trimIn = 0;
+      c.length = full;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
  * Extent of a set of clips - Resolve's "mark clip" needs exactly this.
  *
  * With `ids` it spans the selection; without, everything covering `frame` in every lane.

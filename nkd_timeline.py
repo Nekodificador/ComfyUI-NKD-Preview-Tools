@@ -694,6 +694,108 @@ def _register_routes() -> None:
 _register_routes()
 
 
+# ── Filmstrips for tensor sources ─────────────────────────────────────────────
+# An IMAGE/MASK arrives as a TENSOR from another node, so there is no file for the browser
+# to read: the clip could only draw the stills of whatever VIDEO happened to sit upstream
+# (a lie the moment the mask comes from somewhere else), or nothing at all.
+#
+# One contact sheet per tensor slot closes that, and it costs almost no new code: the
+# editor already fetches files from `/view` and slices strips into thumbnails. Written to
+# temp/, which ComfyUI clears on startup, so nothing accumulates across sessions.
+
+# ONE TILE PER FRAME up to this ceiling, not a sample. The mask overlay draws these
+# stills against a picture running at full rate, so a still that is "the nearest one" is
+# a mask from a different moment sitting on top of the wrong frame - and unlike a
+# filmstrip, where nobody can tell, that reads as the mask being broken. Past the ceiling
+# it falls back to sampling and the alignment degrades instead of the memory.
+STRIP_MAX_TILES = 480
+# The same tile height the browser's thumbnailer uses - and for the same reason: these
+# stills are what the monitor draws for a computed slot, so they are sized for it rather
+# than for the filmstrip that shows them at a third of this.
+STRIP_HEIGHT = 160
+# Full-resolution frames are what costs here (240 frames of 1080p is 5.9 GiB as float),
+# so they are shrunk a block at a time and only the small ones are kept.
+STRIP_CHUNK = 32
+_strip_seq = 0
+
+
+def strip_frame(i: int, tiles: int, n: int) -> int:
+    """Which source frame tile `i` shows. Mirrored by `stripFrame` in media.ts - if the
+    two ever disagree the overlay lands on a neighbouring frame, which is exactly the
+    failure this whole layout exists to remove."""
+    return min(n - 1, int((i + 0.5) * n / tiles))
+
+
+def write_strip(slot: str, obj: torch.Tensor, node_id: Any,
+                fps: float) -> Optional[dict]:
+    """Contact sheet of one tensor source, plus the metadata the editor cannot probe.
+
+    Laid out as a GRID rather than one long row: at one tile per frame a single row would
+    run tens of thousands of pixels wide and hit the browser's image size limits.
+    """
+    global _strip_seq
+    from PIL import Image
+
+    n = int(obj.shape[0])
+    if n <= 0:
+        return None
+    tiles = max(1, min(STRIP_MAX_TILES, n))
+    idx = [strip_frame(i, tiles, n) for i in range(tiles)]
+    h, w = int(obj.shape[1]), int(obj.shape[2])
+    tile_w = max(1, int(round(w / h * STRIP_HEIGHT)))
+
+    parts = []
+    for lo in range(0, tiles, STRIP_CHUNK):
+        block = obj.index_select(
+            0, torch.tensor(idx[lo:lo + STRIP_CHUNK], dtype=torch.long)).float()
+        small = _resize(_to_rgb(block).movedim(-1, 1), tile_w, STRIP_HEIGHT)
+        parts.append((small.movedim(1, -1).clamp(0.0, 1.0) * 255.0)
+                     .round().to(torch.uint8).cpu().numpy())
+    arr = np.concatenate(parts, axis=0)
+
+    cols = max(1, int(math.ceil(math.sqrt(tiles))))
+    rows = int(math.ceil(tiles / cols))
+    sheet = np.zeros((rows * STRIP_HEIGHT, cols * tile_w, 3), dtype=np.uint8)
+    for i in range(tiles):
+        r, c = divmod(i, cols)
+        sheet[r * STRIP_HEIGHT:(r + 1) * STRIP_HEIGHT,
+              c * tile_w:(c + 1) * tile_w] = arr[i]
+
+    out_dir = folder_paths.get_temp_directory()
+    os.makedirs(out_dir, exist_ok=True)
+    _strip_seq += 1
+    # A fresh NAME every run rather than overwriting one: the browser would keep serving
+    # the old bytes from its own HTTP cache, the exact trap the reload button's `_nkd`
+    # counter exists for.
+    name = f"nkd_strip_{node_id}_{slot}_{_strip_seq}.png"
+    Image.fromarray(sheet).save(os.path.join(out_dir, name), compress_level=1)
+    return {"filename": name, "subfolder": "", "type": "temp",
+            "tiles": tiles, "cols": cols,
+            "frame_count": n, "width": w, "height": h, "fps": float(fps),
+            "duration": n / fps if fps else 0.0}
+
+
+def tensor_strips(sources: dict, node_id: Any, fps: float) -> dict:
+    """A strip per tensor slot, keyed by slot name.
+
+    Best-effort throughout: this exists so the editor can draw a picture, and a preview
+    must never be able to take a render down with it.
+    """
+    out: dict[str, dict] = {}
+    if not node_id:
+        return out
+    for slot, (kind, obj) in sources.items():
+        if kind == "video":
+            continue
+        try:
+            info = write_strip(slot, obj, node_id, fps)
+        except Exception:  # noqa: BLE001 - a picture for the UI, never load-bearing
+            info = None
+        if info:
+            out[slot] = info
+    return out
+
+
 def _push_meta(node_id: Any, data: dict) -> None:
     """Send what was really rendered back to this node's editor.
 
@@ -853,6 +955,18 @@ class NKDTimeline(io.ComfyNode):
             ],
             # Needed to address the push below at THIS node's editor.
             hidden=[io.Hidden.unique_id],
+            # So the node can be executed ON ITS OWN, which is how a computed IMAGE/MASK
+            # gets its contact sheet without running the samplers downstream: deciding
+            # where to cut a mask has to be possible BEFORE generating anything.
+            # `validate_prompt` builds the targets of a partial execution only from nodes
+            # with OUTPUT_NODE true (execution.py:1163) and refuses a prompt whose set
+            # comes out empty, so there is no way to ask for a lone non-output node.
+            #
+            # NOT the "always executes" flag it looks like: execution.py:443 still
+            # short-circuits on a cache hit and re-sends the cached UI. What it does cost
+            # is that a Timeline nothing consumes runs once on a full queue instead of
+            # being pruned - bypass it if that ever gets in the way.
+            is_output_node=True,
         )
 
     @classmethod
@@ -1046,10 +1160,14 @@ class NKDTimeline(io.ComfyNode):
         # output IS a widget, which a computed selector's is not.
         # `cls.hidden` is only populated by the runtime; calling execute() directly (the
         # tests, or any script driving the node) leaves it None.
-        _push_meta(getattr(getattr(cls, "hidden", None), "unique_id", None), {
+        node_id = getattr(getattr(cls, "hidden", None), "unique_id", None)
+        _push_meta(node_id, {
             "width": int(width), "height": int(height),
             "frame_count": int(count), "fps": float(fps),
             "start_frame": int(start_frame),
+            # Y una hoja de contactos por fuente que llegó como TENSOR, que es la única
+            # forma de que el editor pueda enseñar una máscara calculada: no hay fichero.
+            "tensors": tensor_strips(sources, node_id, fps),
         })
 
         # Blown up to full size only now, and as a VIEW (stride 0 across H and W): no copy,

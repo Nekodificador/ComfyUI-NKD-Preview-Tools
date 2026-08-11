@@ -770,3 +770,45 @@ test("markerFrames deduplicates across lanes", () => {
   t.masks.push(clip({ id: "c", start: 5, length: 10, markers: [0] }));   // -> frame 5
   assert.deepEqual(M.markerFrames(t), [4, 5, 9]);
 });
+
+test("expandClipsToSources - show all the material, without unrolling the world", () => {
+  const t = M.emptyTimeline();
+  // A clip that landed on a guessed length because its source is a tensor, and a music
+  // bed that is deliberately trimmed and must NOT be dragged out with it.
+  t.clips = [
+    clip({ id: "guess", src: "media_0", start: 0, trimIn: 0, length: 24 }),
+    clip({ id: "cut", src: "media_1", track: 1, start: 100, trimIn: 30, length: 10,
+           markers: [5] }),
+  ];
+  t.audio = [{ id: "bed", src: "media_2", start: 0, trimIn: 0, length: 200, gain: 1 }];
+  const frames = { media_0: 723, media_1: 240, media_2: 4320 };
+  const rate = { media_0: 24, media_1: 30, media_2: 24 };
+  const framesFor = (s) => frames[s] ?? null;
+  const rateFor = (s) => rate[s] ?? 24;
+
+  // With a selection, ONLY the selection moves - the three-minute bed stays put.
+  assert.equal(M.expandClipsToSources(t, 24, framesFor, rateFor, new Set(["guess"])), true);
+  assert.equal(t.clips[0].length, 723);
+  assert.equal(t.clips[1].length, 10, "an unselected clip is untouched");
+  assert.equal(t.audio[0].length, 200, "and so is the audio bed");
+
+  // Without one, everything opens up.
+  assert.equal(M.expandClipsToSources(t, 24, framesFor, rateFor), true);
+  // 240 source frames at 30 are 192 frames of a 24fps timeline.
+  assert.equal(t.clips[1].length, 192);
+  assert.equal(t.clips[1].trimIn, 0, "the trim is dropped");
+  assert.equal(t.clips[1].start, 100, "where a clip SITS is the user's decision");
+  assert.deepEqual(t.clips[1].markers, [],
+    "dropping a trim slides the picture, so its markers no longer point at it");
+  assert.equal(t.audio[0].length, 4320);
+
+  // Idempotent, so the button leaves no empty undo behind.
+  assert.equal(M.expandClipsToSources(t, 24, framesFor, rateFor), false);
+
+  // Unknown length (a tensor with no sheet yet) is left completely alone.
+  const t2 = M.emptyTimeline();
+  t2.clips = [clip({ id: "c", src: "media_9", trimIn: 2, length: 7 })];
+  assert.equal(M.expandClipsToSources(t2, 24, () => null, () => 24), false);
+  assert.equal(t2.clips[0].length, 7);
+  assert.equal(t2.clips[0].trimIn, 2);
+});

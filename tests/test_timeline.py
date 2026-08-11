@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(_PACK)))
 
 from fractions import Fraction  # noqa: E402
 
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from comfy_api.latest import Types  # noqa: E402
@@ -680,6 +681,53 @@ def test_freeze_frame_previews_are_labelled_copies():
     # A big frame is scaled down for the preview, keeping its aspect.
     small = _badge_previews(torch.zeros((1, 1080, 1920, 3)), [0])
     assert small.shape[2] == 256 and small.shape[1] == 144
+
+
+def test_tensor_strips_describe_the_tensor_not_the_upstream_file():
+    """The contact sheet is the only thing that can describe a computed slot, so its
+    geometry has to line up with what the editor slices out of it."""
+    import math
+
+    from PIL import Image
+
+    import folder_paths
+    from nkd_timeline import (
+        STRIP_HEIGHT, STRIP_MAX_TILES, strip_frame, tensor_strips,
+    )
+
+    mask = torch.rand((7, 40, 80))                    # [N,H,W] - a MASK
+    image = torch.rand((90, 32, 32, 3))               # [N,H,W,C] - an IMAGE
+    sources = {"media_0": ("mask", mask), "media_1": ("image", image),
+               "media_2": ("video", object())}        # videos have a file; no strip
+    strips = tensor_strips(sources, "42", 24.0)
+    assert set(strips) == {"media_0", "media_1"}, "a video must not get a strip"
+
+    m = strips["media_0"]
+    assert m["tiles"] == 7 and m["frame_count"] == 7
+    assert (m["width"], m["height"]) == (80, 40), "the TENSOR's size, not the sheet's"
+    sheet = Image.open(os.path.join(folder_paths.get_temp_directory(), m["filename"]))
+    tile_w = round(80 / 40 * STRIP_HEIGHT)            # per-tile aspect is kept
+    assert m["cols"] == 3 and sheet.size == (3 * tile_w, 3 * STRIP_HEIGHT)
+
+    i = strips["media_1"]
+    # Under the ceiling: ONE TILE PER FRAME, or the mask overlay lands on a neighbour.
+    assert i["tiles"] == 90 and i["cols"] == 10
+    assert i["frame_count"] == 90 and i["duration"] == 90 / 24.0
+    assert [strip_frame(k, 90, 90) for k in range(90)] == list(range(90))
+
+    # Past the ceiling it samples rather than growing without bound.
+    big = tensor_strips({"m": ("mask", torch.rand((STRIP_MAX_TILES * 2, 8, 8)))},
+                        "42", 24.0)["m"]
+    assert big["tiles"] == STRIP_MAX_TILES and big["frame_count"] == STRIP_MAX_TILES * 2
+    assert big["cols"] == math.ceil(math.sqrt(STRIP_MAX_TILES))
+    # Every tile stays inside the tensor, and they only ever move forwards.
+    picks = [strip_frame(k, big["tiles"], big["frame_count"]) for k in range(big["tiles"])]
+    assert picks[0] >= 0 and picks[-1] == big["frame_count"] - 1
+    assert all(b >= a for a, b in zip(picks, picks[1:]))
+
+    # No node id means no editor listening: writing files for nobody is pure waste.
+    assert tensor_strips(sources, None, 24.0) == {}
+
 
 
 if __name__ == "__main__":

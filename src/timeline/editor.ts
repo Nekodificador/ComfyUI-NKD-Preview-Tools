@@ -17,7 +17,7 @@ import {
   QUANTIZE_FREE,
   BLEND_MODES, type BlendMode, type ImportMode,
   clipsAt, cropToRange, effectiveCount, fitRect, materialRange, moveClip, moveClipToLane,
-  clampClipsToSources, clipExtent, nativeFpsFor, newId, slotInUse, splitClip,
+  clampClipsToSources, clipExtent, expandClipsToSources, nativeFpsFor, newId, slotInUse, splitClip,
   trimToPlayhead,
   placementFor, quantizeStops, setTrackBlend, slipClip, snap, snapCandidates,
   MAX_ZOOM, snapFrameToGrid, sortClips, sourceFrame, timelineSpan, trackBlend, trimEnd,
@@ -25,8 +25,8 @@ import {
 } from "./model";
 import {
   type MediaInfo, type MediaRef,
-  PEAK_BUCKETS, audioBufferFor, ensureAudio, ensureThumbnails, followPlayback,
-  frameSource, pauseAllVideos, peaksFor, seekTo, setPooledReadyHandler, thumbnailAt,
+  PEAK_BUCKETS, audioBufferFor, ensureAudio, ensureThumbnails,
+  pauseAllVideos, peaksFor, pictureAt, setPooledReadyHandler, thumbnailAt,
 } from "./media";
 import { Transport } from "./player";
 
@@ -120,6 +120,10 @@ const AUDIO_H = 34;
 const MIN_VIDEO_TRACKS = 2;
 const MAX_VIDEO_TRACKS = 8;
 const HANDLE_PX = 10;      // grab radius of an edge
+// Area ratio above which a source is worth warning about. 6x is a bit over 2.4x per
+// axis - the point where the decoding a scrub throws away stops being noise. 4K into
+// 832x480 is 21x.
+const SCALE_WARN_RATIO = 6;
 const HANDLE_CORE = 4;     // dead zone in the middle so tiny clips stay movable
 const SNAP_PX = 12;
 const MIN_LEN = 1;
@@ -189,7 +193,9 @@ export class TimelineEditor {
   /** Scratch canvas for tinting the mask; reused so playback does not allocate. */
   private readonly tintCanvas = document.createElement("canvas");
   /** Last quantise/fps pair we warned about, so the toast fires on CHANGE only. */
-  private lastFpsWarning = ""; 
+  private lastFpsWarning = "";
+  /** Last (sources, output size) pair warned about. See `checkSourceScale`. */
+  private lastScaleWarning = ""; 
   readonly transport: Transport;
   /** Called whenever the intrinsic height changes, so the host can resize the node. */
   onHeightChange: (() => void) | null = null;
@@ -323,6 +329,15 @@ export class TimelineEditor {
       mdi("mdi-arrow-collapse-horizontal", "pi-arrows-h",
         "Fit the range to the material (no gaps, no mask)",
         () => this.trimToMaterial()),
+      // Deliberately NOT another horizontal arrow. Its neighbour above is the exact
+      // inverse and was already `mdi-arrow-collapse-horizontal` with a `pi-arrows-h`
+      // fallback: two adjacent buttons whose fallbacks were the SAME glyph, told apart
+      // only by a tooltip. Neko could not find this one, which is the whole review of
+      // that idea. Distinct icon, distinct fallback, and the verb first in the tooltip.
+      mdi("mdi-arrow-expand-all", "pi-arrows-alt",
+        "Show all the material: open the SELECTED clips to their full length "
+        + "(all of them if nothing is selected)",
+        () => this.expandToSources()),
       mdi("mdi-content-cut", "pi-filter",
         "Crop the material to the in/out range (discards the rest)",
         () => this.cropToInOut()),
@@ -1145,6 +1160,31 @@ export class TimelineEditor {
    * the probe lands a tick or two LATER - and until something re-clamps, the clip is
    * longer than its file, which the backend renders as the last frame repeating.
    */
+  /**
+   * Open clips out to the whole of their source - the button for "show me everything, I
+   * will cut it myself". The counterpart to `retightenToSources`.
+   *
+   * Acts on the SELECTION when there is one. Expanding everything would also unroll a
+   * three-minute audio bed nobody asked about and drag the view out with it, which is the
+   * usual reason this button gets pressed once and never again.
+   */
+  expandToSources(): void {
+    const fps = this.host.getFps();
+    const ids = this.selection.size ? new Set(this.selection) : undefined;
+    this.pushUndo();
+    const changed = expandClipsToSources(this.tl, fps,
+      (src) => this.host.srcFramesFor(src),
+      (src) => this.host.sourceFor(src)?.info?.fps ?? fps,
+      ids);
+    if (!changed) {
+      this.undoStack.pop();       // nothing to expand: leave no empty undo behind
+      return;
+    }
+    this.host.commit();
+    this.zoomFit();               // a clip that just grew tenfold is off screen otherwise
+    this.requestRender();
+  }
+
   retightenToSources(): boolean {
     const fps = this.host.getFps();
     const before = JSON.stringify(this.tl);
@@ -1225,6 +1265,52 @@ export class TimelineEditor {
       "warn");
   }
 
+  /**
+   * Warn when the material is far bigger than the output it is being rendered to.
+   *
+   * A seek costs however many pixels have to be decoded from the last keyframe, and the
+   * browser cannot be asked to decode a `<video>` at reduced resolution - that knob simply
+   * does not exist. So a 4K source into an 832x480 output decodes 21x the pixels it needs,
+   * on every scrub step, per layer, and nothing downstream can claw that back. Measured on
+   * exactly that case: two 4K layers spend 85% of wall time inside seeks and the monitor
+   * updates ~6 times a second.
+   *
+   * This is the cheapest possible fix for it: SAY SO. The user can conform the material
+   * and get both a usable preview and a much faster render, but only if anyone tells them
+   * the ratio, which until now nothing did.
+   */
+  private checkSourceScale(): void {
+    const [ow, oh] = this.host.getOutSize();
+    const outPx = Math.max(1, ow * oh);
+    let worst: { src: string; w: number; h: number; ratio: number } | null = null;
+    const seen = new Set<string>();
+    for (const c of [...this.tl.clips, ...this.tl.masks]) {
+      if (seen.has(c.src)) continue;
+      seen.add(c.src);
+      const info = this.host.sourceFor(c.src)?.info;
+      if (!info?.width || !info.height) continue;      // tensor, or not probed yet
+      const ratio = (info.width * info.height) / outPx;
+      if (!worst || ratio > worst.ratio) {
+        worst = { src: c.src, w: info.width, h: info.height, ratio };
+      }
+    }
+    // Stamped on the WORST offender and the output size, so it fires once per situation
+    // rather than on every repaint - the same discipline as the frame-rate warning.
+    const stamp = worst ? `${worst.src}|${worst.w}x${worst.h}|${ow}x${oh}` : "";
+    if (stamp === this.lastScaleWarning) return;
+    this.lastScaleWarning = stamp;
+    if (!worst || worst.ratio < SCALE_WARN_RATIO) return;
+    this.host.notify(
+      "Material much larger than the output",
+      `${worst.src} is ${worst.w}x${worst.h} and this timeline renders ${ow}x${oh} - `
+      + `${Math.round(worst.ratio)}x more pixels than needed. The browser cannot decode a `
+      + `video at reduced size, so every scrub step pays for all of them: the preview will `
+      + `be choppy and each render decodes the same waste. Conforming the source to `
+      + `${ow}x${oh} costs nothing in quality here, since the timeline scales it to exactly `
+      + `that anyway.`,
+      "warn");
+  }
+
   private pushUndo(): void {
     this.undoStack.push(JSON.stringify(this.tl));
     if (this.undoStack.length > 40) this.undoStack.shift();
@@ -1257,7 +1343,8 @@ export class TimelineEditor {
   }
 
   /** Place a freshly connected slot, following the node's import mode. */
-  addClipForSlot(src: string, frames: number, lane: Lane = "video"): void {
+  addClipForSlot(src: string, frames: number, lane: Lane = "video",
+                 sync?: { start: number; trimIn: number; length: number }): void {
     // Across ALL lanes, not just this one: a clip moved to the mask lane must not be
     // re-added to the picture lane the next time the slots are synced.
     if (slotInUse(this.tl, src)) return;
@@ -1265,13 +1352,15 @@ export class TimelineEditor {
     this.pushUndo();
     // Audio never stacks: two takes on separate audio tracks would just both play.
     const mode = lane === "audio" ? "append" : this.host.getImportMode();
-    const at = placementFor(this.tl, list, mode);
+    // `sync` lands the clip ON another one instead of wherever the import mode would put
+    // it - used when the same FILE is already on the timeline and this is its other half.
+    const at = sync ?? placementFor(this.tl, list, mode);
     list.push({
       id: newId(), src,
-      track: lane === "video" ? at.track : 0,
+      track: lane === "video" ? (at as { track?: number }).track ?? 0 : 0,
       start: at.start,
-      trimIn: 0,
-      length: Math.max(1, Math.round(frames)),
+      trimIn: sync ? sync.trimIn : 0,
+      length: Math.max(1, Math.round(sync ? sync.length : frames)),
       ...(lane === "audio" ? { gain: 1 } : {}),
     } as Clip);
     sortClips(this.tl);
@@ -1388,6 +1477,7 @@ export class TimelineEditor {
     this.drawPlayhead(ctx, H);
     this.updateStatus(fps, count);
     this.checkFpsAgainstModel();
+    this.checkSourceScale();
   }
 
   private drawRuler(ctx: CanvasRenderingContext2D, W: number, fps: number): void {
@@ -1847,9 +1937,7 @@ export class TimelineEditor {
       const sf = sourceFrame(clip, this.playhead, srcFps, this.host.getFps());
       const at = sf / (srcFps || 1);
       // Forward at 1x: let it play. Anything else (scrub, shuttle, reverse) seeks.
-      if (this.transport.rate === 1) followPlayback(src.ref, at);
-      else seekTo(src.ref, at);
-      const img = frameSource(src.ref);
+      const img = pictureAt(src.ref, at, this.transport.rate === 1);
       if (!img) continue;
       const iw = (img as HTMLVideoElement).videoWidth || (img as HTMLCanvasElement).width;
       const ih = (img as HTMLVideoElement).videoHeight || (img as HTMLCanvasElement).height;
@@ -1889,8 +1977,7 @@ export class TimelineEditor {
     if (!src) return;
     const srcFps = src.info?.fps ?? this.host.getFps();
     const at = sourceFrame(top, this.playhead, srcFps, this.host.getFps()) / (srcFps || 1);
-    seekTo(src.ref, at);
-    const img = frameSource(src.ref);
+    const img = pictureAt(src.ref, at, false);
     if (!img) return;
     const iw = (img as HTMLVideoElement).videoWidth || (img as HTMLCanvasElement).width;
     const ih = (img as HTMLVideoElement).videoHeight || (img as HTMLCanvasElement).height;
