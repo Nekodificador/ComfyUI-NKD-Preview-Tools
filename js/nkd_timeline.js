@@ -492,6 +492,24 @@ function clampClipsToSources(t, fps, srcFramesFor, rateFor) {
   }
   return changed;
 }
+function expandClipsToSources(t, fps, srcFramesFor, rateFor, ids) {
+  let changed = false;
+  for (const lane of allLanes(t)) {
+    for (const c of lane) {
+      if (ids && !ids.has(c.id)) continue;
+      const srcFrames = srcFramesFor(c.src);
+      if (srcFrames === null || srcFrames <= 0) continue;
+      const ratio = (rateFor(c.src) || fps) / (fps || 1);
+      const full = Math.max(1, Math.floor(srcFrames / (ratio || 1)));
+      if (c.trimIn === 0 && c.length === full) continue;
+      if (c.trimIn !== 0) c.markers = [];
+      c.trimIn = 0;
+      c.length = full;
+      changed = true;
+    }
+  }
+  return changed;
+}
 function clipExtent(t, frame, ids) {
   let start = Infinity;
   let end = 0;
@@ -542,6 +560,7 @@ function bustCaches() {
 }
 function forget(ref) {
   const key = refKey(ref);
+  stripRefs.delete(key);
   infoCache.delete(key);
   thumbCache.delete(key);
   audioCache.delete(key);
@@ -556,9 +575,9 @@ function forget(ref) {
 }
 const FILE_WIDGETS = ["file", "video", "audio", "image", "filename", "path"];
 const looksLikeFile = (v) => typeof v === "string" && v.length > 0 && v !== "none" && /\.[a-z0-9]{2,5}$/i.test(v);
-function resolveSource(node, slotName, depth = 0) {
+function resolveSource(node, slotName, maxDepth = 6, depth = 0) {
   var _a, _b, _c, _d, _e;
-  if (depth > 6) return null;
+  if (depth > maxDepth) return null;
   const slot = (_a = node == null ? void 0 : node.inputs) == null ? void 0 : _a.find((i) => {
     var _a2;
     return i.name === slotName || ((_a2 = i.name) == null ? void 0 : _a2.endsWith(`.${slotName}`));
@@ -583,7 +602,7 @@ function resolveSource(node, slotName, depth = 0) {
   }
   for (const inp of src.inputs ?? []) {
     if (inp.link == null) continue;
-    const up = resolveSource(src, inp.name, depth + 1);
+    const up = resolveSource(src, inp.name, maxDepth, depth + 1);
     if (up) return up;
   }
   return null;
@@ -695,10 +714,15 @@ let onPooledReady = null;
 function setPooledReadyHandler(fn) {
   onPooledReady = fn;
 }
-function seekTo(ref, seconds) {
+function seekTo(ref, seconds, tolerance = 0.02) {
   const p = pool.get(refKey(ref)) ?? makePooled(ref);
   pool.set(refKey(ref), p);
-  p.wantTime = Math.max(0, seconds);
+  const want = Math.max(0, seconds);
+  if (p.el.readyState >= 1 && !p.seeking && Math.abs(p.el.currentTime - want) < tolerance) {
+    p.wantTime = want;
+    return;
+  }
+  p.wantTime = want;
   applySeek(p);
 }
 const DRIFT_S = 0.25;
@@ -721,6 +745,13 @@ function pauseAllVideos() {
   for (const p of pool.values()) {
     if (!p.el.paused) p.el.pause();
   }
+}
+const stripRefs = /* @__PURE__ */ new Set();
+function pictureAt(ref, seconds, playing) {
+  if (stripRefs.has(refKey(ref))) return thumbnailAt(ref, seconds);
+  if (playing) followPlayback(ref, seconds);
+  else seekTo(ref, seconds, 0.02);
+  return frameSource(ref);
 }
 function frameSource(ref) {
   const p = pool.get(refKey(ref));
@@ -799,6 +830,44 @@ function ensureThumbnails(ref, info, onFrame) {
   thumbJobs.set(key, job);
   return strip;
 }
+const stripFrame = (i, tiles, n) => Math.min(n - 1, Math.floor((i + 0.5) * n / tiles));
+function adoptStrip(ref, info, tiles, cols, onReady) {
+  const key = refKey(ref);
+  stripRefs.add(key);
+  if (thumbCache.has(key)) return;
+  infoCache.set(key, info);
+  const strip = [];
+  thumbCache.set(key, strip);
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.onload = () => {
+    const rows = Math.max(1, Math.ceil(tiles / cols));
+    const tw = img.width / cols;
+    const th = img.height / rows;
+    for (let i = 0; i < tiles; i++) {
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(tw));
+      c.height = Math.max(1, Math.round(th));
+      c.getContext("2d").drawImage(
+        img,
+        Math.round(i % cols * tw),
+        Math.round(Math.floor(i / cols) * th),
+        c.width,
+        c.height,
+        0,
+        0,
+        c.width,
+        c.height
+      );
+      strip.push({
+        time: stripFrame(i, tiles, info.frame_count) / (info.fps || 1),
+        canvas: c
+      });
+    }
+    onReady();
+  };
+  img.src = viewUrl(ref);
+}
 function thumbnailAt(ref, seconds) {
   const strip = thumbCache.get(refKey(ref));
   if (!strip || strip.length === 0) return null;
@@ -824,13 +893,23 @@ function audioContext() {
 const PEAK_BUCKETS = 400;
 function ensureAudio(ref, onDone) {
   const key = refKey(ref);
-  if (audioCache.has(key) || audioJobs.has(key)) return;
+  if (audioCache.has(key)) {
+    onDone();
+    return;
+  }
+  const flight = audioJobs.get(key);
+  if (flight) {
+    void flight.then(() => onDone());
+    return;
+  }
   const job = fetch(viewUrl(ref)).then((r) => r.ok ? r.arrayBuffer() : Promise.reject(new Error("fetch failed"))).then((buf) => audioContext().decodeAudioData(buf)).then((decoded) => {
     audioCache.set(key, decoded);
     peakCache.set(key, computePeaks(decoded));
-    onDone();
     return decoded;
-  }).catch(() => null).finally(() => audioJobs.delete(key));
+  }).catch(() => null).finally(() => {
+    audioJobs.delete(key);
+    onDone();
+  });
   audioJobs.set(key, job);
 }
 function computePeaks(buf) {
@@ -1057,6 +1136,7 @@ const AUDIO_H = 34;
 const MIN_VIDEO_TRACKS = 2;
 const MAX_VIDEO_TRACKS = 8;
 const HANDLE_PX = 10;
+const SCALE_WARN_RATIO = 6;
 const HANDLE_CORE = 4;
 const SNAP_PX = 12;
 const MIN_LEN = 1;
@@ -1091,6 +1171,8 @@ class TimelineEditor {
     __publicField(this, "tintCanvas", document.createElement("canvas"));
     /** Last quantise/fps pair we warned about, so the toast fires on CHANGE only. */
     __publicField(this, "lastFpsWarning", "");
+    /** Last (sources, output size) pair warned about. See `checkSourceScale`. */
+    __publicField(this, "lastScaleWarning", "");
     __publicField(this, "transport");
     /** Called whenever the intrinsic height changes, so the host can resize the node. */
     __publicField(this, "onHeightChange", null);
@@ -1606,6 +1688,17 @@ class TimelineEditor {
         "Fit the range to the material (no gaps, no mask)",
         () => this.trimToMaterial()
       ),
+      // Deliberately NOT another horizontal arrow. Its neighbour above is the exact
+      // inverse and was already `mdi-arrow-collapse-horizontal` with a `pi-arrows-h`
+      // fallback: two adjacent buttons whose fallbacks were the SAME glyph, told apart
+      // only by a tooltip. Neko could not find this one, which is the whole review of
+      // that idea. Distinct icon, distinct fallback, and the verb first in the tooltip.
+      mdi(
+        "mdi-arrow-expand-all",
+        "pi-arrows-alt",
+        "Show all the material: open the SELECTED clips to their full length (all of them if nothing is selected)",
+        () => this.expandToSources()
+      ),
       mdi(
         "mdi-content-cut",
         "pi-filter",
@@ -2012,6 +2105,36 @@ class TimelineEditor {
    * the probe lands a tick or two LATER - and until something re-clamps, the clip is
    * longer than its file, which the backend renders as the last frame repeating.
    */
+  /**
+   * Open clips out to the whole of their source - the button for "show me everything, I
+   * will cut it myself". The counterpart to `retightenToSources`.
+   *
+   * Acts on the SELECTION when there is one. Expanding everything would also unroll a
+   * three-minute audio bed nobody asked about and drag the view out with it, which is the
+   * usual reason this button gets pressed once and never again.
+   */
+  expandToSources() {
+    const fps = this.host.getFps();
+    const ids = this.selection.size ? new Set(this.selection) : void 0;
+    this.pushUndo();
+    const changed = expandClipsToSources(
+      this.tl,
+      fps,
+      (src) => this.host.srcFramesFor(src),
+      (src) => {
+        var _a, _b;
+        return ((_b = (_a = this.host.sourceFor(src)) == null ? void 0 : _a.info) == null ? void 0 : _b.fps) ?? fps;
+      },
+      ids
+    );
+    if (!changed) {
+      this.undoStack.pop();
+      return;
+    }
+    this.host.commit();
+    this.zoomFit();
+    this.requestRender();
+  }
   retightenToSources() {
     const fps = this.host.getFps();
     const before = JSON.stringify(this.tl);
@@ -2095,6 +2218,46 @@ class TimelineEditor {
       "warn"
     );
   }
+  /**
+   * Warn when the material is far bigger than the output it is being rendered to.
+   *
+   * A seek costs however many pixels have to be decoded from the last keyframe, and the
+   * browser cannot be asked to decode a `<video>` at reduced resolution - that knob simply
+   * does not exist. So a 4K source into an 832x480 output decodes 21x the pixels it needs,
+   * on every scrub step, per layer, and nothing downstream can claw that back. Measured on
+   * exactly that case: two 4K layers spend 85% of wall time inside seeks and the monitor
+   * updates ~6 times a second.
+   *
+   * This is the cheapest possible fix for it: SAY SO. The user can conform the material
+   * and get both a usable preview and a much faster render, but only if anyone tells them
+   * the ratio, which until now nothing did.
+   */
+  checkSourceScale() {
+    var _a;
+    const [ow, oh] = this.host.getOutSize();
+    const outPx = Math.max(1, ow * oh);
+    let worst = null;
+    const seen = /* @__PURE__ */ new Set();
+    for (const c of [...this.tl.clips, ...this.tl.masks]) {
+      if (seen.has(c.src)) continue;
+      seen.add(c.src);
+      const info = (_a = this.host.sourceFor(c.src)) == null ? void 0 : _a.info;
+      if (!(info == null ? void 0 : info.width) || !info.height) continue;
+      const ratio = info.width * info.height / outPx;
+      if (!worst || ratio > worst.ratio) {
+        worst = { src: c.src, w: info.width, h: info.height, ratio };
+      }
+    }
+    const stamp = worst ? `${worst.src}|${worst.w}x${worst.h}|${ow}x${oh}` : "";
+    if (stamp === this.lastScaleWarning) return;
+    this.lastScaleWarning = stamp;
+    if (!worst || worst.ratio < SCALE_WARN_RATIO) return;
+    this.host.notify(
+      "Material much larger than the output",
+      `${worst.src} is ${worst.w}x${worst.h} and this timeline renders ${ow}x${oh} - ${Math.round(worst.ratio)}x more pixels than needed. The browser cannot decode a video at reduced size, so every scrub step pays for all of them: the preview will be choppy and each render decodes the same waste. Conforming the source to ${ow}x${oh} costs nothing in quality here, since the timeline scales it to exactly that anyway.`,
+      "warn"
+    );
+  }
   pushUndo() {
     this.undoStack.push(JSON.stringify(this.tl));
     if (this.undoStack.length > 40) this.undoStack.shift();
@@ -2123,19 +2286,19 @@ class TimelineEditor {
     this.requestRender();
   }
   /** Place a freshly connected slot, following the node's import mode. */
-  addClipForSlot(src, frames, lane = "video") {
+  addClipForSlot(src, frames, lane = "video", sync) {
     if (slotInUse(this.tl, src)) return;
     const list = this.laneOf(lane);
     this.pushUndo();
     const mode = lane === "audio" ? "append" : this.host.getImportMode();
-    const at = placementFor(this.tl, list, mode);
+    const at = sync ?? placementFor(this.tl, list, mode);
     list.push({
       id: newId(),
       src,
-      track: lane === "video" ? at.track : 0,
+      track: lane === "video" ? at.track ?? 0 : 0,
       start: at.start,
-      trimIn: 0,
-      length: Math.max(1, Math.round(frames)),
+      trimIn: sync ? sync.trimIn : 0,
+      length: Math.max(1, Math.round(sync ? sync.length : frames)),
       ...lane === "audio" ? { gain: 1 } : {}
     });
     sortClips(this.tl);
@@ -2237,6 +2400,7 @@ class TimelineEditor {
     this.drawPlayhead(ctx, H);
     this.updateStatus(fps, count);
     this.checkFpsAgainstModel();
+    this.checkSourceScale();
   }
   drawRuler(ctx, W, fps) {
     ctx.fillStyle = C.bar;
@@ -2628,9 +2792,7 @@ class TimelineEditor {
       const srcFps = ((_a = src.info) == null ? void 0 : _a.fps) ?? this.host.getFps();
       const sf = sourceFrame(clip, this.playhead, srcFps, this.host.getFps());
       const at = sf / (srcFps || 1);
-      if (this.transport.rate === 1) followPlayback(src.ref, at);
-      else seekTo(src.ref, at);
-      const img = frameSource(src.ref);
+      const img = pictureAt(src.ref, at, this.transport.rate === 1);
       if (!img) continue;
       const iw = img.videoWidth || img.width;
       const ih = img.videoHeight || img.height;
@@ -2665,8 +2827,7 @@ class TimelineEditor {
     if (!src) return;
     const srcFps = ((_a = src.info) == null ? void 0 : _a.fps) ?? this.host.getFps();
     const at = sourceFrame(top, this.playhead, srcFps, this.host.getFps()) / (srcFps || 1);
-    seekTo(src.ref, at);
-    const img = frameSource(src.ref);
+    const img = pictureAt(src.ref, at, false);
     if (!img) return;
     const iw = img.videoWidth || img.width;
     const ih = img.videoHeight || img.height;
@@ -3287,6 +3448,14 @@ class VideoViewer {
     __publicField(this, "holding", false);
     // hold B: reference full-frame
     __publicField(this, "hasRef", false);
+    /** The reference wired into the node. It BEATS the global slot: a connection is a
+     *  statement about this node, the slot is whatever happened to run last. */
+    __publicField(this, "wired", null);
+    /** Bound once so it can be removed again: a viewer deleted from the graph must not keep
+     *  answering the api's events. */
+    __publicField(this, "onPromptDone", () => {
+      if (!this.wired) void this.loadReference();
+    });
     __publicField(this, "popout", null);
     /** Persisted on the node, not in a widget: what the viewer is doing does not change what
      *  the graph produces, and an input would re-encode the video on every toggle. */
@@ -3401,12 +3570,25 @@ class VideoViewer {
     this.pathLine.dataset.full = info.path || where;
     this.syncButtons();
     this.draw();
-    if (this.compare !== "off") void this.loadReference();
+    this.wired = info.reference ?? null;
+    if (this.wired) this.showReference(this.wired);
+    else if (this.compare !== "off") void this.loadReference();
     (_a = this.onHeightChange) == null ? void 0 : _a.call(this);
   }
   // ── Compare ─────────────────────────────────────────────────────────────────
+  /** Point the "before" layer at a file. */
+  showReference(ref) {
+    const url = viewUrl(ref);
+    if (this.refVideo.src !== url) this.refVideo.src = url;
+    this.hasRef = true;
+    this.applyCompare();
+  }
   /** Fetch whatever the global reference slot currently points at. */
   async loadReference() {
+    if (this.wired) {
+      this.showReference(this.wired);
+      return;
+    }
     try {
       const r = await api.fetchApi("/nkd/ref/get_video");
       if (!r.ok) {
@@ -3414,10 +3596,8 @@ class VideoViewer {
         this.applyCompare();
         return;
       }
-      const ref = await r.json();
-      const url = viewUrl(ref);
-      if (this.refVideo.src !== url) this.refVideo.src = url;
-      this.hasRef = true;
+      this.showReference(await r.json());
+      return;
     } catch {
       this.hasRef = false;
     }
@@ -3435,7 +3615,7 @@ class VideoViewer {
         body: JSON.stringify(this.ref)
       });
       await this.loadReference();
-      this.flash("reference set");
+      this.flash(this.wired ? "set for other viewers (this one is wired)" : "reference set");
     } catch {
       this.flash("could not set reference");
     }
@@ -3443,8 +3623,14 @@ class VideoViewer {
   cycleCompare() {
     const next = COMPARE_ORDER[(COMPARE_ORDER.indexOf(this.compare) + 1) % COMPARE_ORDER.length];
     this.compare = next;
-    if (next !== "off" && !this.hasRef) void this.loadReference();
-    else this.applyCompare();
+    const done = () => {
+      this.applyCompare();
+      if (next !== "off" && !this.hasRef) {
+        this.flash("no reference — wire `reference`, or run an NKD Reference node");
+      }
+    };
+    if (next !== "off" && !this.hasRef) void this.loadReference().then(done);
+    else done();
     this.pushState();
   }
   applyCompare() {
@@ -3776,6 +3962,7 @@ class VideoViewer {
         handled();
       }
     });
+    api.addEventListener("execution_success", this.onPromptDone);
     new ResizeObserver(() => this.draw()).observe(this.scrub);
     document.addEventListener("fullscreenchange", () => {
       this.stripKey = "";
@@ -3880,6 +4067,7 @@ class VideoViewer {
     this.status.textContent = this.playable ? `f ${this.frame} / ${info.frame_count - 1} · ${info.fps.toFixed(2)} fps · ${info.width}x${info.height} · ${humanSize(info.size)}${rate}` : `${info.frame_count} frames · ${info.width}x${info.height} · ${humanSize(info.size)}`;
   }
   destroy() {
+    api.removeEventListener("execution_success", this.onPromptDone);
     if (this.raf) cancelAnimationFrame(this.raf);
     this.video.removeAttribute("src");
     this.video.load();
@@ -4059,6 +4247,7 @@ function makeHost(node, state) {
     (_a = w.callback) == null ? void 0 : _a.call(w, value);
   };
   const srcCache = /* @__PURE__ */ new Map();
+  const strips = /* @__PURE__ */ new Map();
   let reported = null;
   const host = {
     getTimeline: () => state.tl,
@@ -4144,12 +4333,15 @@ function makeHost(node, state) {
       return info ? [info.width, info.height] : [16, 9];
     },
     sourceFor(src) {
+      const strip = strips.get(src);
+      if (strip) return strip;
       const hit = srcCache.get(src);
       if (hit) {
         if (!hit.info) hit.info = cachedInfo(hit.ref) ?? null;
         return hit;
       }
-      const ref = resolveSource(node, src);
+      const kind = slotKind(node, src);
+      const ref = resolveSource(node, src, kind === "image" || kind === "mask" ? 0 : 6);
       if (!ref) return null;
       const entry = { ref, info: cachedInfo(ref) ?? null, label: ref.filename };
       srcCache.set(src, entry);
@@ -4194,6 +4386,38 @@ function makeHost(node, state) {
       }
       reported = { width: m.width, height: m.height };
       return true;
+    },
+    applyStrips(tensors, onReady) {
+      let changed = false;
+      for (const [slot, t] of Object.entries(tensors ?? {})) {
+        if (!(t == null ? void 0 : t.filename) || !(t.tiles > 0)) continue;
+        const prev = strips.get(slot);
+        if ((prev == null ? void 0 : prev.ref.filename) === t.filename) continue;
+        if (prev) forget(prev.ref);
+        const ref = {
+          filename: t.filename,
+          subfolder: t.subfolder ?? "",
+          type: t.type ?? "temp"
+        };
+        const info = {
+          fps: t.fps,
+          frame_count: t.frame_count,
+          duration: t.duration,
+          width: t.width,
+          height: t.height
+        };
+        strips.set(slot, { ref, info, label: `${slot} · computed` });
+        adoptStrip(ref, info, t.tiles, Math.max(1, t.cols || t.tiles), onReady);
+        changed = true;
+      }
+      return changed;
+    },
+    pruneStrips(live) {
+      for (const slot of [...strips.keys()]) {
+        if (live.has(slot)) continue;
+        forget(strips.get(slot).ref);
+        strips.delete(slot);
+      }
     },
     /** Read the cache WITHOUT resolving, so the swap detector can compare against it. */
     peekSource: (src) => srcCache.get(src),
@@ -4333,10 +4557,27 @@ app.registerExtension({
         resizeToContent();
         editor.requestRender();
       });
+      const twinOf = (slot) => {
+        var _a2, _b, _c, _d;
+        const origin = (_a2 = resolveSource(node, slot, 6)) == null ? void 0 : _a2.filename;
+        if (!origin) return void 0;
+        const fps = host.getFps();
+        for (const c of [...state.tl.clips, ...state.tl.masks]) {
+          if (((_b = resolveSource(node, c.src, 6)) == null ? void 0 : _b.filename) !== origin) continue;
+          const srcFps = ((_d = (_c = host.sourceFor(c.src)) == null ? void 0 : _c.info) == null ? void 0 : _d.fps) || fps;
+          return {
+            start: c.start,
+            trimIn: Math.max(0, Math.round(c.trimIn * (fps / srcFps))),
+            length: c.length
+          };
+        }
+        return void 0;
+      };
       const syncSlots = () => {
         host.clearSourceCache();
         const { videos, images, masks, audios } = host.connectedSlots();
         const live = /* @__PURE__ */ new Set([...videos, ...images, ...masks, ...audios]);
+        host.pruneStrips(live);
         if (editor.pruneToSlots(live)) host.commit();
         for (const slot of videos) {
           if (slotInUse(state.tl, slot)) continue;
@@ -4370,11 +4611,8 @@ app.registerExtension({
           if (!src) continue;
           const place = () => {
             const buf = audioBufferFor(src.ref);
-            editor.addClipForSlot(
-              slot,
-              buf ? Math.round(buf.duration * host.getFps()) : fallback,
-              "audio"
-            );
+            const len = buf ? Math.round(buf.duration * host.getFps()) : fallback;
+            editor.addClipForSlot(slot, len, "audio", twinOf(slot));
           };
           if (audioBufferFor(src.ref)) place();
           else ensureAudio(src.ref, place);
@@ -4408,8 +4646,13 @@ app.registerExtension({
       const onMeta = (e) => {
         const d = e == null ? void 0 : e.detail;
         if (!d || String(d.node) !== String(node.id)) return;
-        if (!host.applyMeta(d)) return;
-        resizeToContent();
+        const gotStrips = host.applyStrips(d.tensors, () => {
+          editor.retightenToSources();
+          editor.requestRender();
+        });
+        const gotSize = host.applyMeta(d);
+        if (!gotStrips && !gotSize) return;
+        if (gotSize) resizeToContent();
         editor.requestRender();
       };
       api.addEventListener("nkd-timeline-meta", onMeta);

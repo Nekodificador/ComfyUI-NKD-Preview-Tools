@@ -241,6 +241,42 @@ def remember_render(node_key: str, images, audio_wave, settings: tuple, ext: str
     }
 
 
+def _decompose(media):
+    """(images, audio, fps or None) out of an IMAGE, a MASK or a VIDEO.
+
+    A MASK **is** a sequence of greyscale frames and an IMAGE **is** a sequence, so all
+    three arrive at the encoder by the same road - the same reasoning as `classify` in
+    `nkd_timeline.py`, and the same duck typing for VIDEO so any `VideoInput`
+    implementation works rather than one concrete class.
+    """
+    if isinstance(media, torch.Tensor):
+        # MASK is (B,H,W) → ndim 3; IMAGE is (B,H,W,C) → ndim 4.
+        if media.ndim == 3:
+            media = media.unsqueeze(-1).repeat(1, 1, 1, 3)
+        return media, None, None
+    if not (hasattr(media, "get_components") and hasattr(media, "get_frame_rate")):
+        raise ValueError("😺NKD Video Viewer got something that is not an image, "
+                         "mask or video.")
+    components = media.get_components()
+    return components.images, components.audio, float(components.frame_rate)
+
+
+def _view_item(path: str, kind: str = "temp") -> dict:
+    """The `/view` item (filename + subfolder) for a file already written under a root."""
+    root = (folder_paths.get_temp_directory() if kind == "temp"
+            else folder_paths.get_output_directory())
+    rel = os.path.relpath(path, root)
+    return {"filename": os.path.basename(rel),
+            "subfolder": os.path.dirname(rel).replace("\\", "/"),
+            "type": kind}
+
+
+# The reference is a PREVIEW artefact, never a deliverable: it goes to temp/ (which ComfyUI
+# empties) as h264, because that is the one thing every browser can play and seek.
+REFERENCE_PREFIX = "NKDVideoViewer/ref"
+REFERENCE_CRF = 23.0
+
+
 class NKDVideoUI(_UIOutput):
     """A UI payload the CORE frontend does not recognise.
 
@@ -476,10 +512,19 @@ class NKDVideoViewer(io.ComfyNode):
             # saved workflow gets silently re-wired. It could be arranged freely today only
             # because the node has not left this machine yet.
             inputs=[
-                io.Image.Input("images", optional=True,
-                               tooltip="Frames to encode. Takes priority over `video`."),
-                io.Video.Input("video", optional=True,
-                               tooltip="Re-encode an existing video instead of frames."),
+                # ONE input for all three. A MASK is a sequence of greyscale frames and a
+                # VIDEO is a sequence with a cadence of its own, so they all encode down the
+                # same road - two sockets for the same slot only made you look at the node
+                # to remember which one this material goes in.
+                #
+                # The id stays `images` while the LABEL says `media`: renaming the id would
+                # unwire the one input everybody has connected, and the label is what is
+                # actually read. The old `video` socket is gone from the schema but still
+                # accepted by `execute`, so a workflow saved with it wired keeps working.
+                io.MultiType.Input("images", [io.Image, io.Mask, io.Video],
+                                   display_name="media", optional=True,
+                                   tooltip="What to encode: an IMAGE batch, a MASK, or a "
+                                           "VIDEO to re-encode."),
                 io.Audio.Input("audio", optional=True,
                                tooltip="Overrides the audio carried by `video`."),
                 io.Float.Input("fps", default=24.0, min=0.01, max=1000.0, step=0.01),
@@ -554,6 +599,23 @@ class NKDVideoViewer(io.ComfyNode):
                     tooltip=(
                         "`counter` is ComfyUI's _00001_ suffix. `none` gives a clean name - "
                         "what you want once the version is carrying the uniqueness."
+                    ),
+                ),
+                # At the END, where anything new has to go now that the node has shipped:
+                # sockets are wired by INDEX, so inserting one silently re-wires every saved
+                # workflow.
+                #
+                # NOT an Autogrow list like the timeline's `media_N`, deliberately. Autogrow
+                # grows without limit and this viewer has exactly two roles - the render and
+                # the thing you wipe against - so slots three and up would be dead sockets
+                # the node quietly ignores. Two named inputs say which is which; a numbered
+                # list would only say it in the docs.
+                io.MultiType.Input(
+                    "reference", [io.Image, io.Mask, io.Video], optional=True,
+                    tooltip=(
+                        "The 'before' for the A/B compare - a video, a batch of frames or a "
+                        "mask. Wiring it beats the global NKD Reference slot: a connection "
+                        "is a statement, the slot is whatever ran last."
                     ),
                 ),
             ],
@@ -634,27 +696,74 @@ class NKDVideoViewer(io.ComfyNode):
         return apply_version(prefix, used), used
 
     @classmethod
+    def _reference_view(cls, reference, node_key: str, fps: float) -> dict | None:
+        """Turn the wired reference into a file the browser can seek, and say where it is.
+
+        Cached on tensor IDENTITY exactly like the main render (`reusable_render`): the
+        reference is typically the same clip run after run, and bumping a version must not
+        cost a second encode any more than it costs a first one.
+
+        A VIDEO is already a file, so it goes through `save_to`, which REMUXES rather than
+        re-encodes whenever the source is already h264/mp4 - the common case.
+        """
+        if reference is None:
+            return None
+        key = f"{node_key}:ref"
+        settings = (round(float(fps), 6),)
+        reuse = reusable_render(key, reference, None, settings, "mp4")
+        if reuse:
+            return _view_item(reuse)
+
+        is_video = not isinstance(reference, torch.Tensor)
+        if is_video:
+            width, height = reference.get_dimensions()
+        else:
+            frames, _, _ = _decompose(reference)
+            width, height = int(frames.shape[2]), int(frames.shape[1])
+        full_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+            REFERENCE_PREFIX, folder_paths.get_temp_directory(), width, height)
+        os.makedirs(full_folder, exist_ok=True)
+        path = os.path.join(full_folder, f"{filename}_{counter:05}_.mp4")
+
+        if is_video:
+            reference.save_to(path, format=Types.VideoContainer.MP4)
+        else:
+            # No audio: the reference is muted in the viewer either way - the mix you judge
+            # is the current render's.
+            encode_video(frames, path, FORMATS["mp4 / h264"], fps, REFERENCE_CRF,
+                         "veryfast", None, None, None)
+        remember_render(key, reference, None, settings, "mp4", path)
+        return _view_item(path)
+
+    @classmethod
     def execute(cls, images=None, video=None, audio=None, fps=24.0, format=None,
                 filename_prefix="video/NKD", save_output=True, pingpong=False,
-                versioning="off", version=1, numbering="counter"):
+                versioning="off", version=1, numbering="counter", reference=None):
         key = (format or {}).get("format", "mp4 / h264")
         spec = FORMATS[key]
 
-        # A VIDEO input has to be decomposed anyway to be re-encoded, and that is exactly
-        # what the core's GetVideoComponents does. Its audio only stands in when nothing
-        # was wired into `audio`.
-        if images is None:
-            if video is None:
-                raise ValueError("😺NKD Video Viewer needs either `images` or `video`.")
-            components = video.get_components()
-            images = components.images
-            if audio is None:
-                audio = components.audio
-            fps = float(components.frame_rate)
+        # `video` is the socket this node used to have. It is no longer in the schema, but a
+        # workflow saved while it was wired still sends it, and dropping the argument would
+        # turn that into a hard error on load.
+        media = images if images is not None else video
+        if media is None:
+            raise ValueError("😺NKD Video Viewer needs something wired into `media`.")
+        # Captured BEFORE anything derives from it: the identity that answers "same render
+        # as last time?" is the object the upstream node handed us, and both a MASK and a
+        # VIDEO are about to be rebuilt into frames - a fresh tensor every run, which would
+        # never match itself.
+        src_images = media
 
-        # Captured BEFORE pingpong rebuilds the batch: the identity that matters is the one
-        # handed to us by the upstream node, not a tensor we just derived from it.
-        src_images = images
+        # A VIDEO has to be decomposed anyway to be re-encoded, and that is exactly what the
+        # core's GetVideoComponents does. It is also the only one of the three with a
+        # cadence of its own, so it is the only one that overrides the `fps` widget; its
+        # audio only stands in when nothing was wired into `audio`.
+        images, media_audio, media_fps = _decompose(media)
+        if media_fps is not None:
+            fps = media_fps
+            if audio is None:
+                audio = media_audio
+
         src_audio = audio.get("waveform") if isinstance(audio, dict) else None
         # Everything that changes the BYTES. Destination settings (filename_prefix,
         # versioning, version, numbering, save_output) are deliberately absent - that is the
@@ -757,6 +866,8 @@ class NKDVideoViewer(io.ComfyNode):
             "size": _tree_size(path),
             "path": path,
             "version": used_version,
+            # None when nothing is wired, and the viewer falls back to the global slot.
+            "reference": cls._reference_view(reference, node_key, fps),
         }
         out = InputImpl.VideoFromComponents(
             Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps)))

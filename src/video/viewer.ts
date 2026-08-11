@@ -49,6 +49,9 @@ export interface VideoInfo {
   path?: string;
   /** The version `auto`/`manual` actually used, when versioning is on. */
   version?: number | null;
+  /** The reference WIRED into the node, already encoded to something seekable. Absent
+   *  when nothing is connected, in which case the global slot stands in. */
+  reference?: MediaRef | null;
 }
 
 /** Tallest the picture is allowed to get, in logical px. Widening the node must NOT grow
@@ -113,6 +116,12 @@ export class VideoViewer {
   private wipe = 0.5;                    // 0..1, how much of the reference is showing
   private holding = false;               // hold B: reference full-frame
   private hasRef = false;
+  /** The reference wired into the node. It BEATS the global slot: a connection is a
+   *  statement about this node, the slot is whatever happened to run last. */
+  private wired: MediaRef | null = null;
+  /** Bound once so it can be removed again: a viewer deleted from the graph must not keep
+   *  answering the api's events. */
+  private readonly onPromptDone = () => { if (!this.wired) void this.loadReference(); };
   private popout: Popout | null = null;
   /** Persisted on the node, not in a widget: what the viewer is doing does not change what
    *  the graph produces, and an input would re-encode the video on every toggle. */
@@ -250,21 +259,33 @@ export class VideoViewer {
     this.syncButtons();
     this.draw();
     // A fresh render is the "after"; the reference may have been set since the last run.
-    if (this.compare !== "off") void this.loadReference();
+    this.wired = info.reference ?? null;
+    if (this.wired) this.showReference(this.wired);
+    else if (this.compare !== "off") void this.loadReference();
     this.onHeightChange?.();
   }
 
   // ── Compare ─────────────────────────────────────────────────────────────────
 
+  /** Point the "before" layer at a file. */
+  private showReference(ref: MediaRef): void {
+    const url = viewUrl(ref);
+    if (this.refVideo.src !== url) this.refVideo.src = url;
+    this.hasRef = true;
+    this.applyCompare();
+  }
+
   /** Fetch whatever the global reference slot currently points at. */
   async loadReference(): Promise<void> {
+    // A wired reference wins, so this must never quietly replace it - every caller that
+    // asks for a reference (restoring a saved compare mode, cycling C, holding B) comes
+    // through here.
+    if (this.wired) { this.showReference(this.wired); return; }
     try {
       const r = await api.fetchApi("/nkd/ref/get_video");
       if (!r.ok) { this.hasRef = false; this.applyCompare(); return; }
-      const ref: MediaRef = await r.json();
-      const url = viewUrl(ref);
-      if (this.refVideo.src !== url) this.refVideo.src = url;
-      this.hasRef = true;
+      this.showReference(await r.json());
+      return;
     } catch {
       this.hasRef = false;
     }
@@ -283,7 +304,11 @@ export class VideoViewer {
         body: JSON.stringify(this.ref),
       });
       await this.loadReference();
-      this.flash("reference set");
+      // The button still sets the GLOBAL slot, which other viewers read - but this one is
+      // wired, so nothing here will change. Saying so beats a button that reports success
+      // and visibly does nothing.
+      this.flash(this.wired ? "set for other viewers (this one is wired)"
+        : "reference set");
     } catch {
       this.flash("could not set reference");
     }
@@ -293,8 +318,19 @@ export class VideoViewer {
     const next = COMPARE_ORDER[(COMPARE_ORDER.indexOf(this.compare) + 1)
       % COMPARE_ORDER.length];
     this.compare = next;
-    if (next !== "off" && !this.hasRef) void this.loadReference();
-    else this.applyCompare();
+    // A compare mode with nothing to compare against silently shows the render again,
+    // which reads as a dead button - and the two ways to supply a reference are not
+    // obvious, so name them both. The global slot only fills when an NKD Reference node
+    // actually EXECUTES: running this node on its own (its own ▶) targets only this node,
+    // so that branch never runs. Wiring `reference` is the answer in that case.
+    const done = () => {
+      this.applyCompare();
+      if (next !== "off" && !this.hasRef) {
+        this.flash("no reference — wire `reference`, or run an NKD Reference node");
+      }
+    };
+    if (next !== "off" && !this.hasRef) void this.loadReference().then(done);
+    else done();
     this.pushState();
   }
 
@@ -602,6 +638,12 @@ export class VideoViewer {
       else if (k === "end") { this.seekFrame(Number.MAX_SAFE_INTEGER); handled(); }
     });
 
+    // The global reference slot is settled at the END OF THE PROMPT, not when this node
+    // runs. NKD Reference and the viewer are both output nodes and nothing orders them, so
+    // fetching only from `setSource` regularly read the PREVIOUS run's reference - or none
+    // at all on the first run, which reads as "the Reference node never fired".
+    api.addEventListener("execution_success", this.onPromptDone);
+
     new ResizeObserver(() => this.draw()).observe(this.scrub);
     // Leaving full screen by Escape never runs the button's code path, so the repaint has
     // to hang off the event rather than off the toggle.
@@ -717,6 +759,7 @@ export class VideoViewer {
   }
 
   destroy(): void {
+    api.removeEventListener("execution_success", this.onPromptDone);
     if (this.raf) cancelAnimationFrame(this.raf);
     this.video.removeAttribute("src");
     this.video.load();

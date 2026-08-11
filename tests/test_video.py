@@ -546,6 +546,138 @@ def test_node_token_falls_back_to_a_clean_name():
     print("  ok  test_node_token_falls_back_to_a_clean_name")
 
 
+def test_a_mask_encodes_as_grey_frames():
+    """A MASK is (B,H,W) with no channel axis - it has to become greyscale, not crash.
+
+    Pinned both ways: the file comes back with the right frame count AND the picture is
+    actually grey, because widening the input would be pointless if the mask arrived as a
+    colour cast.
+    """
+    import nkd_video
+
+    mask = torch.linspace(0, 1, 5).view(5, 1, 1).expand(5, 16, 24).clone()
+    frames, audio, rate = nkd_video._decompose(mask)
+    assert frames.shape == (5, 16, 24, 3), frames.shape
+    assert audio is None and rate is None
+    assert torch.equal(frames[..., 0], frames[..., 2]), "a mask must stay grey"
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "mask.mp4")
+        encode_video(frames, path, FORMATS["mp4 / h264"], 24.0, 30.0, "veryfast",
+                     None, None, None)
+        assert probe(path)["frames"] == 5
+    print("  ok  test_a_mask_encodes_as_grey_frames")
+
+
+def test_one_media_input_takes_all_three_and_the_old_socket_still_lands():
+    """`images`, `video` and a MASK all arrive at the same slot now.
+
+    The `video` socket is gone from the schema but a workflow saved while it was wired
+    still sends it, so `execute` has to keep accepting it - and a VIDEO is the only one of
+    the three that overrides the fps widget, since it is the only one with a cadence.
+    """
+    import folder_paths
+    import nkd_video
+
+    class FakeVideo:                       # duck typed, like every VideoInput
+        def get_frame_rate(self):
+            return 30.0
+
+        def get_components(self):
+            class C:
+                images = ramp(6)
+                audio = tone(0.2)
+                frame_rate = Fraction(30, 1)
+            return C()
+
+    with tempfile.TemporaryDirectory() as out:
+        orig = folder_paths.get_output_directory
+        folder_paths.get_output_directory = lambda: out
+        try:
+            def go(**kw):
+                params = dict(
+                    fps=24.0, format={"format": "mp4 / h264", "crf": 30.0,
+                                      "preset": "veryfast"},
+                    filename_prefix="media/take", save_output=True, pingpong=False,
+                    versioning="off", version=1, numbering="none")
+                params.update(kw)
+                return nkd_video.NKDVideoViewer.execute(**params).ui.as_dict()
+
+            mask = torch.linspace(0, 1, 5).view(5, 1, 1).expand(5, 16, 24).clone()
+            assert go(images=mask)["nkd_meta"][0]["frame_count"] == 5
+
+            # A VIDEO on the SAME input: its rate wins over the widget.
+            meta = go(images=FakeVideo())["nkd_meta"][0]
+            assert meta["fps"] == 30.0, meta
+            assert meta["frame_count"] == 6, meta
+
+            # The removed socket, as an old workflow still sends it.
+            legacy = go(video=FakeVideo())["nkd_meta"][0]
+            assert legacy["fps"] == 30.0 and legacy["frame_count"] == 6, legacy
+
+            try:
+                go()
+                raise AssertionError("nothing wired must be an error, not an empty render")
+            except ValueError:
+                pass
+        finally:
+            folder_paths.get_output_directory = orig
+            nkd_video._ENCODED.clear()
+    print("  ok  test_one_media_input_takes_all_three_and_the_old_socket_still_lands")
+
+
+def test_a_wired_reference_is_encoded_once_and_pointed_at():
+    """The reference has to arrive as a file the browser can seek, and only encode once.
+
+    It is typically the same clip run after run, so re-encoding it on every version bump
+    would cost more than the render it is being compared against.
+    """
+    import folder_paths
+    import nkd_video
+
+    calls = []
+    real = nkd_video.encode_video
+    with tempfile.TemporaryDirectory() as out, tempfile.TemporaryDirectory() as tmp:
+        orig_out = folder_paths.get_output_directory
+        orig_tmp = folder_paths.get_temp_directory
+        folder_paths.get_output_directory = lambda: out
+        folder_paths.get_temp_directory = lambda: tmp
+        nkd_video.encode_video = lambda *a, **k: (calls.append(1), real(*a, **k))[1]
+        try:
+            frames, reference = ramp(4), ramp(4, h=16)
+
+            def go(version, ref=reference):
+                return nkd_video.NKDVideoViewer.execute(
+                    images=frames, fps=24.0,
+                    format={"format": "mp4 / h264", "crf": 30.0, "preset": "veryfast"},
+                    filename_prefix="ref/take", save_output=True, pingpong=False,
+                    versioning="manual", version=version, numbering="none",
+                    reference=ref,
+                ).ui.as_dict()["nkd_meta"][0]
+
+            meta = go(1)
+            assert len(calls) == 2, "render + reference"           # both encoded once
+            item = meta["reference"]
+            assert item and item["type"] == "temp", item
+            path = os.path.join(tmp, item["subfolder"], item["filename"])
+            assert os.path.isfile(path), path
+            assert probe(path)["frames"] == 4
+
+            same = go(2)
+            assert len(calls) == 2, "re-encoded the reference for a new version"
+            assert same["reference"] == item
+
+            # Nothing wired: the viewer falls back to the global slot, so this must be None
+            # rather than a stale item from the run before.
+            assert go(3, ref=None)["reference"] is None
+        finally:
+            nkd_video.encode_video = real
+            folder_paths.get_output_directory = orig_out
+            folder_paths.get_temp_directory = orig_tmp
+            nkd_video._ENCODED.clear()
+    print("  ok  test_a_wired_reference_is_encoded_once_and_pointed_at")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_"):

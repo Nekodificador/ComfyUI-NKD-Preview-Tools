@@ -18,25 +18,33 @@ from .nkd_timeline import NKDFreezeFrames, NKDTimeline  # noqa: E402
 from .nkd_video import NKDVideoViewer  # noqa: E402
 
 
-# Single active reference image for the workflow ("wireless" compare source).
-# (abs_path, item_dict) where item_dict has {filename, subfolder, type} for the
-# /view endpoint. None when no reference has been captured yet. Last
-# NKDReferenceImage to execute wins.
-_ref_image: tuple[str, dict] | None = None
+# The workflow's active reference slots ("wireless" compare sources): one IMAGE, one MASK
+# and one VIDEO, independent of each other, each `(abs_path, item_dict)` where item_dict is
+# the {filename, subfolder, type} the /view endpoint wants. Empty until something is
+# captured; within a slot, the last NKDReferenceImage to execute wins.
+#
+# **Parked on the server singleton, NOT in module globals, and that is load-bearing.**
+# Hot-reloading a custom node (comfyui_lg_hotreload and friends do `del sys.modules[...]`
+# then re-import) builds a NEW module object with fresh globals. The node that executes
+# then writes into the new module's `_ref_video`, while the aiohttp route - registered at
+# the FIRST import and never re-registered, since the route table is closed by then - keeps
+# reading the OLD module's, which stays None forever.
+#
+# Diagnosed live rather than guessed: the reference mp4 was sitting in temp/ with a
+# timestamp newer than the render, and `/nkd/ref/get_video` still answered "not set".
+# `PromptServer.instance` outlives every reload, so both halves meet on the same dict.
 _REF_PREFIX = "NKDReferenceImage/NRI-"
-
-# Single active reference MASK, independent of the reference image. Saved as a
-# grayscale PNG (white = masked region) so the viewer can tint it any colour and
-# opacity client-side. Same last-wins semantics as _ref_image.
-_ref_mask: tuple[str, dict] | None = None
 _REF_MASK_PREFIX = "NKDReferenceImage/NRM-"
-
-# Single active reference VIDEO, for the before/after comparison in NKD Video Viewer. Same
-# last-wins semantics as the two above. Written as mp4/h264 because that is what a browser
-# <video> can actually play and seek; `save_to` remuxes rather than re-encodes when the
-# source is already compatible.
-_ref_video: tuple[str, dict] | None = None
 _REF_VIDEO_PREFIX = "NKDReferenceImage/NRV-"
+
+
+def _slots() -> dict:
+    """The reference slots, on an object that survives a module reload."""
+    slots = getattr(PromptServer.instance, "_nkd_ref_slots", None)
+    if slots is None:
+        slots = {}
+        PromptServer.instance._nkd_ref_slots = slots
+    return slots
 
 
 
@@ -98,38 +106,30 @@ def _save_reference_video(video) -> tuple[str, dict]:
 
 routes = PromptServer.instance.routes
 
+def _serve_slot(kind: str, label: str) -> web.Response:
+    """One slot's /view item, or 404 saying which half is missing."""
+    entry = _slots().get(kind)
+    if entry is None:
+        return web.Response(status=404, text=f"No reference {label} set")
+    path, item = entry
+    if not os.path.isfile(path):
+        return web.Response(status=404, text=f"Reference {label} file missing")
+    return web.json_response(item)
+
+
 @routes.get("/nkd/ref/get")
 async def _nkd_ref_get(request: web.Request) -> web.Response:
-    """Return the active reference image's /view item, or 404 if unset."""
-    if _ref_image is None:
-        return web.Response(status=404, text="No reference image set")
-    path, item = _ref_image
-    if not os.path.isfile(path):
-        return web.Response(status=404, text="Reference file missing")
-    return web.json_response(item)
+    return _serve_slot("image", "image")
 
 
 @routes.get("/nkd/ref/get_mask")
 async def _nkd_ref_get_mask(request: web.Request) -> web.Response:
-    """Return the active reference mask's /view item, or 404 if unset."""
-    if _ref_mask is None:
-        return web.Response(status=404, text="No reference mask set")
-    path, item = _ref_mask
-    if not os.path.isfile(path):
-        return web.Response(status=404, text="Reference mask file missing")
-    return web.json_response(item)
-
+    return _serve_slot("mask", "mask")
 
 
 @routes.get("/nkd/ref/get_video")
 async def _nkd_ref_get_video(request: web.Request) -> web.Response:
-    """Return the active reference video's /view item, or 404 if unset."""
-    if _ref_video is None:
-        return web.Response(status=404, text="No reference video set")
-    path, item = _ref_video
-    if not os.path.isfile(path):
-        return web.Response(status=404, text="Reference video file missing")
-    return web.json_response(item)
+    return _serve_slot("video", "video")
 
 
 @routes.post("/nkd/ref/set_video")
@@ -144,7 +144,6 @@ async def _nkd_ref_set_video(request: web.Request) -> web.Response:
     Resolution is as strict as the core's /view: the file must resolve inside one of
     ComfyUI's own directories, so a crafted request cannot point this at the filesystem.
     """
-    global _ref_video
     try:
         body = await request.json()
     except Exception:
@@ -162,7 +161,8 @@ async def _nkd_ref_set_video(request: web.Request) -> web.Response:
     if not folder_paths.is_within_directory(root, path) or not os.path.isfile(path):
         return web.Response(status=403, text="Outside the allowed directories")
 
-    _ref_video = (path, {"filename": filename, "subfolder": subfolder, "type": kind})
+    _slots()["video"] = (path, {"filename": filename, "subfolder": subfolder,
+                                "type": kind})
     return web.json_response({"ok": True})
 
 
@@ -199,7 +199,6 @@ class NKDReferenceImage(io.ComfyNode):
 
     @classmethod
     def execute(cls, image):
-        global _ref_image, _ref_mask, _ref_video
         # A VIDEO is not a tensor at all. Detected by DUCK TYPING rather than by class, so
         # any VideoInput implementation works — the same rule `classify` uses in
         # nkd_timeline.py.
@@ -207,15 +206,15 @@ class NKDReferenceImage(io.ComfyNode):
             if not (hasattr(image, "get_components") and hasattr(image, "save_to")):
                 raise ValueError(
                     "😺NKD Reference got something that is not an image, mask or video.")
-            _ref_video = _save_reference_video(image)
+            _slots()["video"] = _save_reference_video(image)
             return io.NodeOutput()
         # MASK tensors are (B,H,W) → ndim 3; IMAGE tensors are (B,H,W,C) → ndim 4.
         if image.ndim == 3:
             path, item, _W, _H = _save_reference_mask_png(image)
-            _ref_mask = (path, item)
+            _slots()["mask"] = (path, item)
         else:
             path, item, _W, _H = _save_reference_png(image)
-            _ref_image = (path, item)
+            _slots()["image"] = (path, item)
         return io.NodeOutput()
 
 
