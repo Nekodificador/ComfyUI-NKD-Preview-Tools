@@ -730,3 +730,20 @@ comfyApp.registerExtension({
 // The Freeze Frames companion: its own extension, registered from the same bundle.
 registerFreezeFrames();
 registerVideoViewer();
+
+/**
+ * Shared surface for `js/popup_preview.js`.
+ *
+ * That file is hand-written and does NOT go through Vite, so it cannot import from `src/`.
+ * It imports this bundle instead (`import { projectChip } from "./nkd_timeline.js"`) -
+ * both are served flat from `js/`, and ESM caches the module, so the extension
+ * registrations above still run exactly once.
+ *
+ * These re-exports are load-bearing: without a name in the entry's export list, Rollup
+ * tree-shakes the code away and the popup's import resolves to undefined.
+ */
+export {
+  projectChip, revealButton, saveToProject, reveal, revealAvailable, loadConfig, config,
+} from "./projects";
+export { ensureStyles } from "./timeline/styles";
+export { mountDomWidget } from "./domHost";

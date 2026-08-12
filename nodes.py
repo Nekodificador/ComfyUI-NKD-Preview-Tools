@@ -1,4 +1,7 @@
 import os
+import shutil
+import subprocess
+import sys
 
 import folder_paths
 import numpy as np
@@ -14,6 +17,7 @@ from typing_extensions import override
 # Import a nivel de MÓDULO, no dentro de get_node_list: nkd_timeline registra su ruta
 # aiohttp al importarse, y get_node_list se ejecuta cuando la tabla de rutas ya está
 # cerrada — la ruta se perdía en silencio.
+from . import nkd_projects, nkd_video  # noqa: E402
 from .nkd_timeline import NKDFreezeFrames, NKDTimeline  # noqa: E402
 from .nkd_video import NKDVideoViewer  # noqa: E402
 
@@ -164,6 +168,134 @@ async def _nkd_ref_set_video(request: web.Request) -> web.Response:
     _slots()["video"] = (path, {"filename": filename, "subfolder": subfolder,
                                 "type": kind})
     return web.json_response({"ok": True})
+
+
+# ── Projects, "open folder", "save here" ──────────────────────────────────────
+
+def _resolve_view(body: dict) -> tuple[str, str, str, str]:
+    """`(abs_path, filename, subfolder, kind)` for a /view item, or raise.
+
+    The containment rule is the core's: resolve inside one of ComfyUI's own directories or
+    do not resolve at all. Same shape as `_nkd_ref_set_video` above - one helper now that
+    three routes need it.
+    """
+    filename = str(body.get("filename") or "")
+    subfolder = str(body.get("subfolder") or "")
+    kind = str(body.get("type") or "output")
+    if not filename or kind not in ("output", "temp", "input"):
+        raise ValueError("Bad file reference")
+    root = {"output": folder_paths.get_output_directory,
+            "temp": folder_paths.get_temp_directory,
+            "input": folder_paths.get_input_directory}[kind]()
+    path = os.path.abspath(os.path.join(root, subfolder, filename))
+    if not folder_paths.is_within_directory(root, path) or not os.path.isfile(path):
+        raise PermissionError("Outside the allowed directories")
+    return path, filename, subfolder, kind
+
+
+def _is_local(request: web.Request) -> bool:
+    """Is the caller on the same machine as the server?
+
+    Revealing a folder acts on the SERVER's desktop, so it only makes sense - and is only
+    safe - when the browser and the server are the same box. From a LAN client or a cloud
+    instance the button would either do nothing visible or pop a window on someone else's
+    screen, so the route says "not available" and the frontend never draws it.
+    """
+    return (request.remote or "") in ("127.0.0.1", "::1", "localhost")
+
+
+@routes.get("/nkd/open")
+async def _nkd_open(request: web.Request) -> web.Response:
+    """No args: whether revealing is possible at all. With a /view item: reveal it."""
+    local = _is_local(request)
+    if not request.query.get("filename"):
+        return web.json_response({"available": local})
+    if not local:
+        return web.Response(status=403, text="Only available on the ComfyUI machine")
+    try:
+        path, _, _, _ = _resolve_view(dict(request.query))
+    except ValueError as exc:
+        return web.Response(status=400, text=str(exc))
+    except PermissionError as exc:
+        return web.Response(status=403, text=str(exc))
+
+    folder = path if os.path.isdir(path) else os.path.dirname(path)
+    try:
+        if sys.platform == "win32":
+            # /select, highlights the file itself. The path has to be quoted-by-argument,
+            # not shell-escaped: os.startfile cannot select, so explorer it is.
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+        else:
+            # ponytail: xdg-open takes a directory, so Linux opens the folder without
+            # highlighting the file. dbus FileManager1.ShowItems would select it; not worth
+            # a dbus dependency until someone asks.
+            subprocess.Popen(["xdg-open", folder])
+    except Exception as exc:
+        return web.Response(status=500, text=f"Could not open the folder: {exc}")
+    return web.json_response({"ok": True, "folder": folder})
+
+
+@routes.get("/nkd/project/config")
+async def _nkd_project_config(request: web.Request) -> web.Response:
+    return web.json_response(nkd_projects.load())
+
+
+@routes.post("/nkd/project/active")
+async def _nkd_project_active(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.Response(status=400, text="Expected JSON")
+    return web.json_response(
+        nkd_projects.set_active(body.get("project"), body.get("category")))
+
+
+@routes.post("/nkd/project/config")
+async def _nkd_project_save(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.Response(status=400, text="Expected JSON")
+    return web.json_response(nkd_projects.save(body))
+
+
+@routes.post("/nkd/save")
+async def _nkd_save(request: web.Request) -> web.Response:
+    """Copy a preview out of temp/ into the active project's folder.
+
+    The Popup Preview's "save" used to be an `<a download>` - the browser's Downloads
+    folder, which is the one place a project system cannot reach. This puts the file where
+    the render would have gone.
+
+    Copy, never re-encode: the bytes already exist and are already what the user is looking
+    at. `%project%`/`%category%` are resolved here; `%node%` and `%date:...%` arrive already
+    expanded, because only the frontend knows the node's title and the core expands its own
+    date token at submit time.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.Response(status=400, text="Expected JSON")
+    try:
+        src, filename, _, _ = _resolve_view(body)
+    except ValueError as exc:
+        return web.Response(status=400, text=str(exc))
+    except PermissionError as exc:
+        return web.Response(status=403, text=str(exc))
+
+    cfg = nkd_projects.load()
+    prefix = nkd_video.resolve_tokens(
+        str(body.get("prefix") or cfg["image_prefix"]), nkd_projects.tokens())
+    ext = os.path.splitext(filename)[1] or ".png"
+    root = folder_paths.get_output_directory()
+    full_folder, name, counter, subfolder, _ = folder_paths.get_save_image_path(prefix, root)
+    os.makedirs(full_folder, exist_ok=True)
+    out_name = f"{name}_{counter:05}_{ext}"
+    shutil.copy2(src, os.path.join(full_folder, out_name))
+    return web.json_response({"filename": out_name, "subfolder": subfolder, "type": "output",
+                              "path": os.path.join(full_folder, out_name)})
 
 
 class NKDReferenceImage(io.ComfyNode):

@@ -14,6 +14,7 @@
 import { api } from "../comfyRuntime";
 import { type MediaRef, ensureThumbnails, thumbnailAt, viewUrl } from "../timeline/media";
 import { type Popout, openPopout } from "./popout";
+import { projectChip, revealButton } from "../projects";
 
 export type CompareMode = "off" | "wipe" | "difference";
 const COMPARE_ORDER: CompareMode[] = ["off", "wipe", "difference"];
@@ -95,6 +96,7 @@ export class VideoViewer {
   private readonly muteBtn: HTMLButtonElement;
   private readonly link: HTMLAnchorElement;
   private readonly pathLine: HTMLElement;
+  private readonly chip: { el: HTMLElement; destroy: () => void };
 
   private ref: MediaRef | null = null;
   private info: VideoInfo | null = null;
@@ -183,6 +185,9 @@ export class VideoViewer {
     this.link = el("a", "nkd-tl-btn", bar);
     this.link.title = "Save a copy";
     this.link.appendChild(el("i", "pi pi-download"));
+    // Only drawn when the server is this machine - see `revealAvailable`.
+    revealButton(bar, () => this.ref);
+    this.chip = projectChip(bar);
 
     this.status = el("div", "nkd-tl-status", bar);
     this.status.textContent = "no video yet";
@@ -760,6 +765,7 @@ export class VideoViewer {
 
   destroy(): void {
     api.removeEventListener("execution_success", this.onPromptDone);
+    this.chip.destroy();
     if (this.raf) cancelAnimationFrame(this.raf);
     this.video.removeAttribute("src");
     this.video.load();

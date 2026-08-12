@@ -34,6 +34,8 @@ const STATE_PROP = "nkdVideoView";
  * deferred by Neko to a later phase, deliberately.
  */
 const NAMING_TEMPLATES: [string, string][] = [
+  ["Project (versioned)", "%project%/%category%/%node%_v%v###%"],
+  ["Project (flat)", "%project%/%category%/%node%"],
   ["Simple (dated folder)", "video/%date:yyyy-MM-dd%/%node%"],
   ["Versioned (Nuke layout)", "video/%node%/v%v###%/%node%_v%v###%"],
   ["Dated + versioned", "video/%node%/%date:yyyy-MM-dd%/%node%_v%v###%"],

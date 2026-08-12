@@ -34,6 +34,13 @@ from comfy.cli_args import args
 from comfy_api.latest import InputImpl, Types, io
 from comfy_api.latest._io import _UIOutput
 
+# Both spellings on purpose: ComfyUI imports this as part of the package, the tests import
+# it flat (`from nkd_video import ...`), and a bare relative import breaks the second.
+try:
+    from . import nkd_projects
+except ImportError:  # pragma: no cover - flat import, tests only
+    import nkd_projects
+
 
 # ── Output naming, the way a Write node does it ───────────────────────────────
 # Nuke puts the version between the name and the frame padding
@@ -571,10 +578,12 @@ class NKDVideoViewer(io.ComfyNode):
                 io.String.Input(
                     "filename_prefix", default="video/NKD",
                     tooltip=(
-                        "Relative to output/. Tokens: %node% (this node's TITLE — rename "
-                        "the node to SH010_comp and it lands there), %v###% (version, one "
-                        "digit per hash), %res%, %fps%, %frames%, %duration%, %format%, "
-                        "%codec%, %time:HH-mm-ss%, plus ComfyUI's own %date:yyyy-MM-dd% and "
+                        "Relative to output/. Tokens: %project% and %category% (the active "
+                        "ones, picked in the chip on this node — one click moves every NKD "
+                        "node in the graph), %node% (this node's TITLE — rename the node to "
+                        "SH010_comp and it lands there), %v###% (version, one digit per "
+                        "hash), %res%, %fps%, %frames%, %duration%, %format%, %codec%, "
+                        "%time:HH-mm-ss%, plus ComfyUI's own %date:yyyy-MM-dd% and "
                         "%Node title.widget%. Tokens work in the folder part too."
                     ),
                 ),
@@ -623,6 +632,24 @@ class NKDVideoViewer(io.ComfyNode):
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo, io.Hidden.unique_id],
             is_output_node=True,
         )
+
+    @classmethod
+    def fingerprint_inputs(cls, filename_prefix="", **kwargs):
+        """Make the active project/category visible to the cache.
+
+        `CacheKeySetInputSignature` hashes the literal of every non-link input, and the
+        active project is NOT an input - it lives on the server. So without this, picking a
+        different project and hitting run would leave the signature untouched: ComfyUI
+        would short-circuit (`execution.py:443`) and hand back the cached UI, having
+        written nothing in the new folder. Silent, and it looks like the chip is broken.
+
+        What this returns is ADDED to the signature, never replaces it, which is exactly
+        what is wanted here. Returns None when the prefix uses neither token, so a graph
+        that pins its own path never re-renders because of a chip nobody touched.
+        """
+        if not nkd_projects.uses_tokens(str(filename_prefix or "")):
+            return None
+        return nkd_projects.signature()
 
     @classmethod
     def _node_title(cls) -> str:
@@ -679,6 +706,7 @@ class NKDVideoViewer(io.ComfyNode):
             "format": spec["ext"],
             "codec": key.split("/")[-1].strip(),
             "node": cls._node_title(),
+            **nkd_projects.tokens(),
         })
         if versioning != "off" and not has_version(prefix):
             # Turning versioning ON is the whole statement; having to also type `_v%v###%`

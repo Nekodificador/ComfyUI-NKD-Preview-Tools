@@ -186,7 +186,8 @@ body:hover #help{opacity:1}
     <div class="bar-row">
       <button id="btn-run" class="vbtn" title="Queue this node (Shift+Q)"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg><span class="lbl">Run</span></button>
       <button id="btn-copy" class="vbtn" title="Copy image to clipboard (C)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg><span class="lbl">Copy</span></button>
-      <button id="btn-save" class="vbtn" title="Save image (S)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg><span class="lbl">Save</span></button>
+      <button id="btn-save" class="vbtn" title="Save into the active project's folder (S)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span class="lbl">Save</span></button>
+      <button id="btn-dl" class="vbtn" title="Download a copy through the browser"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg><span class="lbl">Download</span></button>
       <button id="btn-load" class="vbtn" title="Send image to the target Load Image node"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/></svg><span class="lbl">To Load</span></button>
     </div>
   </div>
@@ -348,8 +349,12 @@ body:hover #help{opacity:1}
     });
     if (initImg) img.src = initImg;
 
-    // ── Save (download via <a download>, same as ComfyUI right-click) ─────────
-    function saveImage() {
+    // ── Save / download ──────────────────────────────────────────────────────
+    // "Save" files the image in the active NKD project, which this realm cannot do on its
+    // own - it is bridged in as __nkd_save, exactly like the Run button. "Download" is the
+    // browser download that "Save" used to be; it stays because the Downloads folder is
+    // the one place a project system cannot reach.
+    function downloadImage() {
         if (!imgMeta) return;
         // Derive the API origin from the current image src — it always contains
         // the correct host:port, including Comfy Desktop where location.origin
@@ -376,7 +381,10 @@ body:hover #help{opacity:1}
         a.click();
     }
 
-    document.getElementById("btn-save").addEventListener("click", saveImage);
+    document.getElementById("btn-dl").addEventListener("click", downloadImage);
+    // Falls back to the download if the bridge is missing, so the button is never a no-op.
+    document.getElementById("btn-save").addEventListener("click",
+        () => (window.__nkd_save ? window.__nkd_save() : downloadImage()));
 
     // ── Copy image to clipboard (fetch the shown image → ClipboardItem) ──────
     async function copyImage() {
@@ -446,7 +454,7 @@ body:hover #help{opacity:1}
         if (e.key === "Escape") window.close();
         if (e.key === "0" || e.key === "r") fit();
         if (e.key === "1") document.getElementById("btn-100").click();
-        if (e.key === "s" || e.key === "S") saveImage();
+        if (e.key === "s" || e.key === "S") { window.__nkd_save ? window.__nkd_save() : downloadImage(); }
         if (e.key === "c" || e.key === "C") copyImage();
     });
 

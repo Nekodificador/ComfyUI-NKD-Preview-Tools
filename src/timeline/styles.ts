@@ -147,6 +147,51 @@ const CSS = `
   min-height: 90px; border: 1px dashed #3a3d46; border-radius: 6px;
   color: rgba(255,255,255,0.35); font: 12px system-ui, sans-serif;
 }
+
+/* Project chip + its picker. Reuses .nkd-tl-btn and .nkd-tl-menu so a chip in the video
+   viewer, in the popup node and in a menu all read as the same control. */
+.nkd-proj-chip { gap: 5px; max-width: 190px; font: 11px system-ui, sans-serif; }
+.nkd-proj-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nkd-proj-head {
+  padding: 6px 8px 3px; color: rgba(255,255,255,0.35);
+  font: 10px system-ui, sans-serif; text-transform: uppercase; letter-spacing: 0.06em;
+}
+.nkd-proj-modal {
+  position: fixed; inset: 0; z-index: 10001;
+  background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center;
+}
+.nkd-proj-box {
+  display: flex; flex-direction: column; gap: 6px;
+  width: min(460px, 92vw); padding: 14px;
+  background: #1a1c22; border: 1px solid #3a3d46; border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+  font: 12px system-ui, sans-serif; color: #c8d0e0;
+}
+.nkd-proj-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.nkd-proj-lab { color: rgba(255,255,255,0.45); font-size: 11px; margin-top: 4px; }
+.nkd-proj-area, .nkd-proj-input {
+  background: #111318; border: 1px solid #3a3d46; border-radius: 4px;
+  color: #c8d0e0; padding: 6px 8px; font: 12px ui-monospace, monospace;
+  resize: vertical;
+}
+.nkd-proj-area { min-height: 96px; }
+.nkd-proj-area-sm { min-height: 56px; }
+.nkd-proj-row { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; }
+
+/* 😺NKD Popup Preview, in-node panel. Same bar, same buttons, same path line as the video
+   viewer - two nodes in one pack should not speak two different dialects.
+   The stage height is FIXED rather than aspect-driven: this is a thumbnail, and letting it
+   follow the image would re-lay-out the node on every run for no gain. */
+.nkd-pp-stage {
+  width: 100%; height: 150px; position: relative;
+  background: #000; border: 1px solid #3a3d46; border-radius: 6px;
+  overflow: hidden; cursor: zoom-in;
+}
+.nkd-pp-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.nkd-pp-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: rgba(255,255,255,0.28); font: 12px system-ui, sans-serif;
+}
 `;
 
 export function ensureStyles(): void {

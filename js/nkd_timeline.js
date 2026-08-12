@@ -3020,6 +3020,51 @@ const CSS = `
   min-height: 90px; border: 1px dashed #3a3d46; border-radius: 6px;
   color: rgba(255,255,255,0.35); font: 12px system-ui, sans-serif;
 }
+
+/* Project chip + its picker. Reuses .nkd-tl-btn and .nkd-tl-menu so a chip in the video
+   viewer, in the popup node and in a menu all read as the same control. */
+.nkd-proj-chip { gap: 5px; max-width: 190px; font: 11px system-ui, sans-serif; }
+.nkd-proj-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nkd-proj-head {
+  padding: 6px 8px 3px; color: rgba(255,255,255,0.35);
+  font: 10px system-ui, sans-serif; text-transform: uppercase; letter-spacing: 0.06em;
+}
+.nkd-proj-modal {
+  position: fixed; inset: 0; z-index: 10001;
+  background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center;
+}
+.nkd-proj-box {
+  display: flex; flex-direction: column; gap: 6px;
+  width: min(460px, 92vw); padding: 14px;
+  background: #1a1c22; border: 1px solid #3a3d46; border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+  font: 12px system-ui, sans-serif; color: #c8d0e0;
+}
+.nkd-proj-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.nkd-proj-lab { color: rgba(255,255,255,0.45); font-size: 11px; margin-top: 4px; }
+.nkd-proj-area, .nkd-proj-input {
+  background: #111318; border: 1px solid #3a3d46; border-radius: 4px;
+  color: #c8d0e0; padding: 6px 8px; font: 12px ui-monospace, monospace;
+  resize: vertical;
+}
+.nkd-proj-area { min-height: 96px; }
+.nkd-proj-area-sm { min-height: 56px; }
+.nkd-proj-row { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; }
+
+/* 😺NKD Popup Preview, in-node panel. Same bar, same buttons, same path line as the video
+   viewer - two nodes in one pack should not speak two different dialects.
+   The stage height is FIXED rather than aspect-driven: this is a thumbnail, and letting it
+   follow the image would re-lay-out the node on every run for no gain. */
+.nkd-pp-stage {
+  width: 100%; height: 150px; position: relative;
+  background: #000; border: 1px solid #3a3d46; border-radius: 6px;
+  overflow: hidden; cursor: zoom-in;
+}
+.nkd-pp-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.nkd-pp-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: rgba(255,255,255,0.28); font: 12px system-ui, sans-serif;
+}
 `;
 function ensureStyles() {
   if (document.getElementById(STYLE_ID)) return;
@@ -3390,6 +3435,216 @@ async function openPopout(root, title, onMoved) {
     isOpen: () => open
   };
 }
+const el$1 = (tag, cls, parent) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  parent == null ? void 0 : parent.appendChild(node);
+  return node;
+};
+let cache = null;
+let inflight = null;
+const listeners = /* @__PURE__ */ new Set();
+function onProjectChange(fn) {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+function announce(cfg) {
+  cache = cfg;
+  for (const fn of listeners) {
+    try {
+      fn();
+    } catch {
+    }
+  }
+  return cfg;
+}
+async function post(route, body) {
+  const res = await api.fetchApi(route, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  return announce(await res.json());
+}
+function config() {
+  return cache;
+}
+async function loadConfig(force = false) {
+  if (cache && !force) return cache;
+  if (!inflight || force) {
+    inflight = api.fetchApi("/nkd/project/config").then((r) => r.json()).then(announce).finally(() => {
+      inflight = null;
+    });
+  }
+  return inflight;
+}
+const setActive = (project, category) => post("/nkd/project/active", { project, category });
+const saveConfig = (cfg) => post("/nkd/project/config", cfg);
+function activeLabel() {
+  if (!cache) return "…";
+  return `${cache.active.project} · ${cache.active.category}`;
+}
+let availability = null;
+function revealAvailable() {
+  return availability ?? (availability = api.fetchApi("/nkd/open").then((r) => r.json()).then((j) => !!j.available).catch(() => false));
+}
+async function reveal(ref) {
+  const q = new URLSearchParams({
+    filename: ref.filename,
+    subfolder: ref.subfolder ?? "",
+    type: ref.type ?? "output"
+  });
+  await api.fetchApi(`/nkd/open?${q}`);
+}
+async function saveToProject(ref, prefix) {
+  const res = await api.fetchApi("/nkd/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...ref, prefix })
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+let openMenuEl = null;
+function closeMenu() {
+  window.removeEventListener("pointerdown", closeMenuOnce, true);
+  openMenuEl == null ? void 0 : openMenuEl.remove();
+  openMenuEl = null;
+}
+const closeMenuOnce = (e) => {
+  if (openMenuEl && e.target instanceof Node && openMenuEl.contains(e.target)) return;
+  closeMenu();
+};
+function openMenu(x, y, items) {
+  closeMenu();
+  const menu = el$1("div", "nkd-tl-menu", document.body);
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  for (const it of items) {
+    if (it.header) {
+      const h = el$1("div", "nkd-proj-head", menu);
+      h.textContent = it.label;
+      continue;
+    }
+    const row = el$1("button", "nkd-tl-menu-item", menu);
+    row.textContent = it.label;
+    if (it.active) row.classList.add("on");
+    row.addEventListener("pointerdown", (ev) => {
+      var _a;
+      ev.preventDefault();
+      ev.stopPropagation();
+      (_a = it.on) == null ? void 0 : _a.call(it);
+      closeMenu();
+    });
+  }
+  openMenuEl = menu;
+  setTimeout(() => window.addEventListener("pointerdown", closeMenuOnce, true), 0);
+}
+function projectChip(parent) {
+  const btn = el$1("button", "nkd-tl-btn nkd-proj-chip", parent);
+  btn.title = "Active project and category — where renders land. Shared by every NKD node.";
+  const icon = el$1("i", "pi pi-folder", btn);
+  const label = el$1("span", "nkd-proj-label", btn);
+  const paint = () => {
+    label.textContent = activeLabel();
+  };
+  paint();
+  void loadConfig().then(paint);
+  const off = onProjectChange(paint);
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const cfg = cache;
+    if (!cfg) {
+      void loadConfig(true).then(paint);
+      return;
+    }
+    const items = [{ label: "Project", header: true }];
+    for (const p of cfg.projects) {
+      items.push({
+        label: p.path ? `${p.name}  →  ${p.path}` : p.name,
+        active: p.name === cfg.active.project,
+        on: () => void setActive(p.name, void 0)
+      });
+    }
+    items.push({ label: "Category", header: true });
+    for (const c of cfg.categories) {
+      items.push({
+        label: c,
+        active: c === cfg.active.category,
+        on: () => void setActive(void 0, c)
+      });
+    }
+    items.push({ label: " ", header: true });
+    items.push({ label: "⚙ Manage projects…", on: () => openManager() });
+    const r = btn.getBoundingClientRect();
+    openMenu(r.left, r.bottom + 4, items);
+  });
+  btn.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+  return { el: btn, destroy: () => {
+    off();
+    icon.remove();
+  } };
+}
+function openManager() {
+  const cfg = cache;
+  if (!cfg) return;
+  const back = el$1("div", "nkd-proj-modal", document.body);
+  const box = el$1("div", "nkd-proj-box", back);
+  el$1("div", "nkd-proj-title", box).textContent = "NKD projects";
+  el$1("label", "nkd-proj-lab", box).textContent = "Projects — one per line, `Name = folder/path` to point it somewhere else";
+  const projects = el$1("textarea", "nkd-proj-area", box);
+  projects.value = cfg.projects.map((p) => p.path ? `${p.name} = ${p.path}` : p.name).join("\n");
+  el$1("label", "nkd-proj-lab", box).textContent = "Categories — one per line";
+  const cats = el$1("textarea", "nkd-proj-area nkd-proj-area-sm", box);
+  cats.value = cfg.categories.join("\n");
+  el$1("label", "nkd-proj-lab", box).textContent = "Where a saved still goes (tokens: %project% %category% %node% %date:yyyy-MM-dd%)";
+  const prefix = el$1("input", "nkd-proj-input", box);
+  prefix.value = cfg.image_prefix;
+  const row = el$1("div", "nkd-proj-row", box);
+  const close = () => back.remove();
+  const cancel = el$1("button", "nkd-tl-btn", row);
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", close);
+  const ok = el$1("button", "nkd-tl-btn on", row);
+  ok.textContent = "Save";
+  ok.addEventListener("click", () => {
+    const parsed = [];
+    for (const line of projects.value.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      const i = t.indexOf("=");
+      if (i < 0) {
+        parsed.push({ name: t });
+        continue;
+      }
+      const name = t.slice(0, i).trim();
+      const path = t.slice(i + 1).trim();
+      if (name) parsed.push(path ? { name, path } : { name });
+    }
+    void saveConfig({
+      ...cfg,
+      projects: parsed,
+      categories: cats.value.split("\n").map((s) => s.trim()).filter(Boolean),
+      image_prefix: prefix.value.trim() || cfg.image_prefix
+    }).then(close);
+  });
+  back.addEventListener("pointerdown", (ev) => {
+    if (ev.target === back) close();
+  });
+}
+function revealButton(parent, getRef) {
+  void revealAvailable().then((ok) => {
+    if (!ok) return;
+    const btn = el$1("button", "nkd-tl-btn", parent);
+    btn.title = "Show in the file manager";
+    el$1("i", "pi pi-folder-open", btn);
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const ref = getRef();
+      if (ref) void reveal(ref);
+    });
+  });
+}
 const COMPARE_ORDER = ["off", "wipe", "difference"];
 const REF_DRIFT_S = 0.25;
 const PREVIEW_MAX_H = 260;
@@ -3426,6 +3681,7 @@ class VideoViewer {
     __publicField(this, "muteBtn");
     __publicField(this, "link");
     __publicField(this, "pathLine");
+    __publicField(this, "chip");
     __publicField(this, "ref", null);
     __publicField(this, "info", null);
     __publicField(this, "raf", 0);
@@ -3512,6 +3768,8 @@ class VideoViewer {
     this.link = el("a", "nkd-tl-btn", bar);
     this.link.title = "Save a copy";
     this.link.appendChild(el("i", "pi pi-download"));
+    revealButton(bar, () => this.ref);
+    this.chip = projectChip(bar);
     this.status = el("div", "nkd-tl-status", bar);
     this.status.textContent = "no video yet";
     this.pathLine = el("div", "nkd-vid-path", this.root);
@@ -4068,6 +4326,7 @@ class VideoViewer {
   }
   destroy() {
     api.removeEventListener("execution_success", this.onPromptDone);
+    this.chip.destroy();
     if (this.raf) cancelAnimationFrame(this.raf);
     this.video.removeAttribute("src");
     this.video.load();
@@ -4077,6 +4336,8 @@ const NODE_NAME$1 = "NKDVideoViewer";
 const MIN_W$1 = 320;
 const STATE_PROP = "nkdVideoView";
 const NAMING_TEMPLATES = [
+  ["Project (versioned)", "%project%/%category%/%node%_v%v###%"],
+  ["Project (flat)", "%project%/%category%/%node%"],
   ["Simple (dated folder)", "video/%date:yyyy-MM-dd%/%node%"],
   ["Versioned (Nuke layout)", "video/%node%/v%v###%/%node%_v%v###%"],
   ["Dated + versioned", "video/%node%/%date:yyyy-MM-dd%/%node%_v%v###%"],
@@ -4712,3 +4973,14 @@ app.registerExtension({
 });
 registerFreezeFrames();
 registerVideoViewer();
+export {
+  config,
+  ensureStyles,
+  loadConfig,
+  mountDomWidget,
+  projectChip,
+  reveal,
+  revealAvailable,
+  revealButton,
+  saveToProject
+};

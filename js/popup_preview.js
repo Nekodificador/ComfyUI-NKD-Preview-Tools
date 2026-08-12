@@ -1,5 +1,13 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+// Shared with the timeline / video viewer. This file is hand-written and does NOT go
+// through Vite, so it cannot import from src/ - it imports the built bundle instead. Both
+// are served flat from js/, and ESM caches the module, so the bundle's own
+// registerExtension calls still run exactly once.
+import {
+    config as nkdConfig, ensureStyles, loadConfig, mountDomWidget, projectChip,
+    revealButton, saveToProject,
+} from "./nkd_timeline.js";
 
 const NODE_TYPE = "NKDPopupPreviewNode";
 const LS_PRIMARY = "nkd_primary_node_id";
@@ -325,10 +333,12 @@ const ICON = {
     swap:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 4l4 4-4 4M21 8H8M7 20l-4-4 4-4M3 16h13"/></svg>',
     mask:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>',
     pixel: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="1"/><path d="M9 9h1v6M14 9h1v6"/></svg>',
+    folder:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
 };
 
 function createViewerDOM(opts = {}) {
-    const { refUrl = null, maskUrl = null, apiBase = null, onQueue = null, onSendToLoad = null } = opts;
+    const { refUrl = null, maskUrl = null, apiBase = null, onQueue = null, onSendToLoad = null,
+            onSave = null } = opts;
     // imgMeta is mutable — caller can update via root._nkdSetMeta(meta)
     let imgMeta = opts.imgMeta || null;
     // Reference/mask availability is dynamic — refreshed via root._nkdSetRefs()
@@ -399,7 +409,8 @@ function createViewerDOM(opts = {}) {
                 <div class="nkd-bar-row">
                     <button class="nkd-btn-run nkd-vbtn" title="Queue this node (Shift+Q)" style="display:${onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-lbl">Run</span></button>
                     <button class="nkd-btn-copy nkd-vbtn" title="Copy image to clipboard (C)">${ICON.copy}<span class="nkd-lbl">Copy</span></button>
-                    <button class="nkd-btn-save nkd-vbtn" title="Save image (S)">${ICON.save}<span class="nkd-lbl">Save</span></button>
+                    <button class="nkd-btn-save nkd-vbtn" title="Save into the active project's folder (S)">${ICON.folder}<span class="nkd-lbl">Save</span></button>
+                    <button class="nkd-btn-dl nkd-vbtn" title="Download a copy through the browser">${ICON.save}<span class="nkd-lbl">Download</span></button>
                     <button class="nkd-btn-load nkd-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-lbl">To Load</span></button>
                 </div>
             </div>
@@ -582,8 +593,9 @@ function createViewerDOM(opts = {}) {
         tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = 1.0; apply();
     });
 
-    // Save — use api.apiURL which always resolves correctly in any context
-    root.querySelector(".nkd-btn-save").addEventListener("click", () => {
+    // Download — a browser download of the file that already exists. Uses api.apiURL,
+    // which resolves correctly in every context (Desktop returns a relative /api/... path).
+    const download = () => {
         if (!imgMeta) return;
         const p = new URLSearchParams({
             filename:  imgMeta.filename,
@@ -596,6 +608,13 @@ function createViewerDOM(opts = {}) {
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
+    };
+    root.querySelector(".nkd-btn-dl").addEventListener("click", download);
+
+    // Save — into the active project's folder. Falls back to the download when the host
+    // could not hand us a saver, so the button is never a no-op.
+    root.querySelector(".nkd-btn-save").addEventListener("click", () => {
+        if (onSave) void onSave(); else download();
     });
 
     // Pan & zoom
@@ -663,6 +682,21 @@ class PopupWin {
         this._maskUrl           = null;  // when set, viewer offers mask overlay
         this._container         = null;  // live DOM element (bEpic pattern)
         this._livePreviewHandler = null; // b_preview_with_metadata listener
+        this.savedRef           = null;  // where "save to project" last put it
+        this._imageListeners    = new Set();
+    }
+
+    /** Repaint hooks for the in-node panel. A Set, not one callback: the node panel and a
+     *  future second consumer must not silently evict each other. */
+    onImage(fn) {
+        this._imageListeners.add(fn);
+        return () => this._imageListeners.delete(fn);
+    }
+
+    _notifyImage() {
+        for (const fn of this._imageListeners) {
+            try { fn(); } catch { /* one bad listener must not stop the rest */ }
+        }
     }
 
     setTitle(title) {
@@ -690,6 +724,12 @@ class PopupWin {
     /** Send this window's current image to the target Load Image node. */
     _sendOwnToLoad() { sendImageToLoadImage(this.currentUrl); }
 
+    /** Save into the active project. Bridged into the separate realms the same way the
+     *  Run button is: those documents cannot reach `app`/`api` on their own. */
+    _saveOwn() {
+        return saveImage(this, app.graph?.getNodeById(Number(this.nodeId)));
+    }
+
     /** Called on node execution: update existing window or open a new one. */
     showImage(imgData) {
         this.currentUrl  = buildViewUrl(imgData);
@@ -698,6 +738,8 @@ class PopupWin {
             type:      imgData.type,
             subfolder: imgData.subfolder ?? "",
         };
+        this.savedRef = null;      // a new render is not the one that was filed away
+        this._notifyImage();
         // Only update if already open; never auto-open on execution.
         if (this.win && !this.win.closed) {
             // Update meta in the live DOM container (blank-window mode).
@@ -895,6 +937,7 @@ class PopupWin {
             apiBase: location.origin,
             onQueue: () => this._queueOwnNode(),
             onSendToLoad: () => this._sendOwnToLoad(),
+            onSave: () => this._saveOwn(),
         });
         container.style.cssText = "width:100%;height:100%;";
         // Hide the viewer's own close button — the panel titlebar has one.
@@ -1108,6 +1151,7 @@ class PopupWin {
             // window's node (the PiP document can't reach app/api on its own).
             pipWin.__nkd_queue = () => this._queueOwnNode();
             pipWin.__nkd_send_to_load = () => this._sendOwnToLoad();
+            pipWin.__nkd_save = () => this._saveOwn();
 
             // Execute scripts in the PiP window's context by appending new elements.
             parsed.querySelectorAll("script").forEach(s => {
@@ -1190,6 +1234,7 @@ class PopupWin {
             try {
                 this.win.__nkd_queue = () => this._queueOwnNode();
                 this.win.__nkd_send_to_load = () => this._sendOwnToLoad();
+                this.win.__nkd_save = () => this._saveOwn();
             } catch { /* cross-origin */ }
         });
 
@@ -1277,23 +1322,172 @@ class PopupWin {
 
 // ── SaveImage ─────────────────────────────────────────────────────────────────
 
-function saveImage(popup) {
-    if (!popup?.currentMeta) {
-        app.extensionManager?.toast?.add?.({
-            severity: "warn",
-            summary: "No Image",
-            detail: "Run the node first to generate an image.",
-            life: 4000,
-        });
-        return;
-    }
+function _noImageToast() {
+    app.extensionManager?.toast?.add?.({
+        severity: "warn",
+        summary: "No Image",
+        detail: "Run the node first to generate an image.",
+        life: 4000,
+    });
+}
+
+/** Download a copy through the browser. The Downloads folder is the one place a project
+ *  system cannot reach, so this stays available but is no longer what "Save" means. */
+function downloadImage(popup) {
+    if (!popup?.currentMeta) return _noImageToast();
     const { filename, type, subfolder } = popup.currentMeta;
     const p = new URLSearchParams({ filename, type, subfolder: subfolder ?? "" });
-    const url = api.apiURL(`/view?${p}`);
     const a = document.createElement("a");
-    a.href     = url;
+    a.href     = api.apiURL(`/view?${p}`);
     a.download = filename;
     a.click();
+}
+
+/**
+ * Copy the preview out of temp/ and into the active project's folder.
+ *
+ * The node's preview is written by the core into temp/, which ComfyUI empties - so
+ * "saving" it has to mean putting it somewhere that survives. Where that is comes from the
+ * project chip, and `%node%` is filled in here because only the frontend knows the node's
+ * title. `applyTextReplacements` expands the core's own `%date:...%` for the same reason it
+ * does at prompt-submit time.
+ */
+async function saveImage(popup, node) {
+    if (!popup?.currentMeta) return _noImageToast();
+    let prefix = undefined;
+    const cfg = nkdConfig();
+    if (cfg) {
+        prefix = cfg.image_prefix.replaceAll("%node%", _cleanTitle(node));
+        // The core expands its own %date:...% at prompt-submit time; nothing submits a
+        // prompt here, so it has to be done by hand or the token reaches the path literal.
+        try {
+            prefix = window.comfyAPI?.utils?.applyTextReplacements?.(app, prefix) ?? prefix;
+        } catch { /* older frontends: the token just stays literal */ }
+    }
+    try {
+        const saved = await saveToProject(popup.currentMeta, prefix);
+        app.extensionManager?.toast?.add?.({
+            severity: "success", summary: "Saved",
+            detail: `${saved.subfolder ? saved.subfolder + "/" : ""}${saved.filename}`,
+            life: 4000,
+        });
+        popup.savedRef = saved;
+        popup._notifyImage();
+        return saved;
+    } catch (err) {
+        app.extensionManager?.toast?.add?.({
+            severity: "error", summary: "Could not save", detail: String(err), life: 6000,
+        });
+        return null;
+    }
+}
+
+/** The node's TITLE is the naming field, same rule as the video viewer's `%node%`. The
+ *  default title carries an emoji and spaces, so it is not usable as a folder name. */
+function _cleanTitle(node) {
+    const raw = node?.title;
+    const bad = !raw || raw === node?.constructor?.title || /[^\w .-]/.test(raw);
+    return bad ? "NKD" : raw.trim().replace(/\s+/g, "_");
+}
+
+// ── The in-node panel ────────────────────────────────────────────────────────
+// Deliberately the SAME dialect as the video viewer: `.nkd-tl-bar` + `.nkd-tl-btn` +
+// `.nkd-vid-path`, mounted through the shared `mountDomWidget`. Four emoji-labelled
+// LiteGraph buttons and a viewer built out of DOM were two different-looking controls for
+// the same job, in the same pack.
+//
+// The old widgets carried `{ serialize: false }`, so dropping them touches nothing in
+// `widgets_values` and no saved workflow is disturbed.
+
+const MIN_PANEL_W = 260;
+
+function _el(tag, cls, parent) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    parent?.appendChild(node);
+    return node;
+}
+
+function _btn(bar, icon, title, on) {
+    const b = _el("button", "nkd-tl-btn", bar);
+    b.title = title;
+    _el("i", `pi ${icon}`, b);
+    b.addEventListener("click", (ev) => { ev.stopPropagation(); on(); });
+    b.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+    return b;
+}
+
+function buildNodePanel(node) {
+    ensureStyles();
+    void loadConfig();
+    const popup = getPopup(String(node.id));
+
+    const root  = _el("div", "nkd-tl nkd-vid");
+    const stage = _el("div", "nkd-pp-stage", root);
+    const img   = _el("img", "nkd-pp-img", stage);
+    const empty = _el("div", "nkd-pp-empty", stage);
+    empty.textContent = "no image yet";
+    stage.title = "Open the viewer";
+    stage.addEventListener("click", () => openViewer(node));
+
+    const bar = _el("div", "nkd-tl-bar", root);
+    _btn(bar, "pi-external-link", "Open the viewer window", () => openViewer(node));
+    _btn(bar, "pi-copy", "Copy the image to the clipboard",
+         () => copyImageToClipboard(popup.currentUrl));
+    _btn(bar, "pi-save", "Save into the active project's folder",
+         () => void saveImage(popup, node));
+    // Reveals whatever exists: the filed copy once there is one, the temp preview before.
+    revealButton(bar, () => popup.savedRef || popup.currentMeta);
+    const star = _btn(bar, "pi-star", "Set as the primary preview",
+                      () => { setPrimary(isPrimary(node.id) ? null : node.id);
+                              node.graph?.setDirtyCanvas(true, true); });
+    const chip = projectChip(bar);
+
+    // Where the image is now, or where "save" would put it. A destination you cannot see
+    // before you press the button is the thing this whole feature exists to fix.
+    const path = _el("div", "nkd-vid-path", root);
+    path.title = "Click to copy";
+    path.addEventListener("click", () => {
+        void navigator.clipboard?.writeText(path.dataset.full || "");
+        const was = path.textContent;
+        path.textContent = "copied";
+        setTimeout(() => { path.textContent = was; }, 900);
+    });
+
+    const mounted = mountDomWidget(node, {
+        name: "nkd_popup", type: "NKD_POPUP", root, minWidth: MIN_PANEL_W,
+        estimate: () => 200,
+    });
+
+    const paint = () => {
+        const url = popup.currentUrl;
+        img.style.display = url ? "" : "none";
+        empty.style.display = url ? "none" : "";
+        if (url && img.src !== url) img.src = url;
+        const ref = popup.savedRef || popup.currentMeta;
+        const where = ref
+            ? `${popup.savedRef ? "" : "temp/"}${ref.subfolder ? ref.subfolder + "/" : ""}${ref.filename}`
+            : "";
+        path.textContent = where;
+        path.dataset.full = popup.savedRef?.path || where;
+    };
+    paint();
+    const offImage = popup.onImage(paint);
+
+    const syncPrimary = () => star.classList.toggle("on", isPrimary(node.id));
+    syncPrimary();
+
+    node._nkdPanel = {
+        destroy: () => { offImage(); chip.destroy(); mounted.release(); },
+    };
+    requestAnimationFrame(() => mounted.resizeToContent());
+    return { syncPrimary, refresh: paint };
+}
+
+function openViewer(node) {
+    const p = getPopup(String(node.id));
+    p.setTitle(node.title || "Preview Window");
+    p.open();
 }
 
 // ── CopyImage ────────────────────────────────────────────────────────────────
@@ -1571,42 +1765,18 @@ app.registerExtension({
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             origCreated?.apply(this, arguments);
-            this.size = [210, 172];
+            this.size = [MIN_PANEL_W, 260];
 
-            // Suppress the default node thumbnail.
+            // Suppress the default node thumbnail: the panel below IS the thumbnail.
             this.onExecuted = function () {};
 
-            this.addWidget("button", "↗ Open Viewer", null, () => {
-                const p = getPopup(String(this.id));
-                p.setTitle(this.title || "Preview Window");
-                p.open();
-            }, { serialize: false });
+            const panel = buildNodePanel(this);
 
-            this.addWidget("button", "⧉ Copy Image", null, () => {
-                const p = getPopup(String(this.id));
-                copyImageToClipboard(p.currentUrl);
-            }, { serialize: false });
-
-            this.addWidget("button", "💾 Save Image", null, () => {
-                saveImage(getPopup(String(this.id)));
-            }, { serialize: false });
-
-            // Primary toggle button — label reflects state with filled/empty star.
-            const primaryWidget = this.addWidget("button", _primaryLabel(this.id), null, () => {
-                if (isPrimary(this.id)) {
-                    setPrimary(null);
-                } else {
-                    setPrimary(this.id);
-                }
-                _setWidgetLabel(primaryWidget, _primaryLabel(this.id));
-                this.graph?.setDirtyCanvas(true, true);
-            }, { serialize: false });
-
-            // Keep label in sync and paint primary outline on each redraw
-            // (canvas / classic LiteGraph only; V2 Vue uses node.color instead).
+            // Keep the primary outline painted on each redraw (canvas / classic LiteGraph
+            // only; V2 Vue uses node.color instead).
             const origDraw = this.onDrawForeground;
             this.onDrawForeground = function (ctx) {
-                _setWidgetLabel(primaryWidget, _primaryLabel(this.id));
+                panel.syncPrimary();
                 origDraw?.call(this, ctx);
                 if (!isPrimary(this.id)) return;
                 const w = this.size[0];
@@ -1638,6 +1808,7 @@ app.registerExtension({
             const key = String(this.id);
             // Clear primary if this node was the primary one.
             if (isPrimary(key)) setPrimary(null);
+            this._nkdPanel?.destroy();
             popups.get(key)?.destroy();
             popups.delete(key);
         };
@@ -1676,11 +1847,7 @@ app.registerExtension({
         return [
             {
                 content: "↗ Open Viewer",
-                callback: () => {
-                    const p = getPopup(String(node.id));
-                    p.setTitle(node.title || "Preview Window");
-                    p.open();
-                },
+                callback: () => openViewer(node),
             },
             {
                 content: "⧉ Copy Image",
@@ -1690,8 +1857,12 @@ app.registerExtension({
                 },
             },
             {
-                content: "💾 Save Image",
-                callback: () => saveImage(getPopup(String(node.id))),
+                content: "💾 Save to project",
+                callback: () => void saveImage(getPopup(String(node.id)), node),
+            },
+            {
+                content: "⤓ Download a copy",
+                callback: () => downloadImage(getPopup(String(node.id))),
             },
             {
                 content: isPrimary(node.id) ? "★ Unset Primary" : "☆ Set as Primary",
@@ -1703,17 +1874,6 @@ app.registerExtension({
     },
 });
 
-function _primaryLabel(nodeId) {
-    return isPrimary(nodeId) ? "★ Primary" : "☆ Set as Primary";
-}
-
-// V2 renderer reads widget.displayName, which is `label || name`. Setting only
-// `name` is invisible if `label` was ever assigned. Always set both.
-function _setWidgetLabel(widget, text) {
-    if (!widget) return;
-    widget.label = text;
-    widget.name  = text;
-}
 
 // ── NKDReferenceImage tint ──────────────────────────────────────────────────────
 // Colour the Reference node by what's wired into its MultiType input, mirroring

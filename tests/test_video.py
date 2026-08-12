@@ -353,6 +353,26 @@ def test_render_tokens_resolve():
     print("  ok  test_render_tokens_resolve")
 
 
+def test_fingerprint_only_speaks_up_for_prefixes_that_use_the_project():
+    """The guard against the silent failure of a global selector.
+
+    The active project is not an input, so ComfyUI's signature cannot see it: switching
+    project and re-running would return the cached UI and write nothing in the new folder.
+    `fingerprint_inputs` adds it back - but only when the prefix actually uses the tokens,
+    or every graph with a hardcoded path would re-render whenever the chip was touched.
+
+    Called with **kwargs on purpose: the core hands it EVERY input by name, tensors and all.
+    """
+    from nkd_video import NKDVideoViewer
+
+    assert NKDVideoViewer.fingerprint_inputs(
+        filename_prefix="video/NKD", fps=24.0, images=None) is None
+    stamped = NKDVideoViewer.fingerprint_inputs(
+        filename_prefix="%project%/%category%/%node%", fps=24.0, images=None)
+    assert isinstance(stamped, str) and stamped, stamped
+    print("  ok  test_fingerprint_only_speaks_up_for_prefixes_that_use_the_project")
+
+
 def test_execute_names_the_file_the_way_the_widgets_say():
     """The whole naming path, through the real `execute`.
 
