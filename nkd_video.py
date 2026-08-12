@@ -627,6 +627,21 @@ class NKDVideoViewer(io.ComfyNode):
                         "is a statement, the slot is whatever ran last."
                     ),
                 ),
+                # AT THE END because `widgets_values` is a positional array - a widget
+                # inserted anywhere else re-points every value in every saved workflow. It
+                # reads better next to `filename_prefix`, but "reads better" is not worth
+                # silently renaming everyone's files.
+                io.String.Input(
+                    "filename", default="",
+                    tooltip=(
+                        "Split the name from the folder: leave this EMPTY and "
+                        "filename_prefix keeps carrying both, exactly as before. Fill it in "
+                        "and filename_prefix becomes the folder only — so you can keep "
+                        "%project%/%category% up there and change how files are named down "
+                        "here without ever touching the project's directory. Same tokens "
+                        "work in both."
+                    ),
+                ),
             ],
             outputs=[io.Video.Output("video"), io.String.Output("filepath")],
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo, io.Hidden.unique_id],
@@ -689,14 +704,23 @@ class NKDVideoViewer(io.ComfyNode):
 
     @classmethod
     def _resolve_prefix(cls, filename_prefix, folder, versioning, version,
-                        key, spec, fps, images) -> tuple[str, int | None]:
+                        key, spec, fps, images, filename="") -> tuple[str, int | None]:
         """Render-time tokens, then the version. Returns (prefix, version used).
 
         `naming` is deliberately absent: the preset was already written into
         `filename_prefix` by the frontend's context-menu templates, which is also where
         `%date:...%` gets expanded.
+
+        `filename` splits the name off the folder, and is OPT-IN: empty means
+        `filename_prefix` still carries both, which is what every workflow saved before this
+        existed says. Treating the prefix as folder-only unconditionally would quietly start
+        writing `video/SH010/<name>` for anyone whose prefix was `video/SH010` - a changed
+        path with no error to notice it by.
         """
-        prefix = resolve_tokens(filename_prefix, {
+        joined = filename_prefix
+        if str(filename).strip():
+            joined = f"{filename_prefix.rstrip('/')}/{str(filename).strip().lstrip('/')}"
+        prefix = resolve_tokens(joined, {
             "fps": f"{fps:g}",
             "frames": len(images),
             "duration": f"{len(images) / max(fps, 1e-6):.2f}",
@@ -766,7 +790,8 @@ class NKDVideoViewer(io.ComfyNode):
     @classmethod
     def execute(cls, images=None, video=None, audio=None, fps=24.0, format=None,
                 filename_prefix="video/NKD", save_output=True, pingpong=False,
-                versioning="off", version=1, numbering="counter", reference=None):
+                versioning="off", version=1, numbering="counter", reference=None,
+                filename=""):
         key = (format or {}).get("format", "mp4 / h264")
         spec = FORMATS[key]
 
@@ -806,11 +831,14 @@ class NKDVideoViewer(io.ComfyNode):
         folder = (folder_paths.get_output_directory() if save_output
                   else folder_paths.get_temp_directory())
         prefix, used_version = cls._resolve_prefix(
-            filename_prefix, folder, versioning, version, key, spec, fps, images)
+            filename_prefix, folder, versioning, version, key, spec, fps, images,
+            filename)
 
         # Still through the core helper: it is the authority on containment (it refuses any
         # path escaping the output folder, folder_paths.py:552) and it creates the subfolder.
-        full_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+        # `base`, not `filename`: that is now an INPUT, and shadowing it here would make
+        # the split silently do nothing.
+        full_folder, base, counter, subfolder, _ = folder_paths.get_save_image_path(
             prefix, folder, images.shape[2], images.shape[1])
         os.makedirs(full_folder, exist_ok=True)
         # `none` drops ComfyUI's _00001_: once a version carries the uniqueness the counter
@@ -822,7 +850,7 @@ class NKDVideoViewer(io.ComfyNode):
         # `manual` version OVERWRITES it - which is exactly what re-rendering v003 does in
         # Nuke, and is the point of pinning a version by hand.
         versioned = used_version is not None
-        stem = filename if (numbering == "none" or versioned) else f"{filename}_{counter:05}_"
+        stem = base if (numbering == "none" or versioned) else f"{base}_{counter:05}_"
         # A PNG sequence is a FOLDER of files, so it gets one of its own rather than
         # scattering a few hundred frames next to whatever else lives there.
         seq_dir = os.path.join(full_folder, stem) if spec["ext"] == "png" else None

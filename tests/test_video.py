@@ -353,6 +353,37 @@ def test_render_tokens_resolve():
     print("  ok  test_render_tokens_resolve")
 
 
+def test_filename_splits_the_name_off_the_folder_and_is_opt_in():
+    """Empty `filename` MUST behave exactly as before it existed.
+
+    Every workflow saved until now has the whole path in `filename_prefix`. If the prefix
+    became folder-only unconditionally, `video/SH010` would quietly start writing
+    `video/SH010/<something>` - a different path, with nothing raising to notice it by.
+    """
+    from nkd_video import FORMATS, NKDVideoViewer
+
+    args = dict(folder=tempfile.gettempdir(), versioning="off", version=1,
+                key="mp4 / h264", spec=FORMATS["mp4 / h264"], fps=24.0,
+                images=ramp(n=4, h=8, w=8))
+
+    same, _ = NKDVideoViewer._resolve_prefix(filename_prefix="video/SH010", **args)
+    assert same == "video/SH010", same
+    blank, _ = NKDVideoViewer._resolve_prefix(filename_prefix="video/SH010", filename="   ",
+                                              **args)
+    assert blank == "video/SH010", "whitespace is not a filename"
+
+    split, _ = NKDVideoViewer._resolve_prefix(
+        filename_prefix="%project%/%category%", filename="%node%_take", **args)
+    assert split.endswith("/NKD_take"), split
+    assert split.count("/") == 2, split
+
+    # A stray slash on either side must not double up into an empty path segment.
+    joined, _ = NKDVideoViewer._resolve_prefix(
+        filename_prefix="shot/", filename="/name", **args)
+    assert joined == "shot/name", joined
+    print("  ok  test_filename_splits_the_name_off_the_folder_and_is_opt_in")
+
+
 def test_fingerprint_only_speaks_up_for_prefixes_that_use_the_project():
     """The guard against the silent failure of a global selector.
 

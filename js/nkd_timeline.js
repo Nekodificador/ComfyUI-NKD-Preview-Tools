@@ -4367,23 +4367,29 @@ const NODE_NAME$1 = "NKDVideoViewer";
 const MIN_W$1 = 320;
 const STATE_PROP = "nkdVideoView";
 const NAMING_TEMPLATES = [
-  ["Project (versioned)", "%project%/%category%/%node%_v%v###%"],
-  ["Project (flat)", "%project%/%category%/%node%"],
-  ["Simple (dated folder)", "video/%date:yyyy-MM-dd%/%node%"],
-  ["Versioned (Nuke layout)", "video/%node%/v%v###%/%node%_v%v###%"],
-  ["Dated + versioned", "video/%node%/%date:yyyy-MM-dd%/%node%_v%v###%"],
-  ["Flat", "video/%node%"]
+  ["Project (versioned)", "%project%/%category%", "%node%_v%v###%"],
+  ["Project (flat)", "%project%/%category%", "%node%"],
+  ["Project + dated folder", "%project%/%category%/%date:yyyy-MM-dd%", "%node%_v%v###%"],
+  ["Simple (dated folder)", "video/%date:yyyy-MM-dd%/%node%", ""],
+  ["Versioned (Nuke layout)", "video/%node%/v%v###%", "%node%_v%v###%"],
+  ["Flat", "video/%node%", ""]
 ];
-function applyTemplate(node, tpl) {
-  var _a, _b;
+function applyTemplate(node, folder, name) {
+  var _a, _b, _c;
   const prefix = findW(node, "filename_prefix");
   if (!prefix) return;
-  prefix.value = tpl;
-  (_a = prefix.callback) == null ? void 0 : _a.call(prefix, tpl);
+  prefix.value = folder;
+  (_a = prefix.callback) == null ? void 0 : _a.call(prefix, folder);
+  const file = findW(node, "filename");
+  if (file) {
+    file.value = name;
+    (_b = file.callback) == null ? void 0 : _b.call(file, name);
+  }
+  const tpl = `${folder}/${name}`;
   const versioning = findW(node, "versioning");
   if (versioning && tpl.includes("%v#") && versioning.value === "off") {
     versioning.value = "auto (next free)";
-    (_b = versioning.callback) == null ? void 0 : _b.call(versioning, versioning.value);
+    (_c = versioning.callback) == null ? void 0 : _c.call(versioning, versioning.value);
   }
   node.setDirtyCanvas(true, true);
 }
@@ -4410,9 +4416,9 @@ function registerVideoViewer() {
     name: "NKD.PreviewTools.Video",
     getNodeMenuItems(node) {
       if (node.comfyClass !== NODE_NAME$1) return [];
-      return NAMING_TEMPLATES.map(([label, tpl]) => ({
+      return NAMING_TEMPLATES.map(([label, folder, name]) => ({
         content: `⎘ Name: ${label}`,
-        callback: () => applyTemplate(node, tpl)
+        callback: () => applyTemplate(node, folder, name)
       }));
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {

@@ -33,20 +33,33 @@ const STATE_PROP = "nkdVideoView";
  * insert %node%, %v###%, %res%…) so the vocabulary is discoverable instead of memorised -
  * deferred by Neko to a later phase, deliberately.
  */
-const NAMING_TEMPLATES: [string, string][] = [
-  ["Project (versioned)", "%project%/%category%/%node%_v%v###%"],
-  ["Project (flat)", "%project%/%category%/%node%"],
-  ["Simple (dated folder)", "video/%date:yyyy-MM-dd%/%node%"],
-  ["Versioned (Nuke layout)", "video/%node%/v%v###%/%node%_v%v###%"],
-  ["Dated + versioned", "video/%node%/%date:yyyy-MM-dd%/%node%_v%v###%"],
-  ["Flat", "video/%node%"],
+/**
+ * `[label, folder, name]`. A template with a `name` fills BOTH widgets, which is the point
+ * of the split: the folder stays the project's and the naming scheme changes on its own.
+ * `name: ""` means the old shape - one string carrying the whole path.
+ */
+const NAMING_TEMPLATES: [string, string, string][] = [
+  ["Project (versioned)", "%project%/%category%", "%node%_v%v###%"],
+  ["Project (flat)", "%project%/%category%", "%node%"],
+  ["Project + dated folder", "%project%/%category%/%date:yyyy-MM-dd%", "%node%_v%v###%"],
+  ["Simple (dated folder)", "video/%date:yyyy-MM-dd%/%node%", ""],
+  ["Versioned (Nuke layout)", "video/%node%/v%v###%", "%node%_v%v###%"],
+  ["Flat", "video/%node%", ""],
 ];
 
-function applyTemplate(node: any, tpl: string): void {
+function applyTemplate(node: any, folder: string, name: string): void {
   const prefix = findW(node, "filename_prefix");
   if (!prefix) return;
-  prefix.value = tpl;
-  prefix.callback?.(tpl);
+  prefix.value = folder;
+  prefix.callback?.(folder);
+  // Always written, including the empty case: a template that left a previous name in place
+  // would silently produce a path neither template describes.
+  const file = findW(node, "filename");
+  if (file) {
+    file.value = name;
+    file.callback?.(name);
+  }
+  const tpl = `${folder}/${name}`;
   // A template carrying %v###% is useless with versioning off, and silently writing the
   // literal token into a filename is the failure nobody would attribute to this menu.
   const versioning = findW(node, "versioning");
@@ -85,9 +98,9 @@ export function registerVideoViewer(): void {
     name: "NKD.PreviewTools.Video",
     getNodeMenuItems(node: any) {
       if (node.comfyClass !== NODE_NAME) return [];
-      return NAMING_TEMPLATES.map(([label, tpl]) => ({
+      return NAMING_TEMPLATES.map(([label, folder, name]) => ({
         content: `⎘ Name: ${label}`,
-        callback: () => applyTemplate(node, tpl),
+        callback: () => applyTemplate(node, folder, name),
       }));
     },
     async beforeRegisterNodeDef(nodeType: any, nodeData: any) {
