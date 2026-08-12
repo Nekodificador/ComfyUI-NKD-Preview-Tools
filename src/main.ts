@@ -22,6 +22,7 @@ import {
 import { ensureStyles } from "./timeline/styles";
 import { registerFreezeFrames, syncAllFreezeNodes } from "./freezeFrames";
 import { registerVideoViewer } from "./video/register";
+import { registerProjectTopbar } from "./projects";
 import {
   MAX_INSET, ROW_SAFETY, findW, hideWidget, keepDomWidgetSized, setWidgetVisible,
 } from "./domHost";
@@ -730,6 +731,9 @@ comfyApp.registerExtension({
 // The Freeze Frames companion: its own extension, registered from the same bundle.
 registerFreezeFrames();
 registerVideoViewer();
+// The project picker in ComfyUI's top bar, so switching project does not require having a
+// node on screen.
+registerProjectTopbar();
 
 /**
  * Shared surface for `js/popup_preview.js`.

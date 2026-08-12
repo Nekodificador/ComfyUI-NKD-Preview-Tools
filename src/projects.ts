@@ -10,7 +10,8 @@
  * browser and the ComfyUI server are the same box (the backend decides, not us), so the
  * button is never drawn when it would do nothing.
  */
-import { api } from "./comfyRuntime";
+import { app as comfyApp, api } from "./comfyRuntime";
+import { ensureStyles } from "./timeline/styles";
 
 export interface ProjectEntry { name: string; path?: string }
 export interface ProjectConfig {
@@ -143,6 +144,10 @@ const closeMenuOnce = (e: Event): void => {
 type MenuItem = { label: string; on?: () => void; active?: boolean; header?: boolean };
 
 function openMenu(x: number, y: number, items: MenuItem[]): void {
+  // Here, not at the call sites: from the topbar nothing has mounted a node yet, so the
+  // stylesheet may not exist. An unstyled `.nkd-tl-menu` is not "slightly off" - it has no
+  // `position: fixed`, so it lands in the page flow at full window width.
+  ensureStyles();
   closeMenu();
   // On <body>, not inside the node: within the graph canvas it would be clipped by the
   // node box and scaled by the canvas zoom transform.
@@ -169,6 +174,31 @@ function openMenu(x: number, y: number, items: MenuItem[]): void {
   setTimeout(() => window.addEventListener("pointerdown", closeMenuOnce, true), 0);
 }
 
+/** The project/category list. One menu, opened from the chip, the topbar and the palette. */
+function openPicker(x: number, y: number): void {
+  const cfg = cache;
+  if (!cfg) return;
+  const items: MenuItem[] = [{ label: "Project", header: true }];
+  for (const p of cfg.projects) {
+    items.push({
+      label: p.path ? `${p.name}  →  ${p.path}` : p.name,
+      active: p.name === cfg.active.project,
+      on: () => void setActive(p.name, undefined),
+    });
+  }
+  items.push({ label: "Category", header: true });
+  for (const c of cfg.categories) {
+    items.push({
+      label: c,
+      active: c === cfg.active.category,
+      on: () => void setActive(undefined, c),
+    });
+  }
+  items.push({ label: " ", header: true });
+  items.push({ label: "⚙ Manage projects…", on: () => openManager() });
+  openMenu(x, y, items);
+}
+
 /**
  * A `Contanimation · test` button that opens the project/category picker.
  *
@@ -188,28 +218,9 @@ export function projectChip(parent: HTMLElement): { el: HTMLElement; destroy: ()
 
   btn.addEventListener("click", (ev) => {
     ev.stopPropagation();
-    const cfg = cache;
-    if (!cfg) { void loadConfig(true).then(paint); return; }
-    const items: MenuItem[] = [{ label: "Project", header: true }];
-    for (const p of cfg.projects) {
-      items.push({
-        label: p.path ? `${p.name}  →  ${p.path}` : p.name,
-        active: p.name === cfg.active.project,
-        on: () => void setActive(p.name, undefined),
-      });
-    }
-    items.push({ label: "Category", header: true });
-    for (const c of cfg.categories) {
-      items.push({
-        label: c,
-        active: c === cfg.active.category,
-        on: () => void setActive(undefined, c),
-      });
-    }
-    items.push({ label: " ", header: true });
-    items.push({ label: "⚙ Manage projects…", on: () => openManager() });
+    if (!cache) { void loadConfig(true).then(paint); return; }
     const r = btn.getBoundingClientRect();
-    openMenu(r.left, r.bottom + 4, items);
+    openPicker(r.left, r.bottom + 4);
   });
 
   // Prevent the node from being dragged when the chip is grabbed.
@@ -229,6 +240,7 @@ export function projectChip(parent: HTMLElement): { el: HTMLElement; destroy: ()
 function openManager(): void {
   const cfg = cache;
   if (!cfg) return;
+  ensureStyles();          // same reason as `openMenu`: this can open with no node mounted
   const back = el("div", "nkd-proj-modal", document.body);
   const box = el("div", "nkd-proj-box", back);
   el("div", "nkd-proj-title", box).textContent = "NKD projects";
@@ -276,6 +288,60 @@ function openManager(): void {
 
   // Click the backdrop to dismiss, but not a click that started inside the box.
   back.addEventListener("pointerdown", (ev) => { if (ev.target === back) close(); });
+}
+
+/** Open the picker anchored to an element, or centred if there is nothing to anchor to. */
+function openPickerAt(anchor?: Element | null): void {
+  const r = anchor?.getBoundingClientRect();
+  const x = r ? r.left : window.innerWidth / 2 - 90;
+  const y = r ? r.bottom + 6 : 80;
+  void loadConfig().then(() => openPicker(x, y));
+}
+
+/**
+ * The project picker in ComfyUI's own top bar, next to the Manager.
+ *
+ * `actionBarButtons` is the declarative API this frontend actually has (1.48.7): the store
+ * flat-maps it off every registered extension and renders a real one-click button. The
+ * legacy route - building a `ComfyButton` and splicing it into `app.menu.settingsGroup`,
+ * which is what ComfyUI-Manager and rgthree do - is kept working on purpose by the topbar's
+ * "legacy container", but it is DOM surgery against an API the frontend calls legacy.
+ *
+ * The label has to track the selection, and the store's list is a Vue `computed`, so
+ * REASSIGNING the array is what marks it dirty; mutating in place would leave the button
+ * showing the old project. Belt and braces: if the reassign does not repaint (the extension
+ * object may not be reactive on every build), the rendered label is patched directly.
+ */
+export function registerProjectTopbar(): void {
+  const button = () => ({
+    icon: "pi pi-folder",
+    label: activeLabel(),
+    tooltip: "Active NKD project and category — where renders land",
+    onClick: (ev?: Event) => openPickerAt(ev?.currentTarget as Element | null),
+  });
+
+  const ext: any = {
+    name: "NKD.Projects",
+    actionBarButtons: [button()],
+    commands: [{
+      id: "NKD.Projects.Pick",
+      label: "NKD: pick project and category",
+      function: () => openPickerAt(
+        document.querySelector('[data-testid="action-bar-buttons"] button')),
+    }],
+  };
+  comfyApp.registerExtension(ext);
+
+  onProjectChange(() => {
+    ext.actionBarButtons = [button()];
+    // The button carries no id of its own, so it is found by its label - the previous one,
+    // which is still what the DOM says until Vue catches up.
+    const host = document.querySelector('[data-testid="action-bar-buttons"]');
+    for (const span of host?.querySelectorAll("button span") ?? []) {
+      if (span.textContent && span.textContent.includes("·")) span.textContent = activeLabel();
+    }
+  });
+  void loadConfig();
 }
 
 /**

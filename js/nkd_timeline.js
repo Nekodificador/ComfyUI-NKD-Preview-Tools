@@ -3051,20 +3051,11 @@ const CSS = `
 .nkd-proj-area-sm { min-height: 56px; }
 .nkd-proj-row { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; }
 
-/* 😺NKD Popup Preview, in-node panel. Same bar, same buttons, same path line as the video
+/* 😺NKD Popup Preview, in-node panel: same bar, same buttons, same path line as the video
    viewer - two nodes in one pack should not speak two different dialects.
-   The stage height is FIXED rather than aspect-driven: this is a thumbnail, and letting it
-   follow the image would re-lay-out the node on every run for no gain. */
-.nkd-pp-stage {
-  width: 100%; height: 150px; position: relative;
-  background: #000; border: 1px solid #3a3d46; border-radius: 6px;
-  overflow: hidden; cursor: zoom-in;
-}
-.nkd-pp-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-.nkd-pp-empty {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  color: rgba(255,255,255,0.28); font: 12px system-ui, sans-serif;
-}
+   No thumbnail of its own: ComfyUI already renders the node's preview from nodeOutputs,
+   so one was the same pixels twice and a taller node for nothing.
+   (No backticks in this file: the CSS lives in a template literal.) */
 `;
 function ensureStyles() {
   if (document.getElementById(STYLE_ID)) return;
@@ -3516,6 +3507,7 @@ const closeMenuOnce = (e) => {
   closeMenu();
 };
 function openMenu(x, y, items) {
+  ensureStyles();
   closeMenu();
   const menu = el$1("div", "nkd-tl-menu", document.body);
   menu.style.left = `${x}px`;
@@ -3540,6 +3532,29 @@ function openMenu(x, y, items) {
   openMenuEl = menu;
   setTimeout(() => window.addEventListener("pointerdown", closeMenuOnce, true), 0);
 }
+function openPicker(x, y) {
+  const cfg = cache;
+  if (!cfg) return;
+  const items = [{ label: "Project", header: true }];
+  for (const p of cfg.projects) {
+    items.push({
+      label: p.path ? `${p.name}  →  ${p.path}` : p.name,
+      active: p.name === cfg.active.project,
+      on: () => void setActive(p.name, void 0)
+    });
+  }
+  items.push({ label: "Category", header: true });
+  for (const c of cfg.categories) {
+    items.push({
+      label: c,
+      active: c === cfg.active.category,
+      on: () => void setActive(void 0, c)
+    });
+  }
+  items.push({ label: " ", header: true });
+  items.push({ label: "⚙ Manage projects…", on: () => openManager() });
+  openMenu(x, y, items);
+}
 function projectChip(parent) {
   const btn = el$1("button", "nkd-tl-btn nkd-proj-chip", parent);
   btn.title = "Active project and category — where renders land. Shared by every NKD node.";
@@ -3553,31 +3568,12 @@ function projectChip(parent) {
   const off = onProjectChange(paint);
   btn.addEventListener("click", (ev) => {
     ev.stopPropagation();
-    const cfg = cache;
-    if (!cfg) {
+    if (!cache) {
       void loadConfig(true).then(paint);
       return;
     }
-    const items = [{ label: "Project", header: true }];
-    for (const p of cfg.projects) {
-      items.push({
-        label: p.path ? `${p.name}  →  ${p.path}` : p.name,
-        active: p.name === cfg.active.project,
-        on: () => void setActive(p.name, void 0)
-      });
-    }
-    items.push({ label: "Category", header: true });
-    for (const c of cfg.categories) {
-      items.push({
-        label: c,
-        active: c === cfg.active.category,
-        on: () => void setActive(void 0, c)
-      });
-    }
-    items.push({ label: " ", header: true });
-    items.push({ label: "⚙ Manage projects…", on: () => openManager() });
     const r = btn.getBoundingClientRect();
-    openMenu(r.left, r.bottom + 4, items);
+    openPicker(r.left, r.bottom + 4);
   });
   btn.addEventListener("pointerdown", (ev) => ev.stopPropagation());
   return { el: btn, destroy: () => {
@@ -3588,6 +3584,7 @@ function projectChip(parent) {
 function openManager() {
   const cfg = cache;
   if (!cfg) return;
+  ensureStyles();
   const back = el$1("div", "nkd-proj-modal", document.body);
   const box = el$1("div", "nkd-proj-box", back);
   el$1("div", "nkd-proj-title", box).textContent = "NKD projects";
@@ -3631,6 +3628,40 @@ function openManager() {
   back.addEventListener("pointerdown", (ev) => {
     if (ev.target === back) close();
   });
+}
+function openPickerAt(anchor) {
+  const r = anchor == null ? void 0 : anchor.getBoundingClientRect();
+  const x = r ? r.left : window.innerWidth / 2 - 90;
+  const y = r ? r.bottom + 6 : 80;
+  void loadConfig().then(() => openPicker(x, y));
+}
+function registerProjectTopbar() {
+  const button2 = () => ({
+    icon: "pi pi-folder",
+    label: activeLabel(),
+    tooltip: "Active NKD project and category — where renders land",
+    onClick: (ev) => openPickerAt(ev == null ? void 0 : ev.currentTarget)
+  });
+  const ext = {
+    name: "NKD.Projects",
+    actionBarButtons: [button2()],
+    commands: [{
+      id: "NKD.Projects.Pick",
+      label: "NKD: pick project and category",
+      function: () => openPickerAt(
+        document.querySelector('[data-testid="action-bar-buttons"] button')
+      )
+    }]
+  };
+  app.registerExtension(ext);
+  onProjectChange(() => {
+    ext.actionBarButtons = [button2()];
+    const host = document.querySelector('[data-testid="action-bar-buttons"]');
+    for (const span of (host == null ? void 0 : host.querySelectorAll("button span")) ?? []) {
+      if (span.textContent && span.textContent.includes("·")) span.textContent = activeLabel();
+    }
+  });
+  void loadConfig();
 }
 function revealButton(parent, getRef) {
   void revealAvailable().then((ok) => {
@@ -4973,6 +5004,7 @@ app.registerExtension({
 });
 registerFreezeFrames();
 registerVideoViewer();
+registerProjectTopbar();
 export {
   config,
   ensureStyles,

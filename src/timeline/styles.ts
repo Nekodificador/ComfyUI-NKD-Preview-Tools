@@ -178,20 +178,11 @@ const CSS = `
 .nkd-proj-area-sm { min-height: 56px; }
 .nkd-proj-row { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; }
 
-/* 😺NKD Popup Preview, in-node panel. Same bar, same buttons, same path line as the video
+/* 😺NKD Popup Preview, in-node panel: same bar, same buttons, same path line as the video
    viewer - two nodes in one pack should not speak two different dialects.
-   The stage height is FIXED rather than aspect-driven: this is a thumbnail, and letting it
-   follow the image would re-lay-out the node on every run for no gain. */
-.nkd-pp-stage {
-  width: 100%; height: 150px; position: relative;
-  background: #000; border: 1px solid #3a3d46; border-radius: 6px;
-  overflow: hidden; cursor: zoom-in;
-}
-.nkd-pp-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-.nkd-pp-empty {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  color: rgba(255,255,255,0.28); font: 12px system-ui, sans-serif;
-}
+   No thumbnail of its own: ComfyUI already renders the node's preview from nodeOutputs,
+   so one was the same pixels twice and a taller node for nothing.
+   (No backticks in this file: the CSS lives in a template literal.) */
 `;
 
 export function ensureStyles(): void {

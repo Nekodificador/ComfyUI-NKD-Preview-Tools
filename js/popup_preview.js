@@ -1353,7 +1353,8 @@ function downloadImage(popup) {
  * does at prompt-submit time.
  */
 async function saveImage(popup, node) {
-    if (!popup?.currentMeta) return _noImageToast();
+    const ref = node ? currentRef(node, popup) : popup?.currentMeta;
+    if (!ref) return _noImageToast();
     let prefix = undefined;
     const cfg = nkdConfig();
     if (cfg) {
@@ -1365,7 +1366,7 @@ async function saveImage(popup, node) {
         } catch { /* older frontends: the token just stays literal */ }
     }
     try {
-        const saved = await saveToProject(popup.currentMeta, prefix);
+        const saved = await saveToProject(ref, prefix);
         app.extensionManager?.toast?.add?.({
             severity: "success", summary: "Saved",
             detail: `${saved.subfolder ? saved.subfolder + "/" : ""}${saved.filename}`,
@@ -1401,6 +1402,23 @@ function _cleanTitle(node) {
 
 const MIN_PANEL_W = 260;
 
+/**
+ * The image this node is currently showing, as a /view item.
+ *
+ * `popup.currentMeta` is filled from the `executed` websocket event, which does NOT fire
+ * for a node served from cache, nor on a page reload, nor when a saved workflow is opened -
+ * so on its own it goes null exactly when the node is still visibly showing a picture, and
+ * every button that needs a file becomes a silent no-op. `app.nodeOutputs` is where the
+ * core keeps what it is actually rendering, so it is the honest source and the fallback.
+ */
+function currentRef(node, popup) {
+    return popup?.currentMeta || app.nodeOutputs?.[node.id]?.images?.[0] || null;
+}
+
+function _refUrl(ref) {
+    return ref ? buildViewUrl(ref) : null;
+}
+
 function _el(tag, cls, parent) {
     const node = document.createElement(tag);
     if (cls) node.className = cls;
@@ -1422,22 +1440,19 @@ function buildNodePanel(node) {
     void loadConfig();
     const popup = getPopup(String(node.id));
 
+    // NO thumbnail of our own: ComfyUI already renders the node's preview from
+    // `app.nodeOutputs`, so a second copy is the same pixels decoded twice and a taller
+    // node for nothing. Just the bar and the destination line.
     const root  = _el("div", "nkd-tl nkd-vid");
-    const stage = _el("div", "nkd-pp-stage", root);
-    const img   = _el("img", "nkd-pp-img", stage);
-    const empty = _el("div", "nkd-pp-empty", stage);
-    empty.textContent = "no image yet";
-    stage.title = "Open the viewer";
-    stage.addEventListener("click", () => openViewer(node));
 
     const bar = _el("div", "nkd-tl-bar", root);
     _btn(bar, "pi-external-link", "Open the viewer window", () => openViewer(node));
     _btn(bar, "pi-copy", "Copy the image to the clipboard",
-         () => copyImageToClipboard(popup.currentUrl));
+         () => copyImageToClipboard(popup.currentUrl || _refUrl(currentRef(node, popup))));
     _btn(bar, "pi-save", "Save into the active project's folder",
          () => void saveImage(popup, node));
     // Reveals whatever exists: the filed copy once there is one, the temp preview before.
-    revealButton(bar, () => popup.savedRef || popup.currentMeta);
+    revealButton(bar, () => popup.savedRef || currentRef(node, popup));
     const star = _btn(bar, "pi-star", "Set as the primary preview",
                       () => { setPrimary(isPrimary(node.id) ? null : node.id);
                               node.graph?.setDirtyCanvas(true, true); });
@@ -1456,29 +1471,28 @@ function buildNodePanel(node) {
 
     const mounted = mountDomWidget(node, {
         name: "nkd_popup", type: "NKD_POPUP", root, minWidth: MIN_PANEL_W,
-        estimate: () => 200,
+        estimate: () => 56,   // one button row plus the path line
     });
 
     const paint = () => {
-        const url = popup.currentUrl;
-        img.style.display = url ? "" : "none";
-        empty.style.display = url ? "none" : "";
-        if (url && img.src !== url) img.src = url;
-        const ref = popup.savedRef || popup.currentMeta;
+        const ref = popup.savedRef || currentRef(node, popup);
         const where = ref
-            ? `${popup.savedRef ? "" : "temp/"}${ref.subfolder ? ref.subfolder + "/" : ""}${ref.filename}`
-            : "";
+            ? `${popup.savedRef ? "" : (ref.type || "temp") + "/"}${ref.subfolder ? ref.subfolder + "/" : ""}${ref.filename}`
+            : "no image yet";
         path.textContent = where;
         path.dataset.full = popup.savedRef?.path || where;
     };
     paint();
+    // The `executed` event does not fire for a cached node, nor on reload, so the panel
+    // would sit on a stale line until the next real run. Cheap enough to re-read.
+    const tick = setInterval(paint, 1000);
     const offImage = popup.onImage(paint);
 
     const syncPrimary = () => star.classList.toggle("on", isPrimary(node.id));
     syncPrimary();
 
     node._nkdPanel = {
-        destroy: () => { offImage(); chip.destroy(); mounted.release(); },
+        destroy: () => { clearInterval(tick); offImage(); chip.destroy(); mounted.release(); },
     };
     requestAnimationFrame(() => mounted.resizeToContent());
     return { syncPrimary, refresh: paint };
@@ -1765,9 +1779,12 @@ app.registerExtension({
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             origCreated?.apply(this, arguments);
-            this.size = [MIN_PANEL_W, 260];
+            this.size = [MIN_PANEL_W, 120];
 
-            // Suppress the default node thumbnail: the panel below IS the thumbnail.
+            // Legacy no-op: on the old frontend this suppressed the node's own thumbnail.
+            // Current frontends render the preview from `app.nodeOutputs` instead, so it no
+            // longer suppresses anything - and that preview is now the ONE we want, which is
+            // why the panel below has no picture of its own.
             this.onExecuted = function () {};
 
             const panel = buildNodePanel(this);
