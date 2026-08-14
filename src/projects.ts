@@ -76,8 +76,11 @@ export async function loadConfig(force = false): Promise<ProjectConfig> {
 export const setActive = (project?: string, category?: string): Promise<ProjectConfig> =>
   post("/nkd/project/active", { project, category });
 
+// `/save`, not a POST on `/config`: a GET and a POST sharing one path share one aiohttp
+// resource, and a hot reloader that re-syncs handlers by path alone will copy one over the
+// other. See the note in nodes.py.
 export const saveConfig = (cfg: ProjectConfig): Promise<ProjectConfig> =>
-  post("/nkd/project/config", cfg);
+  post("/nkd/project/save", cfg);
 
 /** `Contanimation · test`, or a placeholder until the first fetch lands. */
 export function activeLabel(): string {

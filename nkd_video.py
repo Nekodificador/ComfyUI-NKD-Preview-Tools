@@ -576,7 +576,10 @@ class NKDVideoViewer(io.ComfyNode):
                 io.Boolean.Input("save_output", default=True,
                                  tooltip="Off writes to temp/ — a preview you can discard."),
                 io.String.Input(
-                    "filename_prefix", default="video/NKD",
+                    # Project-aware out of the box: a node you just dropped should already
+                    # land where the chip says. Only affects NEW nodes - a saved workflow
+                    # carries its own value in `widgets_values`.
+                    "filename_prefix", default="%project%/%category%/%node%",
                     tooltip=(
                         "Relative to output/. Tokens: %project% and %category% (the active "
                         "ones, picked in the chip on this node — one click moves every NKD "
@@ -632,6 +635,12 @@ class NKDVideoViewer(io.ComfyNode):
                 # reads better next to `filename_prefix`, but "reads better" is not worth
                 # silently renaming everyone's files.
                 io.String.Input(
+                    # MUST stay empty, and this is not cosmetic. A saved workflow's
+                    # `widgets_values` is SHORTER than the widget list now, so this one gets
+                    # the DEFAULT rather than a stored value - a non-empty default would
+                    # split every existing node's path behind its back. That is also why
+                    # the nice-looking pair (prefix=folder, filename=%node%) cannot be the
+                    # default: it is one context-menu click away instead.
                     "filename", default="",
                     tooltip=(
                         "Split the name from the folder: leave this EMPTY and "
