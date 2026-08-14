@@ -6,6 +6,7 @@ Preview tools for [ComfyUI](https://github.com/comfyanonymous/ComfyUI):
 
 - **NKD Popup Preview** — preview generated images in a persistent floating popup window, ideal for multi-monitor setups.
 - **NKD Timeline** — lay several videos and audio tracks on a multi-track timeline and get fps, frame count and resolution back as connectable sockets.
+- **NKD Audio Timeline** — the same editor without the picture: cut and arrange sound, set a level and drag fades into the joins.
 - **NKD Video Viewer** — save your video in the format you need and watch it in a player you can actually scrub, loop and compare against a previous take.
 
 
@@ -40,6 +41,16 @@ https://github.com/user-attachments/assets/75a9a3de-9ded-4d41-95f2-3de4421d63ac
 - **Gaps are regions to generate**: the `coverage` mask is white wherever the timeline is empty, so it goes straight into a temporal inpainting workflow with nothing to invert first.
 - **Frame quantising**: snap the range to what the model needs (`4n+1`, `8n+1` or a multiple of N), with the valid stops drawn on the ruler.
 - **Mismatched frame rates are flagged** on the clip instead of being resampled silently.
+- **Every clip carries its own sound**: a volume line you drag, and fade handles at either end to ease in and out of a hard cut — no separate audio lane needed.
+- **Several timelines in one workflow** each keep their own cuts, playback and preview, so a reference cut and the shot it came from can live side by side.
+
+### NKD Audio Timeline
+- **The same editor, without the picture**: drag, trim, blade, snap, undo, in/out points and the transport all work exactly as they do on video, in a node that stays small.
+- **Drop a video in and it takes the sound**: the socket accepts audio *or* video, and a video is read for its audio track alone. Pulling a voice out of a long take is instant, with no extractor node in the graph.
+- **A waveform you can actually work against**: peak and body, both channels side by side, and detail that follows the zoom right down to the individual sample. Switch to the dB scale and a quiet dialogue track becomes readable instead of a flat line.
+- **Level and fades on every clip**: drag the volume line — **Shift** snaps it to 3 dB steps, **Ctrl** is ten times finer — and pull the handles at either end for the fades. Blade a stretch and mute or fade just that piece.
+- **Lanes that stack**: `append` assembles a sequence, `stack` gives each source its own lane so two can overlap for a crossfade or a bed under dialogue.
+- **The numbers are sockets**: `audio`, `duration`, `frame_count` and `fps`.
 
 ### NKD Video Viewer
 - **A player, not a thumbnail**: drag the scrub bar frame by frame, step with the arrows, shuttle with J/K/L, loop it, and go full screen with the controls still there. There is a filmstrip along the scrub bar so you can find a shot by looking at it.
@@ -87,6 +98,18 @@ https://github.com/user-attachments/assets/75a9a3de-9ded-4d41-95f2-3de4421d63ac
 9. Right-click a clip to reinterpret it as a mask, or to set a track's blend mode — stack a before and an after on two tracks, set the top one to `difference`, and everything that matches goes black.
 10. Changed a file upstream? A different file is picked up on its own; press **reload** if you overwrote one keeping its name.
 11. Wire `images` onward, `coverage` into whatever consumes a mask if you are filling the gaps, and `current_image` if you want scrubbing to drive the rest of the graph.
+
+### NKD Audio Timeline
+
+1. Add the node under **`😺NKD Nodes/Preview` -> `😺NKD Audio Timeline`**.
+2. Connect a **Load Audio** to `media_0` — or a **Load Video**, if the sound you want is inside a take. Either way only the audio is read, and a `media_1` slot appears.
+3. Everything from the video timeline works the same: drag to move, drag the edges to trim, **Space** plays, **J K L** shuttle, **I** and **O** set the in and out points, **Ctrl+Z** undoes, **Ctrl + wheel** zooms and **F** fits.
+4. **W** blades the clip at the playhead — that plus a mute or a fade is how you take a stretch out.
+5. Drag the **volume line** across the clip up or down to set its level. **Shift** lands on 3 dB steps, **Ctrl** is ten times finer, and the dotted line marks 0 dB.
+6. Drag the **round handles** at the top corners inwards for the fade in and the fade out. To place one exactly, park the playhead and pick *Fade in to playhead* from the clip's right-click menu.
+7. Press the **wave button** in the bar to switch the waveform to a dB scale when a track is too quiet to read.
+8. Set `import_mode` to `stack` if you want each new source on its own lane so two can overlap; a lane to drop onto appears while you drag.
+9. Wire `audio` onward, and `frame_count` / `duration` / `fps` if the sound is what should decide how long the video is.
 
 ## 📝 Troubleshooting
 
