@@ -18,6 +18,7 @@ from typing_extensions import override
 # aiohttp al importarse, y get_node_list se ejecuta cuando la tabla de rutas ya está
 # cerrada — la ruta se perdía en silencio.
 from . import nkd_projects, nkd_video  # noqa: E402
+from .nkd_audio_timeline import NKDAudioTimeline  # noqa: E402
 from .nkd_timeline import NKDFreezeFrames, NKDTimeline  # noqa: E402
 from .nkd_video import NKDVideoViewer  # noqa: E402
 
@@ -252,7 +253,13 @@ async def _nkd_project_active(request: web.Request) -> web.Response:
         nkd_projects.set_active(body.get("project"), body.get("category")))
 
 
-@routes.post("/nkd/project/config")
+# NOT `POST /nkd/project/config`, and this is a trap worth knowing about: hot reloaders
+# re-sync routes by REPLACING handlers, and comfyui_lg_hotreload matches them by PATH ONLY,
+# never by method (`__init__.py:352`). With a GET and a POST sharing one path, they share one
+# aiohttp resource, so re-importing this module copied the POST handler over the GET one -
+# after which a GET answered "Expected JSON", because it really was running the saver.
+# Survives a restart, breaks again on the next reload. So: one path, one method.
+@routes.post("/nkd/project/save")
 async def _nkd_project_save(request: web.Request) -> web.Response:
     try:
         body = await request.json()
@@ -381,7 +388,7 @@ class NKDExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [NKDPopupPreviewNode, NKDReferenceImage, NKDTimeline,
-                NKDFreezeFrames, NKDVideoViewer]
+                NKDAudioTimeline, NKDFreezeFrames, NKDVideoViewer]
 
 async def comfy_entrypoint() -> NKDExtension:
     return NKDExtension()

@@ -16,19 +16,28 @@ import {
   type Clip, type FitMode, type QuantizeMode, type Timeline,
   QUANTIZE_FREE,
   BLEND_MODES, type BlendMode, type ImportMode,
-  clipsAt, cropToRange, effectiveCount, fitRect, materialRange, moveClip, moveClipToLane,
+  clampFades, levelStops, snapGainToDb, clipsAt, cropToRange, effectiveCount, fitRect, materialRange, moveClip,
+  moveClipToLane, MAX_GAIN,
   clampClipsToSources, clipExtent, expandClipsToSources, nativeFpsFor, newId, slotInUse, splitClip,
   trimToPlayhead,
   placementFor, quantizeStops, setTrackBlend, slipClip, snap, snapCandidates,
-  MAX_ZOOM, snapFrameToGrid, sortClips, sourceFrame, timelineSpan, trackBlend, trimEnd,
+  GAIN_DB_STEP, MAX_ZOOM, snapFrameToGrid, sortClips, sourceFrame, timelineSpan, trackBlend, trimEnd,
   trimStart, viewWindow, markerFrames, toggleMarker,
 } from "./model";
 import {
   type MediaInfo, type MediaRef,
-  PEAK_BUCKETS, audioBufferFor, ensureAudio, ensureThumbnails,
-  pauseAllVideos, peaksFor, pictureAt, setPooledReadyHandler, thumbnailAt,
+  VideoPool, audioBufferFor, ensureAudio, ensureThumbnails, peaksFor, thumbnailAt,
 } from "./media";
+import { drawWave, type WaveColors } from "./waveform";
 import { Transport } from "./player";
+
+/** Peak outline, RMS body, zero line. The body is the brighter of the two on purpose: it
+ *  is the part that reads as loudness, and the outline is the part that reads as risk. */
+const WAVE_COLORS: WaveColors = {
+  peak: "rgba(120,190,235,0.65)",
+  body: "rgba(165,225,255,0.95)",
+  zero: "rgba(255,255,255,0.22)",
+};
 
 export interface TimelineHost {
   getTimeline(): Timeline;
@@ -117,14 +126,31 @@ export const PREVIEW_MAX_H = 260;
 const TRACK_H = 46;
 const MASK_H = 30;
 const AUDIO_H = 34;
+const AUDIO_ONLY_H = 74;                  // audio lane when sound IS the content
 const MIN_VIDEO_TRACKS = 2;
 const MAX_VIDEO_TRACKS = 8;
+// ONE lane at rest. Unlike the video tracks, which keep a spare permanently so there is
+// somewhere to stack onto, an audio timeline that only ever needs one lane should not
+// spend half its height on an empty second one. The spare appears while dragging - see
+// `audioTrackCount`.
+const MIN_AUDIO_TRACKS = 1;
+const MAX_AUDIO_TRACKS = 6;
 const HANDLE_PX = 10;      // grab radius of an edge
 // Area ratio above which a source is worth warning about. 6x is a bit over 2.4x per
 // axis - the point where the decoding a scrub throws away stops being noise. 4K into
 // 832x480 is 21x.
 const SCALE_WARN_RATIO = 6;
 const HANDLE_CORE = 4;     // dead zone in the middle so tiny clips stay movable
+// Fade grips live in a shallow band at the TOP of the clip body, the way Premiere and
+// Resolve place them: the full-height edge underneath stays a trim handle, so the two
+// never fight over the corner when the fade is zero and both sit on the same pixel.
+// Tall enough to cover the whole DRAWN disc (radius 5 centred at y+6, so it ends at y+11):
+// a control you can see but cannot grab is worse than no control at all.
+const FADE_BAND_H = 12;
+const FADE_GRIP = 7;
+// Vertical reach of the volume line. Generous: it is a 1px line and the alternative is
+// hunting for it.
+const LEVEL_GRAB = 5;
 const SNAP_PX = 12;
 const MIN_LEN = 1;
 
@@ -146,7 +172,9 @@ type Hit =
   | { kind: "outPoint" }
   | { kind: "mute"; clip: Clip; lane: Lane }
   | { kind: "clip"; clip: Clip; lane: Lane }
-  | { kind: "edge"; clip: Clip; side: "start" | "end"; lane: Lane };
+  | { kind: "edge"; clip: Clip; side: "start" | "end"; lane: Lane }
+  | { kind: "fade"; clip: Clip; side: "in" | "out"; lane: Lane }
+  | { kind: "level"; clip: Clip; lane: Lane };
 
 type ClipOrigin = { start: number; length: number; trimIn: number; track: number };
 
@@ -161,6 +189,12 @@ type Drag = {
   origins: Map<string, { clip: Clip; from: ClipOrigin }>;
   moved: boolean;
   slip: boolean;
+  /** Fade length at the moment of grabbing, so each move recomputes from the original
+   *  rather than accumulating - the same reason `origins` snapshots. */
+  fadeFrom: number;
+  /** Same, for the volume line: level and pointer y when it was grabbed. */
+  gainFrom: number;
+  startY: number;
 };
 
 export class TimelineEditor {
@@ -190,6 +224,10 @@ export class TimelineEditor {
   /** Show the mask lane tinted over the picture in the monitor. */
   private maskOverlay = false;
   private maskBtn!: HTMLButtonElement;
+  private dbBtn!: HTMLButtonElement;
+  /** Draw the wave on a logarithmic scale. UI-only, like the mask overlay: it changes
+   *  nothing the backend renders, so it stays out of the widget and its cache signature. */
+  private waveDb = false;
   /** Scratch canvas for tinting the mask; reused so playback does not allocate. */
   private readonly tintCanvas = document.createElement("canvas");
   /** Last quantise/fps pair we warned about, so the toast fires on CHANGE only. */
@@ -197,11 +235,26 @@ export class TimelineEditor {
   /** Last (sources, output size) pair warned about. See `checkSourceScale`. */
   private lastScaleWarning = ""; 
   readonly transport: Transport;
+  /** The `<video>` elements THIS editor scrubs. One per node: sharing them is what used to
+   *  make two Timeline nodes on the same file drag each other's playhead. */
+  readonly pool = new VideoPool();
   /** Called whenever the intrinsic height changes, so the host can resize the node. */
   onHeightChange: (() => void) | null = null;
 
-  constructor(host: TimelineHost) {
+  /**
+   * Sound only: no monitor, no picture lanes, and the audio lanes get the whole widget.
+   *
+   * A MODE on this class rather than a second editor, because the interaction is
+   * identical - drag, trim, blade, snap, undo, in/out, transport - and a parallel
+   * implementation of all that would drift within a month. The lane geometry already
+   * funnels through `trackCount`/`maskH`/`audioTop`/`laneHeight`, so the mode is those
+   * four accessors and the monitor, not a flag sprinkled through the drawing code.
+   */
+  private readonly audioOnly: boolean;
+
+  constructor(host: TimelineHost, opts: { audioOnly?: boolean } = {}) {
     this.host = host;
+    this.audioOnly = !!opts.audioOnly;
     this.transport = new Transport({
       getTimeline: () => host.getTimeline(),
       getFps: () => host.getFps(),
@@ -212,7 +265,7 @@ export class TimelineEditor {
       srcFpsFor: (src) => host.sourceFor(src)?.info?.fps ?? host.getFps(),
     });
     this.transport.onChange = () => {
-      if (this.transport.rate !== 1) pauseAllVideos();
+      if (this.transport.rate !== 1) this.pool.pauseAll();
       if (this.transport.rate === 0) this.host.commit();   // persist on stop
       this.requestRender();
     };
@@ -233,7 +286,10 @@ export class TimelineEditor {
     this.status.className = "nkd-tl-status";
 
     this.buildBar();
-    this.root.append(this.preview, this.canvas, this.bar);
+    // The preview canvas still EXISTS when there is no picture - `renderPreview` and the
+    // resize path both write to it unconditionally - it simply never enters the DOM.
+    if (this.audioOnly) this.root.append(this.canvas, this.bar);
+    else this.root.append(this.preview, this.canvas, this.bar);
     this.applyTimelineHeight();
 
     this.canvas.addEventListener("pointerdown", this.onDown);
@@ -242,7 +298,7 @@ export class TimelineEditor {
     this.canvas.addEventListener("contextmenu", this.onContextMenu);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
     // Repaint as soon as a source has a frame to show, rather than waiting for a poll.
-    setPooledReadyHandler(() => this.requestRender());
+    this.pool.onReady = () => this.requestRender();
     this.root.addEventListener("keydown", this.onKey);
     this.root.tabIndex = 0;
   }
@@ -311,6 +367,13 @@ export class TimelineEditor {
       () => this.transport.toggle());
     this.maskBtn = icon("pi-eye-slash", "Show the mask over the picture (M)",
       () => this.toggleMaskOverlay());
+    // A dialogue track peaking at -25 dBFS is a flat line on a linear wave. This is the
+    // toggle every audio editor has for exactly that, not a preference.
+    this.dbBtn = mdi("mdi-sine-wave", "pi-chart-line",
+      "Waveform scale: linear / logarithmic (dB)", () => {
+        this.waveDb = !this.waveDb;
+        this.dbBtn.classList.toggle("on", this.waveDb);
+      });
 
     this.bar.append(
       icon("pi-step-backward", "Reverse (J)", () => this.transport.shuttle(-1)),
@@ -344,7 +407,10 @@ export class TimelineEditor {
       icon("pi-sync", "Conform: take fps and resolution from the first clip",
         () => this.host.conformToFirstClip()),
       magnet,
-      this.maskBtn,
+      // The mask overlay is a picture control: with no monitor there is nothing to lay it
+      // over, so it would be a button that does nothing.
+      ...(this.audioOnly ? [] : [this.maskBtn]),
+      this.dbBtn,
       icon("pi-refresh", "Reload the connected media (after changing a file)",
         () => this.reloadSources()),
       icon("pi-undo", "Undo (Ctrl+Z)", () => this.undo()),
@@ -380,14 +446,52 @@ export class TimelineEditor {
   }
 
   private get trackCount(): number {
+    if (this.audioOnly) return 0;
     let max = MIN_VIDEO_TRACKS;
     for (const c of this.tl.clips) max = Math.max(max, c.track + 1);
     return Math.min(max, MAX_VIDEO_TRACKS);
   }
 
+  /** The mask lane vanishes with the picture; keeping a 30px empty strip would read as a
+   *  broken layout rather than as "there is nothing here". */
+  private get maskH(): number {
+    return this.audioOnly ? 0 : MASK_H;
+  }
+
+  /** One tall lane when the sound is the content, one thin strip when it is a companion
+   *  to the picture. The wave needs the height: min/max and RMS are indistinguishable at
+   *  34px. */
+  private get audioLaneH(): number {
+    return this.audioOnly ? AUDIO_ONLY_H : AUDIO_H;
+  }
+
+  /**
+   * Audio lanes stack only in audio-only mode - the video Timeline has exactly one.
+   *
+   * Grows to fit what is used, plus ONE SPARE while a clip is being dragged. Without the
+   * spare there would be no row to drop onto and the count could never rise past what it
+   * already is; with it always on, a single-lane timeline would permanently show an empty
+   * second lane. It costs a lane's height for the length of a drag, and only then.
+   */
+  private get audioTrackCount(): number {
+    if (!this.audioOnly) return 1;
+    let max = MIN_AUDIO_TRACKS;
+    for (const a of this.tl.audio) max = Math.max(max, (a.track ?? 0) + 1);
+    const dragging = this.drag?.hit.kind === "clip" && this.drag.hit.lane === "audio";
+    return Math.min(max + (dragging ? 1 : 0), MAX_AUDIO_TRACKS);
+  }
+
+  /** Which audio lane a y coordinate falls on. NOT inverted, unlike the video tracks: an
+   *  additive mix has no z-order, so there is no "on top" for the rows to depict. */
+  private audioTrackOf(y: number): number {
+    const row = Math.floor((y - this.audioTop) / this.audioLaneH);
+    return Math.max(0, Math.min(this.audioTrackCount - 1, row));
+  }
+
   /** Intrinsic height of the timeline canvas in logical px. */
   get timelineHeight(): number {
-    return RULER_H + this.trackCount * TRACK_H + MASK_H + AUDIO_H;
+    return RULER_H + this.trackCount * TRACK_H + this.maskH
+      + this.audioTrackCount * this.audioLaneH;
   }
 
   /**
@@ -433,7 +537,7 @@ export class TimelineEditor {
   }
 
   private get audioTop(): number {
-    return this.maskTop + MASK_H;
+    return this.maskTop + this.maskH;
   }
 
   private laneOf(lane: Lane): Clip[] {
@@ -444,11 +548,30 @@ export class TimelineEditor {
 
   private laneTop(lane: Lane, track: number): number {
     return lane === "video" ? this.trackTop(track)
-      : lane === "mask" ? this.maskTop : this.audioTop;
+      : lane === "mask" ? this.maskTop
+      : this.audioTop + Math.max(0, track) * this.audioLaneH;
+  }
+
+  /**
+   * Where a level sits inside a clip body.
+   *
+   * The TOP of the clip is MAX_GAIN, not unity, so the boost half of the range is
+   * reachable by dragging rather than only from a menu - which puts unity at mid height,
+   * exactly the resting position Resolve draws its volume line at. Linear in amplitude,
+   * so a linear fade stays a straight ramp on screen; a dB mapping would bow it and the
+   * ramp is the thing the shape has to communicate.
+   */
+  private levelY(level: number, y: number, h: number): number {
+    return y + h * (1 - Math.max(0, Math.min(MAX_GAIN, level)) / MAX_GAIN);
+  }
+
+  /** Inverse of `levelY`, for the drag. */
+  private levelOf(py: number, y: number, h: number): number {
+    return Math.max(0, Math.min(MAX_GAIN, (1 - (py - y) / Math.max(1, h)) * MAX_GAIN));
   }
 
   private laneHeight(lane: Lane): number {
-    return lane === "video" ? TRACK_H : lane === "mask" ? MASK_H : AUDIO_H;
+    return lane === "video" ? TRACK_H : lane === "mask" ? MASK_H : this.audioLaneH;
   }
 
   // ── Hit-testing ─────────────────────────────────────────────────────────────
@@ -471,7 +594,9 @@ export class TimelineEditor {
       : y >= this.maskTop ? "mask" : "video";
     const list = lane === "video"
       ? this.tl.clips.filter((c) => c.track === this.trackOf(y))
-      : this.laneOf(lane);
+      : lane === "audio" && this.audioOnly
+        ? this.laneOf(lane).filter((c) => (c.track ?? 0) === this.audioTrackOf(y))
+        : this.laneOf(lane);
     // Back to front: the last one drawn is the visible one, so it answers first.
     for (let i = list.length - 1; i >= 0; i--) {
       const c = list[i];
@@ -484,6 +609,32 @@ export class TimelineEditor {
       if (lane !== "mask" && b - a > 44 && x >= b - MUTE_BOX && x <= b
           && y >= top && y <= top + CLIP_HEAD_H) {
         return { kind: "mute", clip: c, lane };
+      }
+      // Fade grips, before the edges but only inside the shallow top band.
+      if (lane !== "mask" && b - a > 24) {
+        const bodyTop = this.laneTop(lane, c.track)
+          + (this.laneHeight(lane) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
+        if (y >= bodyTop && y <= bodyTop + FADE_BAND_H) {
+          const fi = this.xOf(c.start + (c.fadeIn ?? 0));
+          const fo = this.xOf(c.start + c.length - (c.fadeOut ?? 0));
+          if (Math.abs(x - fi) <= FADE_GRIP) return { kind: "fade", clip: c, side: "in", lane };
+          if (Math.abs(x - fo) <= FADE_GRIP) return { kind: "fade", clip: c, side: "out", lane };
+        }
+      }
+      // The plateau between the two ramps IS the volume line, so it is grabbable like
+      // one. Tested AFTER the fade grips: where they overlap the grip wins, because a
+      // grip is a smaller target and the line runs the whole clip.
+      if (lane !== "mask" && b - a > 24) {
+        const bodyTop = this.laneTop(lane, c.track)
+          + (this.laneHeight(lane) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0) + 3;
+        const bodyH = this.laneHeight(lane) - 6
+          - (this.laneHeight(lane) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
+        const from = a + (c.fadeIn ?? 0) * ((b - a) / Math.max(1, c.length));
+        const to = b - (c.fadeOut ?? 0) * ((b - a) / Math.max(1, c.length));
+        const ly = this.levelY(c.gain ?? 1, bodyTop, bodyH);
+        if (x >= from && x <= to && Math.abs(y - ly) <= LEVEL_GRAB) {
+          return { kind: "level", clip: c, lane };
+        }
       }
       if (Math.abs(x - a) <= HANDLE_PX && x - a < (b - a) / 2 - HANDLE_CORE) {
         return { kind: "edge", clip: c, side: "start", lane };
@@ -589,6 +740,10 @@ export class TimelineEditor {
       origins,
       moved: false,
       slip: e.altKey,
+      fadeFrom: hit.kind === "fade"
+        ? (hit.side === "in" ? hit.clip.fadeIn ?? 0 : hit.clip.fadeOut ?? 0) : 0,
+      gainFrom: hit.kind === "level" ? hit.clip.gain ?? 1 : 1,
+      startY: y,
     };
     this.canvas.setPointerCapture(e.pointerId);
     this.canvas.addEventListener("pointermove", this.onMove);
@@ -628,6 +783,40 @@ export class TimelineEditor {
         else this.applyOut(frame);
         break;
       }
+      case "fade": {
+        const c = d.hit.clip;
+        // Dragging INWARDS lengthens the ramp, whichever end it hangs off - so the
+        // out-fade counts the drag backwards.
+        const len = d.fadeFrom + (d.hit.side === "in" ? dFrames : -dFrames);
+        const want = Math.max(0, Math.min(c.length, toGrid(c.start + len) - c.start));
+        if (d.hit.side === "in") c.fadeIn = want; else c.fadeOut = want;
+        clampFades(c);
+        // Audible straight away, like the mute toggle: a fade you cannot hear until the
+        // next play is a fade you set by guesswork.
+        if (this.transport.rate === 1) this.transport.refreshAudio();
+        break;
+      }
+      case "level": {
+        const c = d.hit.clip;
+        const lane = d.hit.lane;
+        const head = this.laneHeight(lane) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0;
+        const bodyTop = this.laneTop(lane, c.track) + head + 3;
+        const bodyH = this.laneHeight(lane) - 6 - head;
+        // Ctrl is the fine drag everywhere in this editor, so the level obeys it too:
+        // the pointer travels its real distance and the LEVEL moves a tenth of it.
+        const py = d.startY + (y - d.startY) * gain;
+        const want = this.levelOf(py, bodyTop, bodyH)
+          - (this.levelOf(d.startY, bodyTop, bodyH) - d.gainFrom);
+        // Shift lands on the 3 dB detents. NOT rounded to two decimals afterwards: that
+        // is only there to keep a free drag from writing a long float, and applying it to
+        // a snapped value would pull it back off the detent it just landed on.
+        c.gain = e.shiftKey
+          ? snapGainToDb(want)
+          : Math.max(0, Math.min(MAX_GAIN, Math.round(want * 100) / 100));
+        if (c.gain === 1) delete c.gain;
+        if (this.transport.rate === 1) this.transport.refreshAudio();
+        break;
+      }
       case "clip": {
         const c = d.hit.clip;
         const info = this.infoFor(c);
@@ -649,8 +838,10 @@ export class TimelineEditor {
           }
           // Audio clips have no track: passing their undefined `track` through
           // Math.round would write NaN into the model.
-          const track = d.hit.lane !== "video" ? 0
-            : Math.max(0, Math.min(this.trackCount - 1, this.trackOf(y)));
+          const track = d.hit.lane === "video"
+            ? Math.max(0, Math.min(this.trackCount - 1, this.trackOf(y)))
+            : d.hit.lane === "audio" && this.audioOnly ? this.audioTrackOf(y)
+            : 0;
           const shift = start - d.origin.start;
           const lift = track - d.origin.track;
           // No clip may be pushed off the left edge, so the whole group stops together
@@ -721,6 +912,8 @@ export class TimelineEditor {
     }
     this.canvas.style.cursor =
       hit.kind === "mute" ? "pointer"
+      : hit.kind === "fade" ? "col-resize"
+      : hit.kind === "level" ? "ns-resize"
       : hit.kind === "edge" || hit.kind === "inPoint" || hit.kind === "outPoint" ? "ew-resize"
       : hit.kind === "clip" ? (e.altKey ? "col-resize" : "grab")
       : hit.kind === "playhead" ? "grab"
@@ -738,8 +931,54 @@ export class TimelineEditor {
     const hit = this.hitTest(x, y);
     const items: { label: string; on: () => void; active?: boolean }[] = [];
 
-    if (hit.kind === "clip" || hit.kind === "edge") {
+    if (hit.kind === "clip" || hit.kind === "edge" || hit.kind === "fade"
+        || hit.kind === "level") {
       const c = hit.clip;
+      if (hit.lane !== "mask") {
+        // Fixed stops rather than a slider: a canvas menu has no room for one, and these
+        // are the levels anyone actually reaches for. dB because that is what a mixer
+        // reads; the model stores the linear factor.
+        const setGain = (g: number) => () => {
+          this.pushUndo();
+          if (g === 1) delete c.gain; else c.gain = Math.min(MAX_GAIN, g);
+          this.host.commit();
+          if (this.transport.rate === 1) this.transport.refreshAudio();
+          this.requestRender();
+        };
+        for (const [label, g] of [["+6 dB", 2], ["0 dB", 1], ["-6 dB", 0.5],
+                                  ["-12 dB", 0.25]] as [string, number][]) {
+          items.push({ label: `Level: ${label}`, active: (c.gain ?? 1) === g,
+                       on: setGain(g) });
+        }
+        // The grips on the clip are the fast way, but nobody finds a grip they have not
+        // been told about. These say the feature exists, and they are exact where a drag
+        // is approximate: "to the playhead" is the same idiom as Trim head/tail.
+        const inside = this.playhead > c.start && this.playhead < c.start + c.length;
+        if (inside) {
+          const setFade = (side: "in" | "out") => () => {
+            this.pushUndo();
+            if (side === "in") c.fadeIn = this.playhead - c.start;
+            else c.fadeOut = c.start + c.length - this.playhead;
+            clampFades(c);
+            this.host.commit();
+            if (this.transport.rate === 1) this.transport.refreshAudio();
+          };
+          items.push({ label: "Fade in to playhead", on: setFade("in") });
+          items.push({ label: "Fade out from playhead", on: setFade("out") });
+        }
+        if (c.fadeIn || c.fadeOut) {
+          items.push({
+            label: "Clear fades",
+            on: () => {
+              this.pushUndo();
+              delete c.fadeIn;
+              delete c.fadeOut;
+              this.host.commit();
+              if (this.transport.rate === 1) this.transport.refreshAudio();
+            },
+          });
+        }
+      }
       if (hit.lane === "video" || hit.lane === "mask") {
         const toMask = hit.lane === "video";
         items.push({
@@ -1350,14 +1589,18 @@ export class TimelineEditor {
     if (slotInUse(this.tl, src)) return;
     const list = this.laneOf(lane);
     this.pushUndo();
-    // Audio never stacks: two takes on separate audio tracks would just both play.
-    const mode = lane === "audio" ? "append" : this.host.getImportMode();
+    // In the video Timeline the audio lane is a single strip, so stacking there would
+    // just be two takes playing over each other with no way to see it - hence append.
+    // The Audio Timeline stacks for real, so there the node's import mode applies.
+    const mode = lane === "audio" && !this.audioOnly
+      ? "append" : this.host.getImportMode();
     // `sync` lands the clip ON another one instead of wherever the import mode would put
     // it - used when the same FILE is already on the timeline and this is its other half.
     const at = sync ?? placementFor(this.tl, list, mode);
     list.push({
       id: newId(), src,
-      track: lane === "video" ? (at as { track?: number }).track ?? 0 : 0,
+      track: lane === "video" || (lane === "audio" && this.audioOnly)
+        ? (at as { track?: number }).track ?? 0 : 0,
       start: at.start,
       trimIn: sync ? sync.trimIn : 0,
       length: Math.max(1, Math.round(sync ? sync.length : frames)),
@@ -1460,7 +1703,12 @@ export class TimelineEditor {
         ctx.textAlign = "left";
       }
     }
-    for (const [top, h] of [[this.maskTop, MASK_H], [this.audioTop, AUDIO_H]] as const) {
+    const bands: [number, number][] = [[this.maskTop, this.maskH]];
+    for (let t = 0; t < this.audioTrackCount; t++) {
+      bands.push([this.audioTop + t * this.audioLaneH, this.audioLaneH]);
+    }
+    for (const [top, h] of bands) {
+      if (h <= 0) continue;
       ctx.fillStyle = C.trackAlt;
       ctx.fillRect(0, top, W, h);
       ctx.fillStyle = C.gridLine;
@@ -1569,6 +1817,11 @@ export class TimelineEditor {
   private drawGaps(ctx: CanvasRenderingContext2D, start: number, count: number): void {
     const top = RULER_H;
     const h = this.trackCount * TRACK_H;
+    // No picture lanes, no gap to mark: a "generate" region is a stretch the model has to
+    // fill in with IMAGE, and there is no image here. Without this the band has zero
+    // height so the amber wash paints nothing, but the LABEL still gets drawn - the word
+    // "generate" floating loose under the ruler of the audio node.
+    if (h <= 0) return;
     const end = start + count;
     const spans = this.tl.clips
       // An `audioOnly` clip contributes sound and NO picture, so its span is a region to
@@ -1610,7 +1863,8 @@ export class TimelineEditor {
     const isHover = (this.hover.kind === "clip" || this.hover.kind === "edge")
       && this.hover.clip === c;
     const isDrag = this.drag
-      && (this.drag.hit.kind === "clip" || this.drag.hit.kind === "edge")
+      && (this.drag.hit.kind === "clip" || this.drag.hit.kind === "edge"
+          || this.drag.hit.kind === "fade")
       && this.drag.hit.clip === c;
 
     ctx.save();
@@ -1655,6 +1909,7 @@ export class TimelineEditor {
     // Diagonal hatch over the body: "the picture here is a hole", the same thing the amber
     // `generate` wash says about the track underneath.
     if (soundOnly) this.drawHatch(ctx, x, y, w, h);
+    if (lane !== "mask" && bodyH > 6) this.drawFades(ctx, c, x, body, w, bodyH);
 
     if (w > 26) {
       ctx.fillStyle = selected ? "#0d1b24" : src ? C.clipName : C.dim;
@@ -1757,8 +2012,111 @@ export class TimelineEditor {
     ctx.globalAlpha = 1;
   }
 
-  /** Peaks across the clip's own trimmed span, so trimming re-reads the wave. */
   /**
+   * The clip's level envelope, drawn as the line every NLE draws: HEIGHT IS LEVEL. A fade
+   * in rises from the floor at the head; a fade out falls to it at the tail; the shading
+   * is what has been taken away, ABOVE the line.
+   *
+   * The vertices come from `gainAt` - the same function the transport schedules and Python
+   * mirrors - rather than from geometry written out again here. The first version did
+   * write it again, and drew both ramps upside down: it shaded the ATTENUATION as if that
+   * were the shape, so a fade in sloped downwards. Deriving the picture from the curve
+   * makes that class of mistake impossible rather than merely fixed.
+   *
+   * The grips are painted even at zero, or a clip with no fade offers no clue it can have
+   * one.
+   */
+  private drawFades(ctx: CanvasRenderingContext2D, c: Clip,
+                    x: number, y: number, w: number, h: number): void {
+    const pxPerFrame = w / Math.max(1, c.length);
+    const fi = c.fadeIn ?? 0;
+    const fo = c.fadeOut ?? 0;
+    const g = c.gain ?? 1;
+    const onClip = (this.hover.kind === "clip" || this.hover.kind === "edge"
+                    || this.hover.kind === "fade" || this.hover.kind === "level")
+      && this.hover.clip === c;
+    const touched = fi > 0 || fo > 0 || g !== 1 || !!c.muted;
+
+    // Drawn while the envelope is doing something, or while the pointer is on the clip so
+    // the volume line can be grabbed. Always-on would put a line across every clip in the
+    // video Timeline, over the filmstrip, saying nothing.
+    if (touched || onClip) {
+      const pt = ([off, lvl]: [number, number]): [number, number] =>
+        [x + off * pxPerFrame, this.levelY(lvl, y, h)];
+      const stops = levelStops(c).map(pt);
+
+      ctx.beginPath();
+      ctx.moveTo(x, y);                            // top-left...
+      for (const p of stops) ctx.lineTo(...p);
+      ctx.lineTo(x + w, y);                        // ...round to top-right: the loss
+      ctx.closePath();
+      ctx.fillStyle = "rgba(6,12,18,0.5)";
+      ctx.fill();
+
+      // Unity, so a level away from it is readable as a distance rather than as a number
+      // you have to go and look up.
+      if (touched || onClip) {
+        const uy = Math.round(this.levelY(1, y, h)) + 0.5;
+        ctx.strokeStyle = "rgba(255,255,255,0.14)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x, uy);
+        ctx.lineTo(x + w, uy);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      const hotLevel = (this.hover.kind === "level" && this.hover.clip === c)
+        || (this.drag?.hit.kind === "level" && this.drag.hit.clip === c);
+      ctx.beginPath();
+      stops.forEach((p, i) => (i ? ctx.lineTo(...p) : ctx.moveTo(...p)));
+      ctx.strokeStyle = hotLevel ? C.accent : "rgba(255,255,255,0.7)";
+      ctx.lineWidth = hotLevel ? 2 : 1;
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+
+    /**
+     * The grips.
+     *
+     * A 4px square was invisible unless you already knew it was there - the affordance
+     * has to say "grab me" before you have read the docs. So: a filled disc with a dark
+     * ring, which reads as a control at any size, that GROWS when the pointer is anywhere
+     * on the clip. That last part is the Premiere/Resolve idiom - the handles stay quiet
+     * on a dense timeline and announce themselves on the clip you are working on.
+     */
+    const grip = (gx: number, side: "in" | "out") => {
+      const hot = (this.hover.kind === "fade" && this.hover.clip === c
+                   && this.hover.side === side)
+        || (this.drag?.hit.kind === "fade" && this.drag.hit.clip === c
+            && this.drag.hit.side === side);
+      const r = hot ? 5 : onClip ? 4.5 : 3;
+      ctx.beginPath();
+      ctx.arc(gx, y + r + 1, r, 0, Math.PI * 2);
+      ctx.fillStyle = hot ? C.accent : "rgba(255,255,255,0.9)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(6,12,18,0.8)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    };
+    grip(x + fi * pxPerFrame, "in");
+    grip(x + w - fo * pxPerFrame, "out");
+
+    // The wave is drawn from the SOURCE samples, which the gain does not touch, so a level
+    // away from unity only shows in the envelope line - and a number is easier to read
+    // back than a height.
+    if (g !== 1 && w > 60) {
+      ctx.fillStyle = C.hover;
+      ctx.font = "9px system-ui, sans-serif";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillText(`${(20 * Math.log10(Math.max(1e-4, g))).toFixed(1)} dB`,
+        x + w - 42, y + h - 3);
+    }
+  }
+
+  /** The clip's own trimmed span of the wave, so trimming re-reads it.
+   *
    * @param trimRate  fps that `c.trimIn` is counted in. An audio clip trims in TIMELINE
    *   frames, a video clip in SOURCE frames - passing the timeline rate for a video whose
    *   source runs at another cadence slides the whole wave off the picture it belongs to.
@@ -1767,27 +2125,15 @@ export class TimelineEditor {
                        x: number, y: number, w: number, h: number,
                        trimRate: number): void {
     ensureAudio(ref, () => this.requestRender());
-    const peaks = peaksFor(ref);
+    const env = peaksFor(ref);
     const buf = audioBufferFor(ref);
-    if (!peaks || !buf) return;
-    // Scale from the DECODED DURATION, not from a probed frame count: an audio file has
-    // no video stream, so the probe never returns one and the wave would be drawn against
-    // the bucket count instead of against real time.
-    const total = Math.max(1e-6, buf.duration);
-    const from = c.trimIn / Math.max(1, trimRate) / total;
-    const to = from + c.length / this.host.getFps() / total;
-    const mid = y + h / 2;
-    ctx.fillStyle = "rgba(150,215,255,0.85)";
-    for (let px = 0; px < w; px++) {
-      const t = from + (to - from) * (px / Math.max(1, w));
-      const peak = peaks[Math.max(0, Math.min(PEAK_BUCKETS - 1,
-        Math.round(t * (PEAK_BUCKETS - 1))))];
-      if (!peak) continue;
-      const half = Math.max(0.5, (peak * h) / 2);
-      ctx.fillRect(x + px, mid - half, 1, half * 2);
-    }
-    ctx.fillStyle = "rgba(255,255,255,0.25)";
-    ctx.fillRect(x, mid, w, 1);
+    if (!env || !buf) return;
+    // Seconds into the SOURCE, not a fraction of it: the renderer needs real time to know
+    // how many samples a column covers, which is what makes the detail follow the zoom.
+    const fromSec = c.trimIn / Math.max(1, trimRate);
+    const toSec = fromSec + c.length / this.host.getFps();
+    drawWave(ctx, buf, env, fromSec, toSec, x, y, w, h, WAVE_COLORS, this.waveDb,
+             0, this.logicalWidth);
   }
 
   /** Amber diagonals, the same colour the `generate` wash uses: this stretch produces no
@@ -1937,7 +2283,7 @@ export class TimelineEditor {
       const sf = sourceFrame(clip, this.playhead, srcFps, this.host.getFps());
       const at = sf / (srcFps || 1);
       // Forward at 1x: let it play. Anything else (scrub, shuttle, reverse) seeks.
-      const img = pictureAt(src.ref, at, this.transport.rate === 1);
+      const img = this.pool.pictureAt(src.ref, at, this.transport.rate === 1);
       if (!img) continue;
       const iw = (img as HTMLVideoElement).videoWidth || (img as HTMLCanvasElement).width;
       const ih = (img as HTMLVideoElement).videoHeight || (img as HTMLCanvasElement).height;
@@ -1977,7 +2323,7 @@ export class TimelineEditor {
     if (!src) return;
     const srcFps = src.info?.fps ?? this.host.getFps();
     const at = sourceFrame(top, this.playhead, srcFps, this.host.getFps()) / (srcFps || 1);
-    const img = pictureAt(src.ref, at, false);
+    const img = this.pool.pictureAt(src.ref, at, false);
     if (!img) return;
     const iw = (img as HTMLVideoElement).videoWidth || (img as HTMLCanvasElement).width;
     const ih = (img as HTMLVideoElement).videoHeight || (img as HTMLCanvasElement).height;
@@ -2024,6 +2370,27 @@ export class TimelineEditor {
     const marks = markerFrames(this.tl)
       .filter((f) => f >= start && f < start + count).length;
     const mk = marks ? ` · ${marks} marker${marks > 1 ? "s" : ""}` : "";
+    // A canvas has no tooltips, and the status bar is the one place a hint can live
+    // without adding chrome. It only speaks while the pointer is actually on a grip, so
+    // it never competes with the readout during ordinary work.
+    if (this.hover.kind === "fade") {
+      const c = this.hover.clip;
+      const len = (this.hover.side === "in" ? c.fadeIn : c.fadeOut) ?? 0;
+      this.status.textContent =
+        `Fade ${this.hover.side} · ${len} frames (${(len / (fps || 1)).toFixed(2)}s)`
+        + " · drag sideways to set, Shift snaps to the grid";
+      return;
+    }
+    if (this.hover.kind === "level" || this.drag?.hit.kind === "level") {
+      const c = this.drag?.hit.kind === "level" ? this.drag.hit.clip
+        : (this.hover as { clip: Clip }).clip;
+      const g = c.gain ?? 1;
+      const db = g <= 1e-4 ? "-inf" : (20 * Math.log10(g)).toFixed(1);
+      this.status.textContent =
+        `Volume · ${db} dB · drag up and down, Shift snaps to ${GAIN_DB_STEP} dB, `
+        + "Ctrl for fine";
+      return;
+    }
     this.status.textContent =
       `f ${this.playhead}${shuttle}${sel}${mk} · ${count} frames${q} · ${secs.toFixed(2)}s @ ${fps} fps`;
   }
@@ -2042,5 +2409,8 @@ export class TimelineEditor {
     this.canvas.removeEventListener("wheel", this.onWheel);
     this.root.removeEventListener("keydown", this.onKey);
     this.root.remove();
+    // Our elements and only ours. This used to be a module-wide sweep in the node's
+    // onRemoved, so deleting one Timeline blanked every other one's preview.
+    this.pool.releaseAll();
   }
 }

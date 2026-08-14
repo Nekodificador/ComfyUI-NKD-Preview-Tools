@@ -812,3 +812,169 @@ test("expandClipsToSources - show all the material, without unrolling the world"
   assert.equal(t2.clips[0].length, 7);
   assert.equal(t2.clips[0].trimIn, 2);
 });
+
+// ── Level and fades (parity with nkd_timeline.py) ─────────────────────────────
+
+test("clampFades keeps the drawn SHAPE when a clip gets shorter", () => {
+  // Transcribed from test_fades_are_clamped_into_the_clip in tests/test_timeline.py.
+  // Clamping each ramp to `length` on its own first flattens 3:1 to 1:1 - the bug this
+  // pins - so the two are scaled together instead.
+  const c = { length: 10, fadeIn: 30, fadeOut: 10 };
+  M.clampFades(c);
+  assert.ok(c.fadeIn + c.fadeOut <= c.length);
+  assert.ok(c.fadeIn > c.fadeOut, "the 3:1 shape did not survive the clamp");
+  assert.deepEqual([c.fadeIn, c.fadeOut], [7, 2]);
+
+  // A single ramp longer than the clip is simply capped.
+  const one = { length: 10, fadeIn: 30 };
+  M.clampFades(one);
+  assert.equal(one.fadeIn, 10);
+  assert.equal(one.fadeOut, undefined, "a zero fade is deleted, not stored as 0");
+
+  // A zero-length clip cannot carry a ramp, and must not divide by zero either.
+  const dead = { length: 0, fadeIn: 5, fadeOut: 5 };
+  M.clampFades(dead);
+  assert.deepEqual([dead.fadeIn, dead.fadeOut], [undefined, undefined]);
+});
+
+test("gainAt is the same curve Python renders", () => {
+  // Mirrors clip_gain_ramp in nkd_timeline.py: offset/fadeIn, (length-offset)/fadeOut.
+  const c = { length: 100, fadeIn: 10, fadeOut: 10 };
+  assert.equal(M.gainAt(c, 0), 0);
+  assert.ok(Math.abs(M.gainAt(c, 5) - 0.5) < 1e-9);
+  assert.equal(M.gainAt(c, 10), 1);
+  assert.equal(M.gainAt(c, 50), 1);
+  assert.ok(Math.abs(M.gainAt(c, 95) - 0.5) < 1e-9);
+  // Gain scales the ramp rather than replacing it.
+  assert.ok(Math.abs(M.gainAt({ ...c, gain: 0.5 }, 5) - 0.25) < 1e-9);
+  // Muted wins over everything, and off the clip is silence.
+  assert.equal(M.gainAt({ ...c, muted: true }, 50), 0);
+  assert.equal(M.gainAt(c, -1), 0);
+  assert.equal(M.gainAt(c, 100), 0);
+  // No fades: flat at the clip's level, which is what every existing workflow gets.
+  assert.equal(M.gainAt({ length: 100 }, 50), 1);
+  assert.equal(M.gainAt({ length: 100, gain: 0.3 }, 50), 0.3);
+});
+
+test("fades survive a round trip, and absent ones stay absent", () => {
+  // A workflow saved before fades existed must come back byte-identical.
+  const plain = '{"v":1,'
+    + '"clips":[{"id":"a","src":"m","track":0,"start":0,"trimIn":0,"length":10}],'
+    + '"masks":[],"tracks":[],"audio":[],"ui":{"playhead":0}}';
+  assert.equal(M.serialiseTimeline(M.parseTimeline(plain)), plain);
+
+  const tl = M.parseTimeline(JSON.stringify({
+    clips: [{ id: "a", src: "m", track: 0, start: 0, trimIn: 0, length: 48,
+              gain: 0.5, fadeIn: 12, fadeOut: 6 }],
+  }));
+  assert.deepEqual(
+    [tl.clips[0].gain, tl.clips[0].fadeIn, tl.clips[0].fadeOut], [0.5, 12, 6]);
+  const back = JSON.parse(M.serialiseTimeline(tl)).clips[0];
+  assert.deepEqual([back.gain, back.fadeIn, back.fadeOut], [0.5, 12, 6]);
+});
+
+test("blading a clip leaves each half the ramp it still has", () => {
+  const c = { id: "a", src: "m", track: 0, start: 0, trimIn: 0, length: 100,
+              fadeIn: 10, fadeOut: 10 };
+  const right = M.splitClip(c, 50, 24, 24);
+  assert.equal(c.fadeIn, 10, "the left half keeps its fade-in");
+  assert.equal(right.fadeOut, 10, "the right half keeps its fade-out");
+  // Both halves are still 50 long, so both ramps fit and neither is scaled away.
+  assert.equal(c.fadeOut, 10);
+  assert.equal(right.fadeIn, 10);
+
+  // Blading INSIDE a fade-out shrinks it to what is left rather than leaving both
+  // halves ramping down.
+  const d = { id: "b", src: "m", track: 0, start: 0, trimIn: 0, length: 100, fadeOut: 80 };
+  const r2 = M.splitClip(d, 30, 24, 24);
+  assert.ok(d.fadeOut <= d.length, `left fadeOut ${d.fadeOut} > length ${d.length}`);
+  assert.ok(r2.fadeOut <= r2.length);
+});
+
+test("levelStops: a fade IN rises and a fade OUT falls", () => {
+  // The direction this editor already got backwards once: the first version drew the
+  // ATTENUATION, so a fade in sloped downwards. HEIGHT IS LEVEL, so the numbers must rise.
+  const rise = M.levelStops({ length: 100, fadeIn: 20 });
+  assert.equal(rise[0][0], 0, "starts at the head");
+  assert.equal(rise[0][1], 0, "a fade in starts at SILENCE");
+  assert.equal(rise[rise.length - 1][1], 1, "and reaches full level");
+  for (let i = 1; i < rise.length; i++) {
+    assert.ok(rise[i][1] >= rise[i - 1][1], `fade in dipped at stop ${i}`);
+  }
+  // The knee is exactly where the ramp was set, not a pixel off.
+  assert.deepEqual(rise.find((p) => p[1] === 1), [20, 1]);
+
+  const fall = M.levelStops({ length: 100, fadeOut: 20 });
+  assert.equal(fall[0][1], 1, "a fade out starts at full level");
+  assert.ok(fall[fall.length - 1][1] < 0.001, "and ends at silence");
+  for (let i = 1; i < fall.length; i++) {
+    assert.ok(fall[i][1] <= fall[i - 1][1], `fade out rose at stop ${i}`);
+  }
+
+  // Both: up, flat, down. Three distinct levels in that order.
+  const both = M.levelStops({ length: 100, fadeIn: 10, fadeOut: 10 });
+  assert.equal(both[0][1], 0);
+  assert.equal(both[1][1], 1);
+  assert.ok(both[both.length - 1][1] < 0.001);
+});
+
+test("levelStops: the plateau is the volume line, and it carries the gain", () => {
+  // No fades: a flat line at the clip's level from end to end. That flat line is what the
+  // volume drag grabs, so it has to exist even when nothing has been faded.
+  const flat = M.levelStops({ length: 100, gain: 0.5 });
+  assert.equal(flat.length, 2, "one segment, two ends");
+  assert.deepEqual(flat.map((p) => p[1]), [0.5, 0.5]);
+  assert.equal(flat[0][0], 0);
+  assert.ok(flat[1][0] > 99.9 && flat[1][0] <= 100, "spans the whole clip");
+
+  // Gain scales the ramps rather than replacing them.
+  const ramped = M.levelStops({ length: 100, fadeIn: 20, gain: 0.5 });
+  assert.equal(ramped[0][1], 0);
+  assert.equal(ramped.find((p) => p[0] === 20)[1], 0.5);
+
+  // Muted is flat on the floor - not "no line", which would read as untouched.
+  assert.deepEqual(M.levelStops({ length: 10, muted: true }).map((p) => p[1]), [0, 0]);
+});
+
+test("levelStops: never ends on a false cliff, and survives a degenerate clip", () => {
+  // `gainAt` reports silence past the end, so asking at exactly `length` would end every
+  // polyline with a drop to the floor that no fade asked for.
+  const flat = M.levelStops({ length: 50 });
+  assert.equal(flat[flat.length - 1][1], 1, "unity clip ended at silence");
+  for (const c of [{ length: 0 }, { length: 0, fadeIn: 5, fadeOut: 5 }]) {
+    const s = M.levelStops(c);
+    assert.ok(s.length >= 1);
+    for (const [off, lvl] of s) {
+      assert.ok(Number.isFinite(off) && Number.isFinite(lvl), "NaN in the polyline");
+    }
+  }
+});
+
+test("snapGainToDb: the detents are 3 dB apart, and they can reach silence", () => {
+  const db = (g) => 20 * Math.log10(g);
+  // Every result sits on a multiple of 3 dB - the whole point of the detent.
+  for (const g of [0.31, 0.42, 0.55, 0.68, 0.9, 1.0, 1.2, 1.5, 1.8, 2.0]) {
+    const s = M.snapGainToDb(g);
+    assert.ok(Math.abs(db(s) - Math.round(db(s) / 3) * 3) < 1e-9,
+      `${g} -> ${s} (${db(s).toFixed(2)} dB) is not on a 3 dB step`);
+    // And it is the NEAREST one: never more than half a step away.
+    assert.ok(Math.abs(db(s) - db(g)) <= 1.5 + 1e-9, `${g} snapped too far`);
+  }
+  // Unity is a detent, so the drag can be put back to "untouched" exactly.
+  assert.equal(M.snapGainToDb(1), 1);
+  assert.equal(M.snapGainToDb(0.99), 1);
+  assert.equal(M.snapGainToDb(1.02), 1);
+  // -6 dB is a round amplitude, which makes it the easiest one to check by eye.
+  assert.ok(Math.abs(M.snapGainToDb(0.52) - 0.5011872) < 1e-6);
+
+  // Snapping in dB steps towards -inf forever, so it could never reach a true mute on its
+  // own: below the floor the next detent IS silence.
+  assert.equal(M.snapGainToDb(0.02), 0);
+  assert.equal(M.snapGainToDb(0), 0);
+  assert.equal(M.snapGainToDb(-1), 0);
+  assert.ok(M.snapGainToDb(0.04) > 0, "the floor swallowed a level that is still audible");
+
+  // Never past the ceiling the model allows, however hard the drag pushes.
+  assert.ok(M.snapGainToDb(99) <= 2);
+  assert.ok(M.snapGainToDb(2) <= 2);
+});

@@ -11,11 +11,49 @@
  * breaks the moment the playhead crosses a cut. The picture follows instead - the editor
  * asks the pooled element for whatever clip is currently under the playhead.
  */
-import type { Timeline } from "./model";
+import { type Timeline, gainAt } from "./model";
 import { audioBufferFor, audioContext, ensureAudio, type MediaRef } from "./media";
 
 /** J and L step through these. Index 0 is the resting speed for each direction. */
 const SHUTTLE = [1, 2, 4, 8];
+
+/** The transport currently running, if any. See `play`. */
+let playing: Transport | null = null;
+
+type Faded = { length: number; gain?: number; fadeIn?: number; fadeOut?: number;
+               muted?: boolean };
+
+/**
+ * Automate one clip's level on the AudioContext clock.
+ *
+ * The whole clip is scheduled in one shot, so the ramps have to be placed as events rather
+ * than nudged per frame - and they are anchored to the SEGMENT we are about to play, which
+ * may start partway into the clip because that is where the playhead was. Starting at the
+ * clip's nominal level in that case would replay the fade-in from the middle of it, which
+ * is audible as a swell every time you hit Space inside a fade.
+ *
+ * `gainAt` is shared with the model (and mirrored in Python), so the preview, the drawn
+ * ramp and the rendered file all describe the same curve.
+ */
+function applyFades(param: AudioParam, c: Faded, startOff: number, endOff: number,
+                    when: number, fps: number): void {
+  const base = c.gain ?? 1;
+  const at = (off: number) => when + (off - startOff) / fps;
+  param.setValueAtTime(gainAt(c, startOff), when);
+
+  const fi = c.fadeIn ?? 0;
+  if (fi > startOff && fi < endOff) param.linearRampToValueAtTime(base, at(fi));
+
+  const fo = c.fadeOut ?? 0;
+  const foStart = c.length - fo;
+  if (fo > 0 && foStart < endOff) {
+    // Hold the level flat until the ramp is due; without this anchor the Web Audio API
+    // interpolates from the PREVIOUS event, so the fade-out would start at the head of
+    // the clip and the whole thing would sag.
+    if (foStart > startOff) param.setValueAtTime(base, at(foStart));
+    param.linearRampToValueAtTime(gainAt(c, endOff - 1e-6), at(endOff));
+  }
+}
 
 export interface PlayerHost {
   getTimeline(): Timeline;
@@ -76,6 +114,11 @@ export class Transport {
   }
 
   play(speed: number): void {
+    // Only one transport at a time, across every Timeline node on the canvas. Genuinely
+    // global, unlike everything else that used to be: there is one pair of speakers, and
+    // two timelines running mix both soundtracks into the same destination.
+    if (playing && playing !== this) playing.stop();
+    playing = this;
     this.speed = speed;
     this.pos = this.host.getTimeline().ui.playhead;
     this.last = performance.now();
@@ -85,6 +128,7 @@ export class Transport {
   }
 
   stop(): void {
+    if (playing === this) playing = null;
     this.speed = 0;
     this.stopAudio();
     if (this.raf) {
@@ -157,9 +201,10 @@ export class Transport {
     // Both lanes: the audio track AND the videos' own sound, which is what the backend
     // mixes too. Without the second one, playing a clip with dialogue is silent.
     const lanes: { src: string; start: number; trimIn: number; length: number;
-                   gain: number; muted?: boolean; sourceRate: boolean }[] = [
+                   gain?: number; fadeIn?: number; fadeOut?: number;
+                   muted?: boolean; sourceRate: boolean }[] = [
       ...tl.audio.map((a) => ({ ...a, sourceRate: false })),
-      ...tl.clips.map((c) => ({ ...c, gain: 1, sourceRate: true })),
+      ...tl.clips.map((c) => ({ ...c, sourceRate: true })),
     ];
 
     for (const a of lanes) {
@@ -186,7 +231,7 @@ export class Transport {
       const node = ctx.createBufferSource();
       node.buffer = buf;
       const g = ctx.createGain();
-      g.gain.value = a.gain;
+      applyFades(g.gain, a, from - a.start, clipEnd - a.start, when, fps);
       node.connect(g);
       g.connect(this.gain);
       node.start(when, offset, Math.min(duration, buf.duration - offset));

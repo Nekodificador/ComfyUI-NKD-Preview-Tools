@@ -15,9 +15,9 @@ import {
   PREVIEW_MAX_H, TimelineEditor, type KeyAction, type TimelineHost,
 } from "./timeline/editor";
 import {
-  type MediaInfo, type MediaRef,
-  adoptStrip, audioBufferFor, bustCaches, cachedInfo, ensureAudio, forget, probe,
-  releaseUnused, resolveSource, slotKind,
+  type MediaInfo, type MediaRef, type VideoPool,
+  adoptStrip, audioBufferFor, cachedInfo, ensureAudio, probe,
+  resolveSource, slotKind,
 } from "./timeline/media";
 import { ensureStyles } from "./timeline/styles";
 import { registerFreezeFrames, syncAllFreezeNodes } from "./freezeFrames";
@@ -29,6 +29,8 @@ import {
 
 const NODE_NAME = "NKDTimeline";
 const EXT_NAME = "NKD.PreviewTools.Timeline";
+const AUDIO_NODE_NAME = "NKDAudioTimeline";
+const AUDIO_EXT_NAME = "NKD.PreviewTools.AudioTimeline";
 const MIN_W = 380;
 const SLOT_RE = /(?:^|\.)(media_\d+)$/;
 // An IMAGE/MASK input is a tensor from another node, so its length cannot be known
@@ -71,7 +73,7 @@ function readSetting(id: string, fallback: string): string {
 }
 // A console version stamp: a cached bundle is the number one confounder when debugging
 // frontend behaviour that "should" already be fixed.
-console.log("[NKD Timeline] rev 3.2.0");
+console.log("[NKD Timeline] rev 3.6.0");
 
 // ── Host: everything the editor needs to know about the node ──────────────────
 
@@ -102,7 +104,12 @@ type Host = TimelineHost & {
   pruneStrips: (live: Set<string>) => void;
 };
 
-function makeHost(node: any, state: { tl: Timeline }): Host {
+/**
+ * @param pool  The node's own `<video>` pool. Passed as a THUNK because the editor that
+ *   owns it is built from this host, so it does not exist yet at this point.
+ */
+function makeHost(node: any, state: { tl: Timeline }, pool: () => VideoPool,
+                  audioOnly = false): Host {
   const numW = (name: string, def: number) => {
     const v = Number(findW(node, name)?.value);
     return Number.isFinite(v) ? v : def;
@@ -159,7 +166,7 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
       return buf ? Math.round(buf.duration * host.getFps()) : null;
     },
     reloadSources() {
-      bustCaches();
+      pool().bust();
       srcCache.clear();
       node.setDirtyCanvas(true, true);
     },
@@ -240,6 +247,13 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
         const kind = slotKind(node, m[1]);
         if (kind) out[kind].push(m[1]);
       }
+      // On the audio node a VIDEO slot IS an audio slot: the socket takes video so a
+      // voice can be pulled out of a take without a separate extractor, and the backend
+      // reads only the audio stream. There is no picture lane for it to land on anyway.
+      if (audioOnly) {
+        return { videos: [], images: [], masks: [],
+                 audios: [...out.audio, ...out.video, ...out.image, ...out.mask] };
+      }
       return {
         videos: out.video, images: out.image, masks: out.mask, audios: out.audio,
       };
@@ -270,7 +284,7 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
         if (prev?.ref.filename === t.filename) continue;
         // A fresh name every run on purpose (HTTP caching), so the old sheet is dead
         // weight the moment a new one lands.
-        if (prev) forget(prev.ref);
+        if (prev) pool().forget(prev.ref);
         const ref: MediaRef = {
           filename: t.filename, subfolder: t.subfolder ?? "", type: t.type ?? "temp",
         };
@@ -291,7 +305,7 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
       // stale filmstrip until the next execution is cheaper than a probe per tick.
       for (const slot of [...strips.keys()]) {
         if (live.has(slot)) continue;
-        forget(strips.get(slot)!.ref);
+        pool().forget(strips.get(slot)!.ref);
         strips.delete(slot);
       }
     },
@@ -304,11 +318,32 @@ function makeHost(node: any, state: { tl: Timeline }): Host {
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
+/**
+ * The two nodes that share this editor.
+ *
+ * ONE registration, called twice, rather than a second copy of four hundred lines. The
+ * audio node has a subset of the video node's widgets and every reader here goes through
+ * `findW(...)` with a default, so the missing ones simply fall back - which is what makes
+ * the sharing honest rather than a pile of `if (audioOnly)`.
+ */
+type TimelineVariant = {
+  node: string; ext: string;
+  /** Prototype flag for the re-entrancy guard. Must differ per node type or registering
+   *  the second one would be skipped as "already wrapped". */
+  flag: string;
+  audioOnly: boolean;
+};
+
+function registerTimelineNode(v: TimelineVariant): void {
 comfyApp.registerExtension({
-  name: EXT_NAME,
+  name: v.ext,
   // Surfaced in ComfyUI's own Settings dialog under "NKD Timeline", so the shortcuts are
   // discoverable and rebindable in the place users already look for them.
-  settings: KEY_SETTINGS.map((k) => ({
+  //
+  // Declared by the VIDEO variant only. The ids are shared - both editors read the same
+  // bindings, which is the point - and registering an id twice is a conflict, not a
+  // second copy.
+  settings: v.audioOnly ? [] : KEY_SETTINGS.map((k) => ({
     id: k.id,
     name: k.label,
     type: "text",
@@ -317,12 +352,12 @@ comfyApp.registerExtension({
     tooltip: `Single key, lower-case. Default: ${k.def}`,
   })),
   async beforeRegisterNodeDef(nodeType: any, nodeData: any) {
-    if (nodeData?.name !== NODE_NAME) return;
+    if (nodeData?.name !== v.node) return;
     // Without this guard, "Refresh node definitions" re-runs the hook on the SAME
     // prototype and the wraps stack up: 2^n mounted widgets, and the orphans keep
     // rendering forever as frozen ghosts.
-    if (nodeType.prototype.__nkdTimelineWrapped) return;
-    nodeType.prototype.__nkdTimelineWrapped = true;
+    if (nodeType.prototype[v.flag]) return;
+    nodeType.prototype[v.flag] = true;
 
     const origCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function (this: any) {
@@ -338,8 +373,11 @@ comfyApp.registerExtension({
 
       const state = { tl: parseTimeline(dataW?.value) };
       restoreView(node, state.tl);
-      const host = makeHost(node, state);
-      const editor = new TimelineEditor(host);
+      // The host needs the pool, the pool lives on the editor, and the editor needs the
+      // host: a thunk breaks the cycle without a second owner for either.
+      let editor!: TimelineEditor;
+      const host = makeHost(node, state, () => editor.pool, v.audioOnly);
+      editor = new TimelineEditor(host, { audioOnly: v.audioOnly });
 
       const container = document.createElement("div");
       container.style.width = "100%";
@@ -358,6 +396,8 @@ comfyApp.registerExtension({
       let measured = 0;
       let inset = 0;     // ComfyUI hands the host a bit less than asked; calibrated below
       const estimate = () => {
+        // No monitor to make room for: the timeline IS the whole widget.
+        if (v.audioOnly) return editor.timelineHeight + 40;
         const w = Math.max(node.size?.[0] ?? MIN_W, MIN_W);
         const [ow, oh] = host.getOutSize();
         // Same cap the preview itself applies, so the first estimate is not wildly off
@@ -593,7 +633,7 @@ comfyApp.registerExtension({
         const refs = [...state.tl.clips, ...state.tl.masks, ...state.tl.audio]
           .map((c) => host.sourceFor(c.src)?.ref)
           .filter(Boolean) as MediaRef[];
-        releaseUnused(refs);
+        editor.pool.releaseUnused(refs);
         editor.requestRender();
       };
 
@@ -660,7 +700,7 @@ comfyApp.registerExtension({
           if (!cached) continue;
           const now = resolveSource(node, slot);
           if (!now || now.filename === cached.ref.filename) continue;
-          forget(cached.ref);
+          editor.pool.forget(cached.ref);
           host.dropSource(slot);
           editor.requestRender();
         }
@@ -676,6 +716,7 @@ comfyApp.registerExtension({
       let lastAspect: string | null = null;
       let lastModel: string | null = null;
       const syncAspectWidgets = () => {
+        if (v.audioOnly) return;    // none of these widgets exist on the audio node
         const aspect = String(findW(node, "aspect_ratio")?.value ?? ASPECT_CUSTOM);
         const model = String(findW(node, "model")?.value ?? "");
         if (aspect === lastAspect && model === lastModel) return;
@@ -717,8 +758,7 @@ comfyApp.registerExtension({
         // The api emitter outlives the node; a listener holding this closure would keep
         // the whole editor (canvases, video pool) alive for the rest of the session.
         comfyApi.removeEventListener("nkd-timeline-meta", onMeta);
-        editor.destroy();
-        releaseUnused([]);
+        editor.destroy();   // releases this node's video pool
         origRemoved?.apply(this, args);
       };
 
@@ -726,6 +766,16 @@ comfyApp.registerExtension({
       return result;
     };
   },
+});
+}
+
+registerTimelineNode({
+  node: NODE_NAME, ext: EXT_NAME,
+  flag: "__nkdTimelineWrapped", audioOnly: false,
+});
+registerTimelineNode({
+  node: AUDIO_NODE_NAME, ext: AUDIO_EXT_NAME,
+  flag: "__nkdAudioTimelineWrapped", audioOnly: true,
 });
 
 // The Freeze Frames companion: its own extension, registered from the same bundle.

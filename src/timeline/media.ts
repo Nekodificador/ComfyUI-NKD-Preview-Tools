@@ -12,6 +12,7 @@
  *    conteo de frames no está expuesto en el DOM; `/nkd/timeline/probe` los saca con PyAV.
  */
 import { api } from "../comfyRuntime";
+import { type ChannelEnvelope, buildEnvelope } from "./waveform";
 
 export type MediaRef = { filename: string; subfolder: string; type: string };
 export type MediaInfo = {
@@ -48,24 +49,18 @@ export function bustCaches(): void {
   thumbCache.clear();
   audioCache.clear();
   peakCache.clear();
-  releaseUnused([]);
 }
 
-/** Forget one source, used when a slot silently starts pointing somewhere else. */
-export function forget(ref: MediaRef): void {
+/** Forget one source, used when a slot silently starts pointing somewhere else.
+ *  Only the caches keyed by FILE - the `<video>` elements live in a per-node pool, so
+ *  dropping those is `VideoPool.forget`'s half of the job. */
+export function forgetFile(ref: MediaRef): void {
   const key = refKey(ref);
   stripRefs.delete(key);
   infoCache.delete(key);
   thumbCache.delete(key);
   audioCache.delete(key);
   peakCache.delete(key);
-  const p = pool.get(key);
-  if (p) {
-    window.clearTimeout(p.guard);
-    p.el.removeAttribute("src");
-    p.el.load();
-    pool.delete(key);
-  }
 }
 
 // ── Resolución del origen a través del grafo ──────────────────────────────────
@@ -192,40 +187,226 @@ type Pooled = {
   guard: number;
 };
 
-const pool = new Map<string, Pooled>();
+const stripRefs = new Set<string>();
 
-function makePooled(ref: MediaRef): Pooled {
-  const el = document.createElement("video");
-  el.src = viewUrl(ref);
-  el.muted = true;             // sin esto el navegador bloquea cualquier reproducción
-  el.playsInline = true;
-  el.preload = "auto";
-  el.crossOrigin = "anonymous";
-  const entry: Pooled = {
-    el, good: document.createElement("canvas"), hasGood: false, wantTime: -1,
-    seeking: false, guard: 0,
-  };
-  // Metadata is what makes the element seekable. Any time requested before this point was
-  // parked rather than applied, so apply it now.
-  el.addEventListener("loadedmetadata", () => applySeek(entry));
-  el.addEventListener("seeked", () => {
-    window.clearTimeout(entry.guard);
-    entry.seeking = false;
-    captureGood(entry);
-    // Mientras buscábamos pudo pedirse otro instante: atenderlo ahora.
-    if (entry.wantTime >= 0 && Math.abs(entry.wantTime - el.currentTime) > 1e-3) {
-      applySeek(entry);
+/** How far the picture may lag the playhead before we seek it back. Big enough to absorb
+ *  ordinary jitter, small enough that a cut is never visibly late. */
+const DRIFT_S = 0.25;
+
+/**
+ * The `<video>` elements one Timeline node is scrubbing, and nothing else.
+ *
+ * OWNED PER NODE, deliberately. This used to be a module-level Map keyed by file, which
+ * meant two Timeline nodes wired to the same video shared one element: the playhead of one
+ * dragged the other's, pressing Space in one animated both monitors, and deleting either
+ * node blanked the survivors. An element carries POSITION, and position is what a node is;
+ * the caches above carry the file's CONTENT, which really is the same for everyone, so
+ * those stay shared.
+ */
+export class VideoPool {
+  private readonly pool = new Map<string, Pooled>();
+  /** Called whenever one of our elements gains something new to show, so the editor can
+   *  repaint instead of waiting for the next poll. One per pool, so several editors do not
+   *  overwrite each other's - the last one registered used to win, and the rest went
+   *  quiet. */
+  onReady: (() => void) | null = null;
+
+  private make(ref: MediaRef): Pooled {
+    const el = document.createElement("video");
+    el.src = viewUrl(ref);
+    el.muted = true;           // sin esto el navegador bloquea cualquier reproducción
+    el.playsInline = true;
+    el.preload = "auto";
+    el.crossOrigin = "anonymous";
+    const entry: Pooled = {
+      el, good: document.createElement("canvas"), hasGood: false, wantTime: -1,
+      seeking: false, guard: 0,
+    };
+    // Metadata is what makes the element seekable. Any time requested before this point was
+    // parked rather than applied, so apply it now.
+    el.addEventListener("loadedmetadata", () => this.applySeek(entry));
+    el.addEventListener("seeked", () => {
+      window.clearTimeout(entry.guard);
+      entry.seeking = false;
+      captureGood(entry);
+      // Mientras buscábamos pudo pedirse otro instante: atenderlo ahora.
+      if (entry.wantTime >= 0 && Math.abs(entry.wantTime - el.currentTime) > 1e-3) {
+        this.applySeek(entry);
+      }
+    });
+    el.addEventListener("loadeddata", () => {
+      captureGood(entry);
+      this.onReady?.();
+      // Fetch the audio only once the picture has its data. Pulling the whole file down for
+      // decodeAudioData in parallel competes with the element's own range requests for the
+      // per-host connection budget, and the picture is what the user is looking at.
+      ensureAudio(ref, () => this.onReady?.());
+    });
+    return entry;
+  }
+
+  private entry(ref: MediaRef): Pooled {
+    const key = refKey(ref);
+    let p = this.pool.get(key);
+    if (!p) {
+      p = this.make(ref);
+      this.pool.set(key, p);
     }
-  });
-  el.addEventListener("loadeddata", () => {
-    captureGood(entry);
-    onPooledReady?.();
-    // Fetch the audio only once the picture has its data. Pulling the whole file down for
-    // decodeAudioData in parallel competes with the element's own range requests for the
-    // per-host connection budget, and the picture is what the user is looking at.
-    ensureAudio(ref, () => onPooledReady?.());
-  });
-  return entry;
+    return p;
+  }
+
+  /**
+   * Ask the element to seek, but only once it can.
+   *
+   * Assigning `currentTime` while `readyState` is HAVE_NOTHING is IGNORED by the browser -
+   * silently, without throwing - so `seeked` never fires. Setting `seeking = true` around
+   * that leaves the flag stuck forever, every later seek short-circuits on it, and the
+   * preview freezes on whatever frame was captured first. It only ever worked after a hard
+   * reload because the cached file has its metadata ready in the same tick.
+   */
+  private applySeek(p: Pooled): void {
+    if (p.seeking || p.wantTime < 0) return;
+    if (p.el.readyState < 1) return;   // not seekable yet; loadedmetadata will retry
+    p.seeking = true;
+    try {
+      p.el.currentTime = p.wantTime;
+    } catch {
+      p.seeking = false;
+      return;
+    }
+    // A seek that never reports back must not wedge the element permanently.
+    window.clearTimeout(p.guard);
+    p.guard = window.setTimeout(() => {
+      p.seeking = false;
+      captureGood(p);
+      this.onReady?.();
+    }, 2000);
+  }
+
+  videoFor(ref: MediaRef): HTMLVideoElement {
+    return this.entry(ref).el;
+  }
+
+  /** Pide un instante. Coalescente: durante un arrastre llegan decenas de peticiones por
+   *  segundo y el `<video>` solo puede atender una a la vez. */
+  seekTo(ref: MediaRef, seconds: number, tolerance = 0.02): void {
+    const p = this.entry(ref);
+    const want = Math.max(0, seconds);
+    // Pedir el instante en el que el elemento YA está no puede cambiar un píxel, y ocupa el
+    // decodificador igual. Medido antes de esto: 78 de 78 seeks en reposo y 340 de 468
+    // arrastrando eran exactamente eso. `tolerance` es medio frame de la FUENTE, que es lo
+    // que "el mismo frame" significa; la pasa el llamante, que es quien sabe su cadencia.
+    //
+    // Esto es lo ÚNICO que sobrevivió del intento de borrar el canvas `good`. Aquel canvas
+    // resultó no ser deuda: es lo que permite que una capa siga aportando imagen mientras
+    // busca, y sin él el overlay de máscara desaparece durante el movimiento y la imagen
+    // avanza a tirones. Medir el desperdicio no basta para saber qué se puede quitar.
+    if (p.el.readyState >= 1 && !p.seeking
+        && Math.abs(p.el.currentTime - want) < tolerance) {
+      p.wantTime = want;
+      return;
+    }
+    p.wantTime = want;
+    this.applySeek(p);
+  }
+
+  /**
+   * Let the element PLAY and only correct it when it has drifted.
+   *
+   * During playback, seeking once per displayed frame is what makes a preview stutter: an
+   * h264 seek is far more expensive than simply decoding forward. So while running at 1x we
+   * hand the browser the job it is good at and step in only past the drift threshold - big
+   * enough to absorb ordinary jitter, small enough that a cut is never visibly late.
+   */
+  followPlayback(ref: MediaRef, seconds: number): void {
+    const p = this.entry(ref);
+    if (p.el.paused) {
+      p.wantTime = Math.max(0, seconds);
+      this.applySeek(p);
+      void p.el.play().catch(() => { /* autoplay policy, or not ready yet */ });
+      return;
+    }
+    if (Math.abs(p.el.currentTime - seconds) > DRIFT_S) {
+      p.wantTime = Math.max(0, seconds);
+      this.applySeek(p);
+    }
+  }
+
+  /**
+   * The picture to draw for a source at `seconds`, whatever kind of source it is.
+   *
+   * The single place that knows a TENSOR source has no video element behind it. Pointing
+   * the pool at its contact sheet would spawn a `<video>` on a PNG: no error, no `seeked`,
+   * just a slot that never draws - so route strips to their stills and leave the pool to
+   * the sources that actually have a file to seek.
+   */
+  pictureAt(ref: MediaRef, seconds: number, playing: boolean): CanvasImageSource | null {
+    if (stripRefs.has(refKey(ref))) return thumbnailAt(ref, seconds);
+    if (playing) this.followPlayback(ref, seconds);
+    else this.seekTo(ref, seconds, 0.02);
+    return this.frameSource(ref);
+  }
+
+  /** Lo que hay que pintar AHORA: el frame vivo si está listo, y si no el último bueno. */
+  frameSource(ref: MediaRef): CanvasImageSource | null {
+    const p = this.pool.get(refKey(ref));
+    if (!p) return null;
+    if (!p.seeking && p.el.readyState >= 2) return p.el;
+    return p.hasGood ? p.good : null;
+  }
+
+  /** Stop our elements. Called when the transport stops, so a clip that scrolled out from
+   *  under the playhead does not keep decoding in the background. */
+  pauseAll(): void {
+    for (const p of this.pool.values()) {
+      if (!p.el.paused) p.el.pause();
+    }
+  }
+
+  private drop(key: string): void {
+    const p = this.pool.get(key);
+    if (!p) return;
+    window.clearTimeout(p.guard);
+    p.el.removeAttribute("src");
+    p.el.load();
+    this.pool.delete(key);
+  }
+
+  /** Suelta los elementos que ya no usa ningún clip — un `<video>` retenido mantiene el
+   *  fichero decodificándose en memoria. */
+  releaseUnused(active: Iterable<MediaRef>): void {
+    const keep = new Set<string>();
+    for (const r of active) keep.add(refKey(r));
+    for (const key of [...this.pool.keys()]) {
+      if (!keep.has(key)) this.drop(key);
+    }
+  }
+
+  /** Everything, on teardown. */
+  releaseAll(): void {
+    this.releaseUnused([]);
+  }
+
+  /** A slot silently started pointing somewhere else: drop the file's shared caches and
+   *  our element for it. */
+  forget(ref: MediaRef): void {
+    forgetFile(ref);
+    this.drop(refKey(ref));
+  }
+
+  /**
+   * The ↻ button: assume every file on disk changed under us.
+   *
+   * The shared caches and the URL counter are cleared GLOBALLY because the staleness is
+   * global - the bytes really did change for everyone.
+   * ponytail: but only THIS node's elements are torn down. The other nodes keep the
+   * element they are holding until they next release it; the button is pressed on one node
+   * and reloading half the workflow's video behind the user's back is the louder bug.
+   */
+  bust(): void {
+    bustCaches();
+    this.releaseAll();
+  }
 }
 
 function captureGood(p: Pooled): void {
@@ -238,148 +419,6 @@ function captureGood(p: Pooled): void {
     p.hasGood = true;
   } catch {
     /* el frame aún no es dibujable */
-  }
-}
-
-/**
- * Ask the element to seek, but only once it can.
- *
- * Assigning `currentTime` while `readyState` is HAVE_NOTHING is IGNORED by the browser -
- * silently, without throwing - so `seeked` never fires. Setting `seeking = true` around
- * that leaves the flag stuck forever, every later seek short-circuits on it, and the
- * preview freezes on whatever frame was captured first. It only ever worked after a hard
- * reload because the cached file has its metadata ready in the same tick.
- */
-function applySeek(p: Pooled): void {
-  if (p.seeking || p.wantTime < 0) return;
-  if (p.el.readyState < 1) return;   // not seekable yet; loadedmetadata will retry
-  p.seeking = true;
-  try {
-    p.el.currentTime = p.wantTime;
-  } catch {
-    p.seeking = false;
-    return;
-  }
-  // A seek that never reports back must not wedge the element permanently.
-  window.clearTimeout(p.guard);
-  p.guard = window.setTimeout(() => {
-    p.seeking = false;
-    captureGood(p);
-    onPooledReady?.();
-  }, 2000);
-}
-
-/** Called whenever a pooled element gains something new to show, so the editor can
- *  repaint instead of waiting for the next poll. */
-let onPooledReady: (() => void) | null = null;
-export function setPooledReadyHandler(fn: () => void): void {
-  onPooledReady = fn;
-}
-
-export function videoFor(ref: MediaRef): HTMLVideoElement {
-  const key = refKey(ref);
-  let p = pool.get(key);
-  if (!p) {
-    p = makePooled(ref);
-    pool.set(key, p);
-  }
-  return p.el;
-}
-
-/** Pide un instante. Coalescente: durante un arrastre llegan decenas de peticiones por
- *  segundo y el `<video>` solo puede atender una a la vez. */
-export function seekTo(ref: MediaRef, seconds: number, tolerance = 0.02): void {
-  const p = pool.get(refKey(ref)) ?? makePooled(ref);
-  pool.set(refKey(ref), p);
-  const want = Math.max(0, seconds);
-  // Pedir el instante en el que el elemento YA está no puede cambiar un píxel, y ocupa el
-  // decodificador igual. Medido antes de esto: 78 de 78 seeks en reposo y 340 de 468
-  // arrastrando eran exactamente eso. `tolerance` es medio frame de la FUENTE, que es lo
-  // que "el mismo frame" significa; la pasa el llamante, que es quien sabe su cadencia.
-  //
-  // Esto es lo ÚNICO que sobrevivió del intento de borrar el canvas `good`. Aquel canvas
-  // resultó no ser deuda: es lo que permite que una capa siga aportando imagen mientras
-  // busca, y sin él el overlay de máscara desaparece durante el movimiento y la imagen
-  // avanza a tirones. Medir el desperdicio no basta para saber qué se puede quitar.
-  if (p.el.readyState >= 1 && !p.seeking
-      && Math.abs(p.el.currentTime - want) < tolerance) {
-    p.wantTime = want;
-    return;
-  }
-  p.wantTime = want;
-  applySeek(p);
-}
-
-/** Lo que hay que pintar AHORA: el frame vivo si está listo, y si no el último bueno. */
-/**
- * Let the element PLAY and only correct it when it has drifted.
- *
- * During playback, seeking once per displayed frame is what makes a preview stutter: an
- * h264 seek is far more expensive than simply decoding forward. So while running at 1x we
- * hand the browser the job it is good at and step in only past the drift threshold - big
- * enough to absorb ordinary jitter, small enough that a cut is never visibly late.
- */
-const DRIFT_S = 0.25;
-
-export function followPlayback(ref: MediaRef, seconds: number): void {
-  const p = pool.get(refKey(ref)) ?? makePooled(ref);
-  pool.set(refKey(ref), p);
-  if (p.el.paused) {
-    p.wantTime = Math.max(0, seconds);
-    applySeek(p);
-    void p.el.play().catch(() => { /* autoplay policy, or not ready yet */ });
-    return;
-  }
-  if (Math.abs(p.el.currentTime - seconds) > DRIFT_S) {
-    p.wantTime = Math.max(0, seconds);
-    applySeek(p);
-  }
-}
-
-/** Stop every pooled element. Called when the transport stops, so a clip that scrolled out
- *  from under the playhead does not keep decoding in the background. */
-export function pauseAllVideos(): void {
-  for (const p of pool.values()) {
-    if (!p.el.paused) p.el.pause();
-  }
-}
-
-const stripRefs = new Set<string>();
-
-/**
- * The picture to draw for a source at `seconds`, whatever kind of source it is.
- *
- * The single place that knows a TENSOR source has no video element behind it. Pointing
- * the pool at its contact sheet would spawn a `<video>` on a PNG: no error, no `seeked`,
- * just a slot that never draws - so route strips to their stills and leave the pool to
- * the sources that actually have a file to seek.
- */
-export function pictureAt(ref: MediaRef, seconds: number,
-                          playing: boolean): CanvasImageSource | null {
-  if (stripRefs.has(refKey(ref))) return thumbnailAt(ref, seconds);
-  if (playing) followPlayback(ref, seconds);
-  else seekTo(ref, seconds, 0.02);
-  return frameSource(ref);
-}
-
-export function frameSource(ref: MediaRef): CanvasImageSource | null {
-  const p = pool.get(refKey(ref));
-  if (!p) return null;
-  if (!p.seeking && p.el.readyState >= 2) return p.el;
-  return p.hasGood ? p.good : null;
-}
-
-/** Suelta los elementos que ya no usa ningún clip — un `<video>` retenido mantiene el
- *  fichero decodificándose en memoria. */
-export function releaseUnused(active: Iterable<MediaRef>): void {
-  const keep = new Set<string>();
-  for (const r of active) keep.add(refKey(r));
-  for (const [key, p] of pool) {
-    if (keep.has(key)) continue;
-    window.clearTimeout(p.guard);
-    p.el.removeAttribute("src");
-    p.el.load();
-    pool.delete(key);
   }
 }
 
@@ -530,7 +569,7 @@ export function thumbnailAt(ref: MediaRef, seconds: number): HTMLCanvasElement |
 // ── Audio: one decode serves both the waveform and playback ───────────────────
 
 const audioCache = new Map<string, AudioBuffer>();
-const peakCache = new Map<string, Float32Array>();
+const peakCache = new Map<string, ChannelEnvelope[]>();
 const audioJobs = new Map<string, Promise<AudioBuffer | null>>();
 let audioCtx: AudioContext | null = null;
 
@@ -539,7 +578,6 @@ export function audioContext(): AudioContext {
   return audioCtx;
 }
 
-export const PEAK_BUCKETS = 400;
 
 /**
  * Decode a source's audio once and keep it: the peaks for the waveform and the buffer for
@@ -573,7 +611,7 @@ export function ensureAudio(ref: MediaRef, onDone: () => void): void {
     .then((buf) => audioContext().decodeAudioData(buf))
     .then((decoded) => {
       audioCache.set(key, decoded);
-      peakCache.set(key, computePeaks(decoded));
+      peakCache.set(key, buildEnvelope(decoded));
       return decoded;
     })
     .catch(() => null)               // no audio track, or a codec the browser refuses
@@ -587,24 +625,8 @@ export function ensureAudio(ref: MediaRef, onDone: () => void): void {
   audioJobs.set(key, job);
 }
 
-function computePeaks(buf: AudioBuffer): Float32Array {
-  const data = buf.getChannelData(0);
-  const out = new Float32Array(PEAK_BUCKETS);
-  const per = Math.max(1, Math.floor(data.length / PEAK_BUCKETS));
-  for (let b = 0; b < PEAK_BUCKETS; b++) {
-    let peak = 0;
-    const from = b * per;
-    const to = Math.min(data.length, from + per);
-    for (let i = from; i < to; i++) {
-      const v = data[i] < 0 ? -data[i] : data[i];
-      if (v > peak) peak = v;
-    }
-    out[b] = peak;
-  }
-  return out;
-}
-
-export const peaksFor = (ref: MediaRef): Float32Array | undefined =>
+/** The per-channel min/max/RMS envelope, or undefined until the decode lands. */
+export const peaksFor = (ref: MediaRef): ChannelEnvelope[] | undefined =>
   peakCache.get(refKey(ref));
 
 export const audioBufferFor = (ref: MediaRef): AudioBuffer | undefined =>

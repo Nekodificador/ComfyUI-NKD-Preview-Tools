@@ -26,6 +26,7 @@ from nkd_timeline import (  # noqa: E402
     ASPECT_MODES, BLEND_MODES, QUANTIZE_MODES, NKDTimeline, _to_mask, _to_rgb,
     blend_pixels, resolve_resolution,
     build_sources, classify,
+    AudioEnv, audio_env, clip_gain_ramp,
     fit_frames, gather_window, marker_indices, mix_audio, parse_frame_list,
     parse_timeline, quantize_count, quantize_stops,
     source_frame, source_meta, timeline_span, track_blend,
@@ -318,7 +319,7 @@ def test_current_image_is_the_composited_frame():
         seq[i] = i / 100.0
 
     def run(playhead):
-        tl = json.dumps({
+        tl = _dumps({
             "clips": [{"src": "media_0", "track": 0, "start": 0, "trimIn": 0,
                        "length": 20}],
             "masks": [], "audio": [], "ui": {"playhead": playhead}})
@@ -357,7 +358,7 @@ def test_gaps_are_black_and_the_flat_lanes_cost_nothing():
     import json
 
     seq = torch.full((6, 4, 4, 3), 0.5)
-    tl = json.dumps({
+    tl = _dumps({
         "clips": [{"src": "media_0", "track": 0, "start": 2, "trimIn": 0, "length": 6}],
         "masks": [], "audio": [], "ui": {"playhead": 0}})
     r = NKDTimeline.execute(
@@ -386,7 +387,7 @@ def test_gaps_are_black_and_the_flat_lanes_cost_nothing():
     tl2 = json.loads(tl)
     tl2["masks"] = [{"src": "media_0", "track": 0, "start": 0, "trimIn": 0, "length": 6}]
     r2 = NKDTimeline.execute(
-        media={"media_0": seq}, timeline=json.dumps(tl2), import_mode="stack", fps=24.0,
+        media={"media_0": seq}, timeline=_dumps(tl2), import_mode="stack", fps=24.0,
         start_frame=0, frame_count=12, width=4, height=4, fit="stretch", aspect_ratio="Custom", megapixels=1.0,
             size_multiple=16,
         model="free", quantize_n=8, clip_audio=False)
@@ -406,7 +407,7 @@ def test_generate_mask_unions_the_lane_and_the_gaps():
 
     def run(tl):
         r = NKDTimeline.execute(
-            media={"media_0": seq}, timeline=json.dumps(tl), import_mode="stack", fps=24.0,
+            media={"media_0": seq}, timeline=_dumps(tl), import_mode="stack", fps=24.0,
             start_frame=0, frame_count=10, width=4, height=4, fit="stretch", aspect_ratio="Custom", megapixels=1.0,
             size_multiple=16,
             model="free", quantize_n=8, clip_audio=False)
@@ -500,7 +501,7 @@ def test_audio_only_clip_is_a_gap_that_still_sounds():
             {"src": "media_0", "track": 0, "start": 8, "trimIn": 8, "length": 4}],
             "masks": [], "audio": [], "ui": {"playhead": 0}}
         r = NKDTimeline.execute(
-            media={"media_0": FakeVideo(12)}, timeline=json.dumps(tl),
+            media={"media_0": FakeVideo(12)}, timeline=_dumps(tl),
             import_mode="stack", fps=24.0, start_frame=0, frame_count=12, width=4,
             height=4, fit="stretch", aspect_ratio="Custom", megapixels=1.0,
             size_multiple=16, model="free", quantize_n=8, clip_audio=True)
@@ -618,7 +619,7 @@ def test_markers_output_feeds_freeze_frames():
     seq = torch.zeros((20, 4, 4, 3))
     for i in range(20):
         seq[i] = i / 100.0
-    tl = json.dumps({
+    tl = _dumps({
         # Clip starts at 5, so its marker at offset 7 is timeline frame 12.
         "clips": [{"src": "media_0", "track": 0, "start": 5, "trimIn": 0, "length": 15,
                    "markers": [7, 1]}],
@@ -727,6 +728,104 @@ def test_tensor_strips_describe_the_tensor_not_the_upstream_file():
 
     # No node id means no editor listening: writing files for nobody is pure waste.
     assert tensor_strips(sources, None, 24.0) == {}
+
+
+
+from json import dumps as _dumps
+
+
+def test_clip_gain_ramp_matches_the_editor_curve():
+    # Flat clips stay a scalar: the common case must not allocate a per-sample tensor.
+    assert clip_gain_ramp(AudioEnv(gain=0.5, length=100), 10) == 0.5
+    assert clip_gain_ramp(AudioEnv(gain=1.0, fade_in=10, length=0), 10) == 1.0
+
+    # Linear fade in, exactly `offset / fade_in` - the same formula as `gainAt` in
+    # src/timeline/model.ts. Drift between the two means the preview lies about the render.
+    k = clip_gain_ramp(AudioEnv(fade_in=10, length=100), 12)
+    assert float(k[0]) == 0.0
+    assert abs(float(k[5]) - 0.5) < 1e-6
+    assert float(k[10]) == 1.0 and float(k[11]) == 1.0
+
+    # Fade out measured from the TAIL: `(length - offset) / fade_out`.
+    k = clip_gain_ramp(AudioEnv(fade_out=10, length=100), 100)
+    assert float(k[89]) == 1.0
+    assert abs(float(k[95]) - 0.5) < 1e-6
+    assert float(k[99]) < 0.11
+
+    # Gain scales the ramp rather than replacing it.
+    k = clip_gain_ramp(AudioEnv(gain=0.5, fade_in=10, length=100), 10)
+    assert abs(float(k[5]) - 0.25) < 1e-6
+
+
+def test_a_clip_whose_head_is_outside_the_window_does_not_fade_in_again():
+    """The trap this whole envelope exists for.
+
+    Rendering from frame 50 of a clip that starts at 0 with a 20-frame fade-in: those 20
+    frames are BEHIND the window, so the surviving audio is at full level throughout.
+    Anchoring the ramp to the window instead of to the clip fades in at the window edge -
+    a dip in the middle of a stretch the user never touched.
+    """
+    sr, fps = 100, 10
+    clip = {"start": 0, "length": 100, "fadeIn": 20, "fadeOut": 0, "gain": 1.0}
+    env = audio_env(clip, 50, fps, sr)          # a = 50: the window starts mid-clip
+    assert env.head == 500 and env.fade_in == 200
+    k = clip_gain_ramp(env, 50)
+    assert float(k[0]) == 1.0, "re-faded at the window edge"
+    assert float(k.min()) == 1.0
+
+    # And the head that IS inside the window still fades.
+    env0 = audio_env(clip, 0, fps, sr)
+    assert env0.head == 0
+    k0 = clip_gain_ramp(env0, 250)      # past the 200-sample fade-in
+    assert float(k0[0]) == 0.0
+    assert abs(float(k0[100]) - 0.5) < 1e-6
+    assert float(k0[200]) == 1.0
+
+
+def test_mix_audio_applies_the_ramp():
+    sr = 100
+    ones = torch.ones((1, 100))
+    env = AudioEnv(fade_in=20, fade_out=20, length=100)
+    out = mix_audio([(ones, sr, 0, 0, env)], 100, sr)
+    assert float(out[0, 0, 0]) == 0.0
+    assert abs(float(out[0, 0, 10]) - 0.5) < 1e-6
+    assert float(out[0, 0, 50]) == 1.0
+    assert abs(float(out[0, 0, 90]) - 0.5) < 1e-6
+    # A plain float still works: the audio-only fallback path passes one.
+    assert abs(float(mix_audio([(ones, sr, 0, 0, 0.25)], 50, sr)[0, 0, 0]) - 0.25) < 1e-6
+    # A NEGATIVE offset drops samples off the front, and those come off the ramp too.
+    clipped = mix_audio([(ones, sr, -20, 0, env)], 100, sr)
+    assert float(clipped[0, 0, 0]) == 1.0, "the fade-in replayed after a front clip"
+
+
+def test_video_clips_carry_their_own_level_and_fades():
+    """The line that made this feature impossible was `1.0` hardcoded in
+    `_queue_clip_audio`: a video clip's sound was always mixed flat."""
+    tl = parse_timeline(_dumps({
+        "clips": [{"src": "media_0", "start": 0, "length": 48,
+                   "gain": 0.5, "fadeIn": 12, "fadeOut": 6}],
+    }))
+    c = tl["clips"][0]
+    assert c["gain"] == 0.5 and c["fadeIn"] == 12 and c["fadeOut"] == 6
+    # Absent means "the way it always behaved", so old workflows are untouched.
+    old = parse_timeline(_dumps({"clips": [{"src": "media_0", "length": 10}]}))
+    assert old["clips"][0] == {**old["clips"][0], "gain": 1.0, "fadeIn": 0, "fadeOut": 0}
+
+
+def test_fades_are_clamped_into_the_clip():
+    # Two ramps longer than the clip are scaled TOGETHER, keeping the shape the user drew
+    # instead of letting them overlap and dip in the middle.
+    tl = parse_timeline(_dumps({
+        "clips": [{"src": "m", "start": 0, "length": 10, "fadeIn": 30, "fadeOut": 10}],
+    }))
+    c = tl["clips"][0]
+    assert c["fadeIn"] + c["fadeOut"] <= c["length"]
+    assert c["fadeIn"] > c["fadeOut"], "the 3:1 shape survived the clamp"
+    # Gain is clamped to the same ceiling the editor enforces.
+    hot = parse_timeline(_dumps({"clips": [{"src": "m", "length": 5, "gain": 99}]}))
+    assert hot["clips"][0]["gain"] == 2.0
+    neg = parse_timeline(_dumps({"clips": [{"src": "m", "length": 5, "gain": -3}]}))
+    assert neg["clips"][0]["gain"] == 0.0
 
 
 

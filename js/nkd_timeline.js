@@ -158,6 +158,65 @@ function quantizeStops(max, mode, k = 8) {
   for (let s = firstStop(step, offset); s <= max; s += step) stops.push(s);
   return stops;
 }
+function fadeFields(raw, length) {
+  const g = num$1(raw == null ? void 0 : raw.gain, 1);
+  const c = {
+    length,
+    fadeIn: Math.max(0, int(raw == null ? void 0 : raw.fadeIn)),
+    fadeOut: Math.max(0, int(raw == null ? void 0 : raw.fadeOut))
+  };
+  clampFades(c);
+  return {
+    ...g !== 1 ? { gain: Math.max(0, Math.min(MAX_GAIN, g)) } : {},
+    ...c.fadeIn ? { fadeIn: c.fadeIn } : {},
+    ...c.fadeOut ? { fadeOut: c.fadeOut } : {}
+  };
+}
+const MAX_GAIN = 2;
+function clampFades(c) {
+  const len = Math.max(0, c.length);
+  let fi = Math.max(0, Math.round(c.fadeIn ?? 0));
+  let fo = Math.max(0, Math.round(c.fadeOut ?? 0));
+  if (fi + fo > len) {
+    const k = fi + fo ? len / (fi + fo) : 0;
+    fi = Math.floor(fi * k);
+    fo = Math.floor(fo * k);
+  }
+  if (fi > 0) c.fadeIn = fi;
+  else delete c.fadeIn;
+  if (fo > 0) c.fadeOut = fo;
+  else delete c.fadeOut;
+}
+function gainAt(c, offset) {
+  if (c.muted) return 0;
+  const g = c.gain ?? 1;
+  const len = Math.max(0, c.length);
+  if (offset < 0 || offset >= len) return 0;
+  let k = 1;
+  const fi = c.fadeIn ?? 0;
+  if (fi > 0 && offset < fi) k = offset / fi;
+  const fo = c.fadeOut ?? 0;
+  if (fo > 0) {
+    const fromEnd = len - offset;
+    if (fromEnd < fo) k = Math.min(k, fromEnd / fo);
+  }
+  return g * k;
+}
+const GAIN_DB_STEP = 3;
+const GAIN_DB_FLOOR = -30;
+function snapGainToDb(g) {
+  if (g <= 0) return 0;
+  const db = 20 * Math.log10(g);
+  if (db < GAIN_DB_FLOOR - GAIN_DB_STEP / 2) return 0;
+  const snapped = Math.round(db / GAIN_DB_STEP) * GAIN_DB_STEP;
+  return Math.min(MAX_GAIN, 10 ** (snapped / 20));
+}
+function levelStops(c) {
+  const len = Math.max(0, c.length);
+  const eps = Math.min(1e-6, len);
+  const offs = [0, c.fadeIn ?? 0, len - (c.fadeOut ?? 0), len - eps].map((o) => Math.max(0, Math.min(len - eps, o)));
+  return [...new Set(offs)].sort((a, b) => a - b).map((o) => [o, gainAt(c, o)]);
+}
 function cleanMarkers(raw, length) {
   if (!Array.isArray(raw)) return [];
   const seen = /* @__PURE__ */ new Set();
@@ -190,8 +249,8 @@ function toggleMarker(clip, f) {
 }
 function markerFrames(t) {
   const out = /* @__PURE__ */ new Set();
-  for (const lane of allLanes(t)) {
-    for (const c of lane) for (const m of c.markers ?? []) out.add(c.start + m);
+  for (const lane2 of allLanes(t)) {
+    for (const c of lane2) for (const m of c.markers ?? []) out.add(c.start + m);
   }
   return [...out].sort((a, b) => a - b);
 }
@@ -212,6 +271,7 @@ function parseClipList(raw) {
       length,
       ...c.muted ? { muted: true } : {},
       ...c.audioOnly ? { audioOnly: true } : {},
+      ...fadeFields(c, length),
       ...markers.length ? { markers } : {}
     });
   }
@@ -242,11 +302,13 @@ function parseTimeline(raw) {
       out.audio.push({
         id: typeof a.id === "string" && a.id ? a.id : newId(),
         src: String(a.src),
+        track: Math.max(0, int(a.track)),
         start: Math.max(0, int(a.start)),
         trimIn: Math.max(0, int(a.trimIn)),
         length,
         gain: num$1(a.gain, 1),
-        ...a.muted ? { muted: true } : {}
+        ...a.muted ? { muted: true } : {},
+        ...fadeFields(a, length)
       });
     }
   }
@@ -271,6 +333,9 @@ function serialiseTimeline(t) {
       ...c.muted ? { muted: true } : {},
       // omitted when false: keeps the JSON small
       ...c.audioOnly ? { audioOnly: true } : {},
+      ...c.gain !== void 0 && c.gain !== 1 ? { gain: c.gain } : {},
+      ...c.fadeIn ? { fadeIn: c.fadeIn } : {},
+      ...c.fadeOut ? { fadeOut: c.fadeOut } : {},
       ...((_a = c.markers) == null ? void 0 : _a.length) ? { markers: c.markers } : {}
     };
   };
@@ -286,7 +351,10 @@ function serialiseTimeline(t) {
       trimIn: a.trimIn,
       length: a.length,
       gain: a.gain,
-      ...a.muted ? { muted: true } : {}
+      ...a.track ? { track: a.track } : {},
+      ...a.muted ? { muted: true } : {},
+      ...a.fadeIn ? { fadeIn: a.fadeIn } : {},
+      ...a.fadeOut ? { fadeOut: a.fadeOut } : {}
     })),
     // ZOOM AND SCROLL ARE DELIBERATELY ABSENT. This string is a node INPUT, and a widget
     // value goes verbatim into ComfyUI's cache signature (comfy_execution/caching.py:126),
@@ -308,7 +376,7 @@ function sortClips(t) {
   t.audio.sort((a, b) => a.start - b.start);
 }
 function slotInUse(t, src) {
-  return allLanes(t).some((lane) => lane.some((c) => c.src === src));
+  return allLanes(t).some((lane2) => lane2.some((c) => c.src === src));
 }
 function allLanes(t) {
   return [t.clips, t.masks, t.audio];
@@ -319,16 +387,16 @@ function sourceFrame(clip, f, srcFps, fps) {
 }
 function timelineSpan(t) {
   let end = 0;
-  for (const lane of allLanes(t)) {
-    for (const c of lane) end = Math.max(end, c.start + c.length);
+  for (const lane2 of allLanes(t)) {
+    for (const c of lane2) end = Math.max(end, c.start + c.length);
   }
   return end;
 }
 function materialRange(t) {
   let start = Infinity;
   let end = 0;
-  for (const lane of [t.clips, t.masks]) {
-    for (const c of lane) {
+  for (const lane2 of [t.clips, t.masks]) {
+    for (const c of lane2) {
       start = Math.min(start, c.start);
       end = Math.max(end, c.start + c.length);
     }
@@ -356,8 +424,8 @@ function snap(value, candidates, threshold) {
 }
 function snapCandidates(t, extra = []) {
   const out = [0, t.ui.playhead, ...extra];
-  for (const lane of allLanes(t)) {
-    for (const c of lane) out.push(c.start, c.start + c.length);
+  for (const lane2 of allLanes(t)) {
+    for (const c of lane2) out.push(c.start, c.start + c.length);
   }
   return out;
 }
@@ -383,12 +451,14 @@ function trimStart(clip, newStart, srcFps, fps) {
   clip.trimIn = Math.max(0, clip.trimIn + Math.round(delta * ratio));
   clip.start = s;
   clip.length = end - s;
+  clampFades(clip);
   shiftMarkers(clip, delta);
 }
 function trimEnd(clip, newEnd, srcFrames, srcFps, fps) {
   const ratio = fps > 0 ? srcFps / fps : 1;
   const maxLen = srcFrames > 0 ? Math.max(1, Math.floor((srcFrames - clip.trimIn) / (ratio || 1))) : Number.MAX_SAFE_INTEGER;
   clip.length = Math.max(1, Math.min(Math.round(newEnd) - clip.start, maxLen));
+  clampFades(clip);
   pruneMarkers(clip);
 }
 function splitClip(clip, frame, srcFps, fps) {
@@ -406,6 +476,8 @@ function splitClip(clip, frame, srcFps, fps) {
   const marks = clip.markers ?? [];
   const rightMarks = marks.filter((m) => m >= leftLen).map((m) => m - leftLen);
   clip.length = leftLen;
+  clampFades(clip);
+  clampFades(right);
   clip.markers = cleanMarkers(marks, clip.length);
   if (!clip.markers.length) delete clip.markers;
   right.markers = cleanMarkers(rightMarks, right.length);
@@ -432,9 +504,9 @@ function moveClipToLane(t, clip, toMask) {
 }
 function cropToRange(t, start, end, fps, rateFor) {
   let changed = false;
-  for (const lane of allLanes(t)) {
+  for (const lane2 of allLanes(t)) {
     const kept = [];
-    for (const c of lane) {
+    for (const c of lane2) {
       if (c.start + c.length <= start || c.start >= end) {
         changed = true;
         continue;
@@ -450,17 +522,17 @@ function cropToRange(t, start, end, fps, rateFor) {
       }
       kept.push(c);
     }
-    if (kept.length !== lane.length) {
-      lane.length = 0;
-      lane.push(...kept);
+    if (kept.length !== lane2.length) {
+      lane2.length = 0;
+      lane2.push(...kept);
     }
   }
   return changed;
 }
 function trimToPlayhead(t, frame, side, fps, rateFor, only) {
   let changed = false;
-  for (const lane of allLanes(t)) {
-    for (const c of lane) {
+  for (const lane2 of allLanes(t)) {
+    for (const c of lane2) {
       if (only && !only.has(c.id)) continue;
       if (frame <= c.start || frame >= c.start + c.length) continue;
       const rate = rateFor(c.src) || fps;
@@ -473,8 +545,8 @@ function trimToPlayhead(t, frame, side, fps, rateFor, only) {
 }
 function clampClipsToSources(t, fps, srcFramesFor, rateFor) {
   let changed = false;
-  for (const lane of allLanes(t)) {
-    for (const c of lane) {
+  for (const lane2 of allLanes(t)) {
+    for (const c of lane2) {
       const srcFrames = srcFramesFor(c.src);
       if (srcFrames === null || srcFrames <= 0) continue;
       const ratio = (rateFor(c.src) || fps) / (fps || 1);
@@ -485,6 +557,7 @@ function clampClipsToSources(t, fps, srcFramesFor, rateFor) {
       const maxLen = Math.max(1, Math.floor((srcFrames - c.trimIn) / (ratio || 1)));
       if (c.length > maxLen) {
         c.length = maxLen;
+        clampFades(c);
         pruneMarkers(c);
         changed = true;
       }
@@ -494,8 +567,8 @@ function clampClipsToSources(t, fps, srcFramesFor, rateFor) {
 }
 function expandClipsToSources(t, fps, srcFramesFor, rateFor, ids) {
   let changed = false;
-  for (const lane of allLanes(t)) {
-    for (const c of lane) {
+  for (const lane2 of allLanes(t)) {
+    for (const c of lane2) {
       if (ids && !ids.has(c.id)) continue;
       const srcFrames = srcFramesFor(c.src);
       if (srcFrames === null || srcFrames <= 0) continue;
@@ -513,8 +586,8 @@ function expandClipsToSources(t, fps, srcFramesFor, rateFor, ids) {
 function clipExtent(t, frame, ids) {
   let start = Infinity;
   let end = 0;
-  for (const lane of allLanes(t)) {
-    for (const c of lane) {
+  for (const lane2 of allLanes(t)) {
+    for (const c of lane2) {
       const hit = ids ? ids.has(c.id) : frame >= c.start && frame < c.start + c.length;
       if (!hit) continue;
       start = Math.min(start, c.start);
@@ -523,21 +596,150 @@ function clipExtent(t, frame, ids) {
   }
   return end > 0 && Number.isFinite(start) ? { start, end } : null;
 }
-function placementFor(t, lane, mode) {
+function placementFor(t, lane2, mode) {
   if (mode === "stack") {
-    const track = lane.reduce((m, c) => Math.max(m, c.track + 1), 0);
+    const track = lane2.reduce((m, c) => Math.max(m, c.track + 1), 0);
     return { start: 0, track };
   }
-  const start = lane.filter((c) => c.track === 0).reduce((m, c) => Math.max(m, c.start + c.length), 0);
+  const start = lane2.filter((c) => c.track === 0).reduce((m, c) => Math.max(m, c.start + c.length), 0);
   return { start, track: 0 };
 }
 function fitRect(sw, sh, dw, dh, mode) {
   if (sw <= 0 || sh <= 0) return { x: 0, y: 0, w: dw, h: dh };
   if (mode === "stretch") return { x: 0, y: 0, w: dw, h: dh };
-  const scale = mode === "cover" ? Math.max(dw / sw, dh / sh) : Math.min(dw / sw, dh / sh);
-  const w = sw * scale;
-  const h = sh * scale;
+  const scale2 = mode === "cover" ? Math.max(dw / sw, dh / sh) : Math.min(dw / sw, dh / sh);
+  const w = sw * scale2;
+  const h = sh * scale2;
   return { x: (dw - w) / 2, y: (dh - h) / 2, w, h };
+}
+const ENV_BUCKET = 256;
+function buildEnvelope(buf) {
+  const out = [];
+  const n = Math.max(1, Math.ceil(buf.length / ENV_BUCKET));
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+    const d = buf.getChannelData(ch);
+    const mn = new Float32Array(n);
+    const mx = new Float32Array(n);
+    const rms = new Float32Array(n);
+    for (let b = 0; b < n; b++) {
+      const from = b * ENV_BUCKET;
+      const to = Math.min(d.length, from + ENV_BUCKET);
+      let lo = 0, hi = 0, sq = 0;
+      for (let i = from; i < to; i++) {
+        const v = d[i];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+        sq += v * v;
+      }
+      mn[b] = lo;
+      mx[b] = hi;
+      rms[b] = to > from ? Math.sqrt(sq / (to - from)) : 0;
+    }
+    out.push({ min: mn, max: mx, rms });
+  }
+  return out;
+}
+const STEREO_MIN_H = 28;
+const DB_FLOOR = -60;
+function scale(v, db) {
+  if (!db) return v;
+  const m = Math.abs(v);
+  if (m <= 1e-6) return 0;
+  const d = 20 * Math.log10(m);
+  if (d <= DB_FLOOR) return 0;
+  return (1 - d / DB_FLOOR) * (v < 0 ? -1 : 1);
+}
+function column(buf, env, chans, s0, s1, out) {
+  let lo = 0, hi = 0, sq = 0, n = 0;
+  if (s1 - s0 >= ENV_BUCKET) {
+    const b0 = Math.max(0, Math.floor(s0 / ENV_BUCKET));
+    const b1 = Math.max(b0 + 1, Math.floor(s1 / ENV_BUCKET));
+    for (const ch of chans) {
+      const e = env[ch];
+      if (!e) continue;
+      const end = Math.min(e.min.length, b1);
+      for (let b = b0; b < end; b++) {
+        if (e.min[b] < lo) lo = e.min[b];
+        if (e.max[b] > hi) hi = e.max[b];
+        sq += e.rms[b] * e.rms[b];
+        n++;
+      }
+    }
+  } else {
+    const i0 = Math.max(0, Math.floor(s0));
+    const i1 = Math.max(i0 + 1, Math.ceil(s1));
+    for (const ch of chans) {
+      const d = buf.getChannelData(ch);
+      const end = Math.min(d.length, i1);
+      for (let i = i0; i < end; i++) {
+        const v = d[i];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+        sq += v * v;
+        n++;
+      }
+    }
+  }
+  out.min = lo;
+  out.max = hi;
+  out.rms = n ? Math.sqrt(sq / n) : 0;
+}
+function lane(ctx, buf, env, chans, fromSec, toSec, x, y, w, h, x0, x1, colors, db) {
+  const mid = y + h / 2;
+  const half = h / 2;
+  const sr = buf.sampleRate;
+  const spanSec = Math.max(1e-9, toSec - fromSec);
+  const samplesPerPx = spanSec * sr / Math.max(1, w);
+  ctx.fillStyle = colors.zero;
+  ctx.fillRect(x + x0, mid, x1 - x0, 1);
+  if (samplesPerPx < 1) {
+    ctx.strokeStyle = colors.peak;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const d = buf.getChannelData(chans[0]);
+    for (let px = x0; px < x1; px++) {
+      const i = Math.round((fromSec + spanSec * (px / Math.max(1, w))) * sr);
+      const v = scale(i >= 0 && i < d.length ? d[i] : 0, db);
+      const py = mid - v * half;
+      if (px === x0) ctx.moveTo(x + px + 0.5, py);
+      else ctx.lineTo(x + px + 0.5, py);
+    }
+    ctx.stroke();
+    return;
+  }
+  const col = { min: 0, max: 0, rms: 0 };
+  ctx.fillStyle = colors.peak;
+  for (let px = x0; px < x1; px++) {
+    const t0 = fromSec + spanSec * (px / Math.max(1, w));
+    const t1 = fromSec + spanSec * ((px + 1) / Math.max(1, w));
+    column(buf, env, chans, t0 * sr, t1 * sr, col);
+    const top = mid - scale(col.max, db) * half;
+    const bot = mid - scale(col.min, db) * half;
+    ctx.fillRect(x + px, top, 1, Math.max(1, bot - top));
+  }
+  ctx.fillStyle = colors.body;
+  for (let px = x0; px < x1; px++) {
+    const t0 = fromSec + spanSec * (px / Math.max(1, w));
+    const t1 = fromSec + spanSec * ((px + 1) / Math.max(1, w));
+    column(buf, env, chans, t0 * sr, t1 * sr, col);
+    const r = scale(col.rms, db) * half;
+    if (r <= 0.5) continue;
+    ctx.fillRect(x + px, mid - r, 1, r * 2);
+  }
+}
+function drawWave(ctx, buf, env, fromSec, toSec, x, y, w, h, colors, db, visibleX0 = -Infinity, visibleX1 = Infinity) {
+  if (w <= 0 || h <= 2 || !env.length) return;
+  const x0 = Math.max(0, Math.floor(visibleX0 - x));
+  const x1 = Math.min(Math.ceil(w), Math.ceil(visibleX1 - x));
+  if (x1 <= x0) return;
+  if (env.length >= 2 && h >= STEREO_MIN_H) {
+    const lh = h / 2;
+    lane(ctx, buf, env, [0], fromSec, toSec, x, y, w, lh, x0, x1, colors, db);
+    lane(ctx, buf, env, [1], fromSec, toSec, x, y + lh, w, lh, x0, x1, colors, db);
+    return;
+  }
+  const all = env.map((_, i) => i);
+  lane(ctx, buf, env, all, fromSec, toSec, x, y, w, h, x0, x1, colors, db);
 }
 const refKey = (r) => `${r.type}|${r.subfolder}|${r.filename}`;
 let cacheBust = 0;
@@ -556,22 +758,14 @@ function bustCaches() {
   thumbCache.clear();
   audioCache.clear();
   peakCache.clear();
-  releaseUnused([]);
 }
-function forget(ref) {
+function forgetFile(ref) {
   const key = refKey(ref);
   stripRefs.delete(key);
   infoCache.delete(key);
   thumbCache.delete(key);
   audioCache.delete(key);
   peakCache.delete(key);
-  const p = pool.get(key);
-  if (p) {
-    window.clearTimeout(p.guard);
-    p.el.removeAttribute("src");
-    p.el.load();
-    pool.delete(key);
-  }
 }
 const FILE_WIDGETS = ["file", "video", "audio", "image", "filename", "path"];
 const looksLikeFile = (v) => typeof v === "string" && v.length > 0 && v !== "none" && /\.[a-z0-9]{2,5}$/i.test(v);
@@ -650,37 +844,193 @@ function probe(ref) {
   return p;
 }
 const cachedInfo = (ref) => infoCache.get(refKey(ref));
-const pool = /* @__PURE__ */ new Map();
-function makePooled(ref) {
-  const el2 = document.createElement("video");
-  el2.src = viewUrl(ref);
-  el2.muted = true;
-  el2.playsInline = true;
-  el2.preload = "auto";
-  el2.crossOrigin = "anonymous";
-  const entry = {
-    el: el2,
-    good: document.createElement("canvas"),
-    hasGood: false,
-    wantTime: -1,
-    seeking: false,
-    guard: 0
-  };
-  el2.addEventListener("loadedmetadata", () => applySeek(entry));
-  el2.addEventListener("seeked", () => {
-    window.clearTimeout(entry.guard);
-    entry.seeking = false;
-    captureGood(entry);
-    if (entry.wantTime >= 0 && Math.abs(entry.wantTime - el2.currentTime) > 1e-3) {
-      applySeek(entry);
+const stripRefs = /* @__PURE__ */ new Set();
+const DRIFT_S = 0.25;
+class VideoPool {
+  constructor() {
+    __publicField(this, "pool", /* @__PURE__ */ new Map());
+    /** Called whenever one of our elements gains something new to show, so the editor can
+     *  repaint instead of waiting for the next poll. One per pool, so several editors do not
+     *  overwrite each other's - the last one registered used to win, and the rest went
+     *  quiet. */
+    __publicField(this, "onReady", null);
+  }
+  make(ref) {
+    const el2 = document.createElement("video");
+    el2.src = viewUrl(ref);
+    el2.muted = true;
+    el2.playsInline = true;
+    el2.preload = "auto";
+    el2.crossOrigin = "anonymous";
+    const entry = {
+      el: el2,
+      good: document.createElement("canvas"),
+      hasGood: false,
+      wantTime: -1,
+      seeking: false,
+      guard: 0
+    };
+    el2.addEventListener("loadedmetadata", () => this.applySeek(entry));
+    el2.addEventListener("seeked", () => {
+      window.clearTimeout(entry.guard);
+      entry.seeking = false;
+      captureGood(entry);
+      if (entry.wantTime >= 0 && Math.abs(entry.wantTime - el2.currentTime) > 1e-3) {
+        this.applySeek(entry);
+      }
+    });
+    el2.addEventListener("loadeddata", () => {
+      var _a;
+      captureGood(entry);
+      (_a = this.onReady) == null ? void 0 : _a.call(this);
+      ensureAudio(ref, () => {
+        var _a2;
+        return (_a2 = this.onReady) == null ? void 0 : _a2.call(this);
+      });
+    });
+    return entry;
+  }
+  entry(ref) {
+    const key = refKey(ref);
+    let p = this.pool.get(key);
+    if (!p) {
+      p = this.make(ref);
+      this.pool.set(key, p);
     }
-  });
-  el2.addEventListener("loadeddata", () => {
-    captureGood(entry);
-    onPooledReady == null ? void 0 : onPooledReady();
-    ensureAudio(ref, () => onPooledReady == null ? void 0 : onPooledReady());
-  });
-  return entry;
+    return p;
+  }
+  /**
+   * Ask the element to seek, but only once it can.
+   *
+   * Assigning `currentTime` while `readyState` is HAVE_NOTHING is IGNORED by the browser -
+   * silently, without throwing - so `seeked` never fires. Setting `seeking = true` around
+   * that leaves the flag stuck forever, every later seek short-circuits on it, and the
+   * preview freezes on whatever frame was captured first. It only ever worked after a hard
+   * reload because the cached file has its metadata ready in the same tick.
+   */
+  applySeek(p) {
+    if (p.seeking || p.wantTime < 0) return;
+    if (p.el.readyState < 1) return;
+    p.seeking = true;
+    try {
+      p.el.currentTime = p.wantTime;
+    } catch {
+      p.seeking = false;
+      return;
+    }
+    window.clearTimeout(p.guard);
+    p.guard = window.setTimeout(() => {
+      var _a;
+      p.seeking = false;
+      captureGood(p);
+      (_a = this.onReady) == null ? void 0 : _a.call(this);
+    }, 2e3);
+  }
+  videoFor(ref) {
+    return this.entry(ref).el;
+  }
+  /** Pide un instante. Coalescente: durante un arrastre llegan decenas de peticiones por
+   *  segundo y el `<video>` solo puede atender una a la vez. */
+  seekTo(ref, seconds, tolerance = 0.02) {
+    const p = this.entry(ref);
+    const want = Math.max(0, seconds);
+    if (p.el.readyState >= 1 && !p.seeking && Math.abs(p.el.currentTime - want) < tolerance) {
+      p.wantTime = want;
+      return;
+    }
+    p.wantTime = want;
+    this.applySeek(p);
+  }
+  /**
+   * Let the element PLAY and only correct it when it has drifted.
+   *
+   * During playback, seeking once per displayed frame is what makes a preview stutter: an
+   * h264 seek is far more expensive than simply decoding forward. So while running at 1x we
+   * hand the browser the job it is good at and step in only past the drift threshold - big
+   * enough to absorb ordinary jitter, small enough that a cut is never visibly late.
+   */
+  followPlayback(ref, seconds) {
+    const p = this.entry(ref);
+    if (p.el.paused) {
+      p.wantTime = Math.max(0, seconds);
+      this.applySeek(p);
+      void p.el.play().catch(() => {
+      });
+      return;
+    }
+    if (Math.abs(p.el.currentTime - seconds) > DRIFT_S) {
+      p.wantTime = Math.max(0, seconds);
+      this.applySeek(p);
+    }
+  }
+  /**
+   * The picture to draw for a source at `seconds`, whatever kind of source it is.
+   *
+   * The single place that knows a TENSOR source has no video element behind it. Pointing
+   * the pool at its contact sheet would spawn a `<video>` on a PNG: no error, no `seeked`,
+   * just a slot that never draws - so route strips to their stills and leave the pool to
+   * the sources that actually have a file to seek.
+   */
+  pictureAt(ref, seconds, playing2) {
+    if (stripRefs.has(refKey(ref))) return thumbnailAt(ref, seconds);
+    if (playing2) this.followPlayback(ref, seconds);
+    else this.seekTo(ref, seconds, 0.02);
+    return this.frameSource(ref);
+  }
+  /** Lo que hay que pintar AHORA: el frame vivo si está listo, y si no el último bueno. */
+  frameSource(ref) {
+    const p = this.pool.get(refKey(ref));
+    if (!p) return null;
+    if (!p.seeking && p.el.readyState >= 2) return p.el;
+    return p.hasGood ? p.good : null;
+  }
+  /** Stop our elements. Called when the transport stops, so a clip that scrolled out from
+   *  under the playhead does not keep decoding in the background. */
+  pauseAll() {
+    for (const p of this.pool.values()) {
+      if (!p.el.paused) p.el.pause();
+    }
+  }
+  drop(key) {
+    const p = this.pool.get(key);
+    if (!p) return;
+    window.clearTimeout(p.guard);
+    p.el.removeAttribute("src");
+    p.el.load();
+    this.pool.delete(key);
+  }
+  /** Suelta los elementos que ya no usa ningún clip — un `<video>` retenido mantiene el
+   *  fichero decodificándose en memoria. */
+  releaseUnused(active) {
+    const keep = /* @__PURE__ */ new Set();
+    for (const r of active) keep.add(refKey(r));
+    for (const key of [...this.pool.keys()]) {
+      if (!keep.has(key)) this.drop(key);
+    }
+  }
+  /** Everything, on teardown. */
+  releaseAll() {
+    this.releaseUnused([]);
+  }
+  /** A slot silently started pointing somewhere else: drop the file's shared caches and
+   *  our element for it. */
+  forget(ref) {
+    forgetFile(ref);
+    this.drop(refKey(ref));
+  }
+  /**
+   * The ↻ button: assume every file on disk changed under us.
+   *
+   * The shared caches and the URL counter are cleared GLOBALLY because the staleness is
+   * global - the bytes really did change for everyone.
+   * ponytail: but only THIS node's elements are torn down. The other nodes keep the
+   * element they are holding until they next release it; the button is pressed on one node
+   * and reloading half the workflow's video behind the user's back is the louder bug.
+   */
+  bust() {
+    bustCaches();
+    this.releaseAll();
+  }
 }
 function captureGood(p) {
   const { el: el2, good } = p;
@@ -691,83 +1041,6 @@ function captureGood(p) {
     good.getContext("2d").drawImage(el2, 0, 0);
     p.hasGood = true;
   } catch {
-  }
-}
-function applySeek(p) {
-  if (p.seeking || p.wantTime < 0) return;
-  if (p.el.readyState < 1) return;
-  p.seeking = true;
-  try {
-    p.el.currentTime = p.wantTime;
-  } catch {
-    p.seeking = false;
-    return;
-  }
-  window.clearTimeout(p.guard);
-  p.guard = window.setTimeout(() => {
-    p.seeking = false;
-    captureGood(p);
-    onPooledReady == null ? void 0 : onPooledReady();
-  }, 2e3);
-}
-let onPooledReady = null;
-function setPooledReadyHandler(fn) {
-  onPooledReady = fn;
-}
-function seekTo(ref, seconds, tolerance = 0.02) {
-  const p = pool.get(refKey(ref)) ?? makePooled(ref);
-  pool.set(refKey(ref), p);
-  const want = Math.max(0, seconds);
-  if (p.el.readyState >= 1 && !p.seeking && Math.abs(p.el.currentTime - want) < tolerance) {
-    p.wantTime = want;
-    return;
-  }
-  p.wantTime = want;
-  applySeek(p);
-}
-const DRIFT_S = 0.25;
-function followPlayback(ref, seconds) {
-  const p = pool.get(refKey(ref)) ?? makePooled(ref);
-  pool.set(refKey(ref), p);
-  if (p.el.paused) {
-    p.wantTime = Math.max(0, seconds);
-    applySeek(p);
-    void p.el.play().catch(() => {
-    });
-    return;
-  }
-  if (Math.abs(p.el.currentTime - seconds) > DRIFT_S) {
-    p.wantTime = Math.max(0, seconds);
-    applySeek(p);
-  }
-}
-function pauseAllVideos() {
-  for (const p of pool.values()) {
-    if (!p.el.paused) p.el.pause();
-  }
-}
-const stripRefs = /* @__PURE__ */ new Set();
-function pictureAt(ref, seconds, playing) {
-  if (stripRefs.has(refKey(ref))) return thumbnailAt(ref, seconds);
-  if (playing) followPlayback(ref, seconds);
-  else seekTo(ref, seconds, 0.02);
-  return frameSource(ref);
-}
-function frameSource(ref) {
-  const p = pool.get(refKey(ref));
-  if (!p) return null;
-  if (!p.seeking && p.el.readyState >= 2) return p.el;
-  return p.hasGood ? p.good : null;
-}
-function releaseUnused(active) {
-  const keep = /* @__PURE__ */ new Set();
-  for (const r of active) keep.add(refKey(r));
-  for (const [key, p] of pool) {
-    if (keep.has(key)) continue;
-    window.clearTimeout(p.guard);
-    p.el.removeAttribute("src");
-    p.el.load();
-    pool.delete(key);
   }
 }
 const thumbCache = /* @__PURE__ */ new Map();
@@ -890,7 +1163,6 @@ function audioContext() {
   if (!audioCtx) audioCtx = new AudioContext();
   return audioCtx;
 }
-const PEAK_BUCKETS = 400;
 function ensureAudio(ref, onDone) {
   const key = refKey(ref);
   if (audioCache.has(key)) {
@@ -904,7 +1176,7 @@ function ensureAudio(ref, onDone) {
   }
   const job = fetch(viewUrl(ref)).then((r) => r.ok ? r.arrayBuffer() : Promise.reject(new Error("fetch failed"))).then((buf) => audioContext().decodeAudioData(buf)).then((decoded) => {
     audioCache.set(key, decoded);
-    peakCache.set(key, computePeaks(decoded));
+    peakCache.set(key, buildEnvelope(decoded));
     return decoded;
   }).catch(() => null).finally(() => {
     audioJobs.delete(key);
@@ -912,25 +1184,23 @@ function ensureAudio(ref, onDone) {
   });
   audioJobs.set(key, job);
 }
-function computePeaks(buf) {
-  const data = buf.getChannelData(0);
-  const out = new Float32Array(PEAK_BUCKETS);
-  const per = Math.max(1, Math.floor(data.length / PEAK_BUCKETS));
-  for (let b = 0; b < PEAK_BUCKETS; b++) {
-    let peak = 0;
-    const from = b * per;
-    const to = Math.min(data.length, from + per);
-    for (let i = from; i < to; i++) {
-      const v = data[i] < 0 ? -data[i] : data[i];
-      if (v > peak) peak = v;
-    }
-    out[b] = peak;
-  }
-  return out;
-}
 const peaksFor = (ref) => peakCache.get(refKey(ref));
 const audioBufferFor = (ref) => audioCache.get(refKey(ref));
 const SHUTTLE$1 = [1, 2, 4, 8];
+let playing = null;
+function applyFades(param, c, startOff, endOff, when, fps) {
+  const base = c.gain ?? 1;
+  const at = (off) => when + (off - startOff) / fps;
+  param.setValueAtTime(gainAt(c, startOff), when);
+  const fi = c.fadeIn ?? 0;
+  if (fi > startOff && fi < endOff) param.linearRampToValueAtTime(base, at(fi));
+  const fo = c.fadeOut ?? 0;
+  const foStart = c.length - fo;
+  if (fo > 0 && foStart < endOff) {
+    if (foStart > startOff) param.setValueAtTime(base, at(foStart));
+    param.linearRampToValueAtTime(gainAt(c, endOff - 1e-6), at(endOff));
+  }
+}
 class Transport {
   constructor(host) {
     __publicField(this, "host");
@@ -995,6 +1265,8 @@ class Transport {
   }
   play(speed) {
     var _a;
+    if (playing && playing !== this) playing.stop();
+    playing = this;
     this.speed = speed;
     this.pos = this.host.getTimeline().ui.playhead;
     this.last = performance.now();
@@ -1004,6 +1276,7 @@ class Transport {
   }
   stop() {
     var _a;
+    if (playing === this) playing = null;
     this.speed = 0;
     this.stopAudio();
     if (this.raf) {
@@ -1051,7 +1324,7 @@ class Transport {
     this.gain.connect(ctx.destination);
     const lanes = [
       ...tl.audio.map((a) => ({ ...a, sourceRate: false })),
-      ...tl.clips.map((c) => ({ ...c, gain: 1, sourceRate: true }))
+      ...tl.clips.map((c) => ({ ...c, sourceRate: true }))
     ];
     for (const a of lanes) {
       if (a.muted) continue;
@@ -1075,7 +1348,7 @@ class Transport {
       const node = ctx.createBufferSource();
       node.buffer = buf;
       const g = ctx.createGain();
-      g.gain.value = a.gain;
+      applyFades(g.gain, a, from - a.start, clipEnd - a.start, when, fps);
       node.connect(g);
       g.connect(this.gain);
       node.start(when, offset, Math.min(duration, buf.duration - offset));
@@ -1094,6 +1367,11 @@ class Transport {
     this.gain = null;
   }
 }
+const WAVE_COLORS = {
+  peak: "rgba(120,190,235,0.65)",
+  body: "rgba(165,225,255,0.95)",
+  zero: "rgba(255,255,255,0.22)"
+};
 const C = {
   bg: "#16181d",
   trackBg: "#1b1e24",
@@ -1133,15 +1411,21 @@ const PREVIEW_MAX_H$1 = 260;
 const TRACK_H = 46;
 const MASK_H = 30;
 const AUDIO_H = 34;
+const AUDIO_ONLY_H = 74;
 const MIN_VIDEO_TRACKS = 2;
 const MAX_VIDEO_TRACKS = 8;
+const MIN_AUDIO_TRACKS = 1;
+const MAX_AUDIO_TRACKS = 6;
 const HANDLE_PX = 10;
 const SCALE_WARN_RATIO = 6;
 const HANDLE_CORE = 4;
+const FADE_BAND_H = 12;
+const FADE_GRIP = 7;
+const LEVEL_GRAB = 5;
 const SNAP_PX = 12;
 const MIN_LEN = 1;
 class TimelineEditor {
-  constructor(host) {
+  constructor(host, opts = {}) {
     __publicField(this, "host");
     __publicField(this, "root");
     __publicField(this, "canvas");
@@ -1167,6 +1451,10 @@ class TimelineEditor {
     /** Show the mask lane tinted over the picture in the monitor. */
     __publicField(this, "maskOverlay", false);
     __publicField(this, "maskBtn");
+    __publicField(this, "dbBtn");
+    /** Draw the wave on a logarithmic scale. UI-only, like the mask overlay: it changes
+     *  nothing the backend renders, so it stays out of the widget and its cache signature. */
+    __publicField(this, "waveDb", false);
     /** Scratch canvas for tinting the mask; reused so playback does not allocate. */
     __publicField(this, "tintCanvas", document.createElement("canvas"));
     /** Last quantise/fps pair we warned about, so the toast fires on CHANGE only. */
@@ -1174,8 +1462,21 @@ class TimelineEditor {
     /** Last (sources, output size) pair warned about. See `checkSourceScale`. */
     __publicField(this, "lastScaleWarning", "");
     __publicField(this, "transport");
+    /** The `<video>` elements THIS editor scrubs. One per node: sharing them is what used to
+     *  make two Timeline nodes on the same file drag each other's playhead. */
+    __publicField(this, "pool", new VideoPool());
     /** Called whenever the intrinsic height changes, so the host can resize the node. */
     __publicField(this, "onHeightChange", null);
+    /**
+     * Sound only: no monitor, no picture lanes, and the audio lanes get the whole widget.
+     *
+     * A MODE on this class rather than a second editor, because the interaction is
+     * identical - drag, trim, blade, snap, undo, in/out, transport - and a parallel
+     * implementation of all that would drift within a month. The lane geometry already
+     * funnels through `trackCount`/`maskH`/`audioTop`/`laneHeight`, so the mode is those
+     * four accessors and the monitor, not a flag sprinkled through the drawing code.
+     */
+    __publicField(this, "audioOnly");
     // ── Interaction ─────────────────────────────────────────────────────────────
     __publicField(this, "onDown", (e) => {
       if (e.button === 1) {
@@ -1234,12 +1535,12 @@ class TimelineEditor {
       });
       if (c) {
         if (hit.kind === "clip") {
-          for (const lane of [
+          for (const lane2 of [
             this.tl.clips,
             this.tl.masks,
             this.tl.audio
           ]) {
-            for (const k of lane) if (this.selection.has(k.id)) origins.set(k.id, snapshot(k));
+            for (const k of lane2) if (this.selection.has(k.id)) origins.set(k.id, snapshot(k));
           }
         }
         if (!origins.has(c.id)) origins.set(c.id, snapshot(c));
@@ -1251,7 +1552,10 @@ class TimelineEditor {
         origin: c ? { start: c.start, length: c.length, trimIn: c.trimIn, track: c.track } : { start: 0, length: 0, trimIn: 0, track: 0 },
         origins,
         moved: false,
-        slip: e.altKey
+        slip: e.altKey,
+        fadeFrom: hit.kind === "fade" ? hit.side === "in" ? hit.clip.fadeIn ?? 0 : hit.clip.fadeOut ?? 0 : 0,
+        gainFrom: hit.kind === "level" ? hit.clip.gain ?? 1 : 1,
+        startY: y
       };
       this.canvas.setPointerCapture(e.pointerId);
       this.canvas.addEventListener("pointermove", this.onMove);
@@ -1288,6 +1592,29 @@ class TimelineEditor {
           else this.applyOut(frame);
           break;
         }
+        case "fade": {
+          const c = d.hit.clip;
+          const len = d.fadeFrom + (d.hit.side === "in" ? dFrames : -dFrames);
+          const want = Math.max(0, Math.min(c.length, toGrid(c.start + len) - c.start));
+          if (d.hit.side === "in") c.fadeIn = want;
+          else c.fadeOut = want;
+          clampFades(c);
+          if (this.transport.rate === 1) this.transport.refreshAudio();
+          break;
+        }
+        case "level": {
+          const c = d.hit.clip;
+          const lane2 = d.hit.lane;
+          const head = this.laneHeight(lane2) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0;
+          const bodyTop = this.laneTop(lane2, c.track) + head + 3;
+          const bodyH = this.laneHeight(lane2) - 6 - head;
+          const py = d.startY + (y - d.startY) * gain;
+          const want = this.levelOf(py, bodyTop, bodyH) - (this.levelOf(d.startY, bodyTop, bodyH) - d.gainFrom);
+          c.gain = e.shiftKey ? snapGainToDb(want) : Math.max(0, Math.min(MAX_GAIN, Math.round(want * 100) / 100));
+          if (c.gain === 1) delete c.gain;
+          if (this.transport.rate === 1) this.transport.refreshAudio();
+          break;
+        }
         case "clip": {
           const c = d.hit.clip;
           const info = this.infoFor(c);
@@ -1312,7 +1639,7 @@ class TimelineEditor {
               const byTail = snap(start + c.length, cands, thr) - c.length;
               start = Math.abs(byHead - start) <= Math.abs(byTail - start) ? byHead : byTail;
             }
-            const track = d.hit.lane !== "video" ? 0 : Math.max(0, Math.min(this.trackCount - 1, this.trackOf(y)));
+            const track = d.hit.lane === "video" ? Math.max(0, Math.min(this.trackCount - 1, this.trackOf(y))) : d.hit.lane === "audio" && this.audioOnly ? this.audioTrackOf(y) : 0;
             const shift = start - d.origin.start;
             const lift = track - d.origin.track;
             let allowed = shift;
@@ -1379,7 +1706,7 @@ class TimelineEditor {
         this.hover = hit;
         this.requestRender();
       }
-      this.canvas.style.cursor = hit.kind === "mute" ? "pointer" : hit.kind === "edge" || hit.kind === "inPoint" || hit.kind === "outPoint" ? "ew-resize" : hit.kind === "clip" ? e.altKey ? "col-resize" : "grab" : hit.kind === "playhead" ? "grab" : hit.kind === "ruler" ? "pointer" : "default";
+      this.canvas.style.cursor = hit.kind === "mute" ? "pointer" : hit.kind === "fade" ? "col-resize" : hit.kind === "level" ? "ns-resize" : hit.kind === "edge" || hit.kind === "inPoint" || hit.kind === "outPoint" ? "ew-resize" : hit.kind === "clip" ? e.altKey ? "col-resize" : "grab" : hit.kind === "playhead" ? "grab" : hit.kind === "ruler" ? "pointer" : "default";
     });
     /**
      * Right-click menu. Two jobs that both belong to "this clip is not what you assumed":
@@ -1392,8 +1719,55 @@ class TimelineEditor {
       const { x, y } = this.localPos(e);
       const hit = this.hitTest(x, y);
       const items = [];
-      if (hit.kind === "clip" || hit.kind === "edge") {
+      if (hit.kind === "clip" || hit.kind === "edge" || hit.kind === "fade" || hit.kind === "level") {
         const c = hit.clip;
+        if (hit.lane !== "mask") {
+          const setGain = (g) => () => {
+            this.pushUndo();
+            if (g === 1) delete c.gain;
+            else c.gain = Math.min(MAX_GAIN, g);
+            this.host.commit();
+            if (this.transport.rate === 1) this.transport.refreshAudio();
+            this.requestRender();
+          };
+          for (const [label, g] of [
+            ["+6 dB", 2],
+            ["0 dB", 1],
+            ["-6 dB", 0.5],
+            ["-12 dB", 0.25]
+          ]) {
+            items.push({
+              label: `Level: ${label}`,
+              active: (c.gain ?? 1) === g,
+              on: setGain(g)
+            });
+          }
+          const inside = this.playhead > c.start && this.playhead < c.start + c.length;
+          if (inside) {
+            const setFade = (side) => () => {
+              this.pushUndo();
+              if (side === "in") c.fadeIn = this.playhead - c.start;
+              else c.fadeOut = c.start + c.length - this.playhead;
+              clampFades(c);
+              this.host.commit();
+              if (this.transport.rate === 1) this.transport.refreshAudio();
+            };
+            items.push({ label: "Fade in to playhead", on: setFade("in") });
+            items.push({ label: "Fade out from playhead", on: setFade("out") });
+          }
+          if (c.fadeIn || c.fadeOut) {
+            items.push({
+              label: "Clear fades",
+              on: () => {
+                this.pushUndo();
+                delete c.fadeIn;
+                delete c.fadeOut;
+                this.host.commit();
+                if (this.transport.rate === 1) this.transport.refreshAudio();
+              }
+            });
+          }
+        }
         if (hit.lane === "video" || hit.lane === "mask") {
           const toMask = hit.lane === "video";
           items.push({
@@ -1561,6 +1935,7 @@ class TimelineEditor {
       this.panBy(raw / this.logicalWidth * this.viewFrames);
     });
     this.host = host;
+    this.audioOnly = !!opts.audioOnly;
     this.transport = new Transport({
       getTimeline: () => host.getTimeline(),
       getFps: () => host.getFps(),
@@ -1577,7 +1952,7 @@ class TimelineEditor {
       }
     });
     this.transport.onChange = () => {
-      if (this.transport.rate !== 1) pauseAllVideos();
+      if (this.transport.rate !== 1) this.pool.pauseAll();
       if (this.transport.rate === 0) this.host.commit();
       this.requestRender();
     };
@@ -1594,14 +1969,15 @@ class TimelineEditor {
     this.status = document.createElement("span");
     this.status.className = "nkd-tl-status";
     this.buildBar();
-    this.root.append(this.preview, this.canvas, this.bar);
+    if (this.audioOnly) this.root.append(this.canvas, this.bar);
+    else this.root.append(this.preview, this.canvas, this.bar);
     this.applyTimelineHeight();
     this.canvas.addEventListener("pointerdown", this.onDown);
     this.canvas.addEventListener("pointermove", this.onHover);
     this.canvas.addEventListener("pointerleave", this.onLeave);
     this.canvas.addEventListener("contextmenu", this.onContextMenu);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
-    setPooledReadyHandler(() => this.requestRender());
+    this.pool.onReady = () => this.requestRender();
     this.root.addEventListener("keydown", this.onKey);
     this.root.tabIndex = 0;
   }
@@ -1653,6 +2029,15 @@ class TimelineEditor {
       "pi-eye-slash",
       "Show the mask over the picture (M)",
       () => this.toggleMaskOverlay()
+    );
+    this.dbBtn = mdi(
+      "mdi-sine-wave",
+      "pi-chart-line",
+      "Waveform scale: linear / logarithmic (dB)",
+      () => {
+        this.waveDb = !this.waveDb;
+        this.dbBtn.classList.toggle("on", this.waveDb);
+      }
     );
     this.bar.append(
       icon("pi-step-backward", "Reverse (J)", () => this.transport.shuttle(-1)),
@@ -1711,7 +2096,8 @@ class TimelineEditor {
         () => this.host.conformToFirstClip()
       ),
       magnet,
-      this.maskBtn,
+      ...this.audioOnly ? [] : [this.maskBtn],
+      this.dbBtn,
       icon(
         "pi-refresh",
         "Reload the connected media (after changing a file)",
@@ -1752,13 +2138,47 @@ class TimelineEditor {
     );
   }
   get trackCount() {
+    if (this.audioOnly) return 0;
     let max = MIN_VIDEO_TRACKS;
     for (const c of this.tl.clips) max = Math.max(max, c.track + 1);
     return Math.min(max, MAX_VIDEO_TRACKS);
   }
+  /** The mask lane vanishes with the picture; keeping a 30px empty strip would read as a
+   *  broken layout rather than as "there is nothing here". */
+  get maskH() {
+    return this.audioOnly ? 0 : MASK_H;
+  }
+  /** One tall lane when the sound is the content, one thin strip when it is a companion
+   *  to the picture. The wave needs the height: min/max and RMS are indistinguishable at
+   *  34px. */
+  get audioLaneH() {
+    return this.audioOnly ? AUDIO_ONLY_H : AUDIO_H;
+  }
+  /**
+   * Audio lanes stack only in audio-only mode - the video Timeline has exactly one.
+   *
+   * Grows to fit what is used, plus ONE SPARE while a clip is being dragged. Without the
+   * spare there would be no row to drop onto and the count could never rise past what it
+   * already is; with it always on, a single-lane timeline would permanently show an empty
+   * second lane. It costs a lane's height for the length of a drag, and only then.
+   */
+  get audioTrackCount() {
+    var _a;
+    if (!this.audioOnly) return 1;
+    let max = MIN_AUDIO_TRACKS;
+    for (const a of this.tl.audio) max = Math.max(max, (a.track ?? 0) + 1);
+    const dragging = ((_a = this.drag) == null ? void 0 : _a.hit.kind) === "clip" && this.drag.hit.lane === "audio";
+    return Math.min(max + (dragging ? 1 : 0), MAX_AUDIO_TRACKS);
+  }
+  /** Which audio lane a y coordinate falls on. NOT inverted, unlike the video tracks: an
+   *  additive mix has no z-order, so there is no "on top" for the rows to depict. */
+  audioTrackOf(y) {
+    const row = Math.floor((y - this.audioTop) / this.audioLaneH);
+    return Math.max(0, Math.min(this.audioTrackCount - 1, row));
+  }
   /** Intrinsic height of the timeline canvas in logical px. */
   get timelineHeight() {
-    return RULER_H + this.trackCount * TRACK_H + MASK_H + AUDIO_H;
+    return RULER_H + this.trackCount * TRACK_H + this.maskH + this.audioTrackCount * this.audioLaneH;
   }
   /**
    * Pin the canvas height in CSS. Without this the canvas has no CSS height, falls back
@@ -1796,16 +2216,32 @@ class TimelineEditor {
     return RULER_H + this.trackCount * TRACK_H;
   }
   get audioTop() {
-    return this.maskTop + MASK_H;
+    return this.maskTop + this.maskH;
   }
-  laneOf(lane) {
-    return lane === "video" ? this.tl.clips : lane === "mask" ? this.tl.masks : this.tl.audio;
+  laneOf(lane2) {
+    return lane2 === "video" ? this.tl.clips : lane2 === "mask" ? this.tl.masks : this.tl.audio;
   }
-  laneTop(lane, track) {
-    return lane === "video" ? this.trackTop(track) : lane === "mask" ? this.maskTop : this.audioTop;
+  laneTop(lane2, track) {
+    return lane2 === "video" ? this.trackTop(track) : lane2 === "mask" ? this.maskTop : this.audioTop + Math.max(0, track) * this.audioLaneH;
   }
-  laneHeight(lane) {
-    return lane === "video" ? TRACK_H : lane === "mask" ? MASK_H : AUDIO_H;
+  /**
+   * Where a level sits inside a clip body.
+   *
+   * The TOP of the clip is MAX_GAIN, not unity, so the boost half of the range is
+   * reachable by dragging rather than only from a menu - which puts unity at mid height,
+   * exactly the resting position Resolve draws its volume line at. Linear in amplitude,
+   * so a linear fade stays a straight ramp on screen; a dB mapping would bow it and the
+   * ramp is the thing the shape has to communicate.
+   */
+  levelY(level, y, h) {
+    return y + h * (1 - Math.max(0, Math.min(MAX_GAIN, level)) / MAX_GAIN);
+  }
+  /** Inverse of `levelY`, for the drag. */
+  levelOf(py, y, h) {
+    return Math.max(0, Math.min(MAX_GAIN, (1 - (py - y) / Math.max(1, h)) * MAX_GAIN));
+  }
+  laneHeight(lane2) {
+    return lane2 === "video" ? TRACK_H : lane2 === "mask" ? MASK_H : this.audioLaneH;
   }
   // ── Hit-testing ─────────────────────────────────────────────────────────────
   hitTest(x, y) {
@@ -1819,24 +2255,43 @@ class TimelineEditor {
       }
       return Math.abs(x - this.xOf(this.playhead)) <= HANDLE_PX ? { kind: "playhead" } : { kind: "ruler" };
     }
-    const lane = y >= this.audioTop ? "audio" : y >= this.maskTop ? "mask" : "video";
-    const list = lane === "video" ? this.tl.clips.filter((c) => c.track === this.trackOf(y)) : this.laneOf(lane);
+    const lane2 = y >= this.audioTop ? "audio" : y >= this.maskTop ? "mask" : "video";
+    const list = lane2 === "video" ? this.tl.clips.filter((c) => c.track === this.trackOf(y)) : lane2 === "audio" && this.audioOnly ? this.laneOf(lane2).filter((c) => (c.track ?? 0) === this.audioTrackOf(y)) : this.laneOf(lane2);
     for (let i = list.length - 1; i >= 0; i--) {
       const c = list[i];
       const a = this.xOf(c.start);
       const b = this.xOf(c.start + c.length);
       if (x < a - HANDLE_PX || x > b + HANDLE_PX) continue;
-      const top = this.laneTop(lane, c.track) + 3;
-      if (lane !== "mask" && b - a > 44 && x >= b - MUTE_BOX && x <= b && y >= top && y <= top + CLIP_HEAD_H) {
-        return { kind: "mute", clip: c, lane };
+      const top = this.laneTop(lane2, c.track) + 3;
+      if (lane2 !== "mask" && b - a > 44 && x >= b - MUTE_BOX && x <= b && y >= top && y <= top + CLIP_HEAD_H) {
+        return { kind: "mute", clip: c, lane: lane2 };
+      }
+      if (lane2 !== "mask" && b - a > 24) {
+        const bodyTop = this.laneTop(lane2, c.track) + (this.laneHeight(lane2) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
+        if (y >= bodyTop && y <= bodyTop + FADE_BAND_H) {
+          const fi = this.xOf(c.start + (c.fadeIn ?? 0));
+          const fo = this.xOf(c.start + c.length - (c.fadeOut ?? 0));
+          if (Math.abs(x - fi) <= FADE_GRIP) return { kind: "fade", clip: c, side: "in", lane: lane2 };
+          if (Math.abs(x - fo) <= FADE_GRIP) return { kind: "fade", clip: c, side: "out", lane: lane2 };
+        }
+      }
+      if (lane2 !== "mask" && b - a > 24) {
+        const bodyTop = this.laneTop(lane2, c.track) + (this.laneHeight(lane2) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0) + 3;
+        const bodyH = this.laneHeight(lane2) - 6 - (this.laneHeight(lane2) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
+        const from = a + (c.fadeIn ?? 0) * ((b - a) / Math.max(1, c.length));
+        const to = b - (c.fadeOut ?? 0) * ((b - a) / Math.max(1, c.length));
+        const ly = this.levelY(c.gain ?? 1, bodyTop, bodyH);
+        if (x >= from && x <= to && Math.abs(y - ly) <= LEVEL_GRAB) {
+          return { kind: "level", clip: c, lane: lane2 };
+        }
       }
       if (Math.abs(x - a) <= HANDLE_PX && x - a < (b - a) / 2 - HANDLE_CORE) {
-        return { kind: "edge", clip: c, side: "start", lane };
+        return { kind: "edge", clip: c, side: "start", lane: lane2 };
       }
       if (Math.abs(x - b) <= HANDLE_PX && b - x < (b - a) / 2 - HANDLE_CORE) {
-        return { kind: "edge", clip: c, side: "end", lane };
+        return { kind: "edge", clip: c, side: "end", lane: lane2 };
       }
-      if (x >= a && x <= b) return { kind: "clip", clip: c, lane };
+      if (x >= a && x <= b) return { kind: "clip", clip: c, lane: lane2 };
     }
     return { kind: "none" };
   }
@@ -1981,14 +2436,14 @@ class TimelineEditor {
   deleteSelected() {
     if (this.selection.size === 0) return;
     this.pushUndo();
-    for (const lane of [
+    for (const lane2 of [
       this.tl.clips,
       this.tl.masks,
       this.tl.audio
     ]) {
-      const kept = lane.filter((c) => !this.selection.has(c.id));
-      lane.length = 0;
-      lane.push(...kept);
+      const kept = lane2.filter((c) => !this.selection.has(c.id));
+      lane2.length = 0;
+      lane2.push(...kept);
     }
     this.selection.clear();
     this.host.commit();
@@ -2164,16 +2619,16 @@ class TimelineEditor {
     const at = this.playhead;
     const made = [];
     this.pushUndo();
-    for (const lane of [
+    for (const lane2 of [
       this.tl.clips,
       this.tl.masks,
       this.tl.audio
     ]) {
-      for (const c of [...lane]) {
+      for (const c of [...lane2]) {
         if (this.selection.size && !this.selection.has(c.id)) continue;
         const right = splitClip(c, at, this.rateOf(c), fps);
         if (right) {
-          lane.push(right);
+          lane2.push(right);
           made.push(right);
         }
       }
@@ -2286,20 +2741,20 @@ class TimelineEditor {
     this.requestRender();
   }
   /** Place a freshly connected slot, following the node's import mode. */
-  addClipForSlot(src, frames, lane = "video", sync) {
+  addClipForSlot(src, frames, lane2 = "video", sync) {
     if (slotInUse(this.tl, src)) return;
-    const list = this.laneOf(lane);
+    const list = this.laneOf(lane2);
     this.pushUndo();
-    const mode = lane === "audio" ? "append" : this.host.getImportMode();
+    const mode = lane2 === "audio" && !this.audioOnly ? "append" : this.host.getImportMode();
     const at = sync ?? placementFor(this.tl, list, mode);
     list.push({
       id: newId(),
       src,
-      track: lane === "video" ? at.track ?? 0 : 0,
+      track: lane2 === "video" || lane2 === "audio" && this.audioOnly ? at.track ?? 0 : 0,
       start: at.start,
       trimIn: sync ? sync.trimIn : 0,
       length: Math.max(1, Math.round(sync ? sync.length : frames)),
-      ...lane === "audio" ? { gain: 1 } : {}
+      ...lane2 === "audio" ? { gain: 1 } : {}
     });
     sortClips(this.tl);
     this.host.commit();
@@ -2309,15 +2764,15 @@ class TimelineEditor {
    *  anything, so the caller knows whether to commit. */
   pruneToSlots(live) {
     let changed = false;
-    for (const lane of [
+    for (const lane2 of [
       this.tl.clips,
       this.tl.masks,
       this.tl.audio
     ]) {
-      const kept = lane.filter((c) => live.has(c.src));
-      if (kept.length !== lane.length) {
-        lane.length = 0;
-        lane.push(...kept);
+      const kept = lane2.filter((c) => live.has(c.src));
+      if (kept.length !== lane2.length) {
+        lane2.length = 0;
+        lane2.push(...kept);
         changed = true;
       }
     }
@@ -2386,7 +2841,12 @@ class TimelineEditor {
         ctx.textAlign = "left";
       }
     }
-    for (const [top, h] of [[this.maskTop, MASK_H], [this.audioTop, AUDIO_H]]) {
+    const bands = [[this.maskTop, this.maskH]];
+    for (let t = 0; t < this.audioTrackCount; t++) {
+      bands.push([this.audioTop + t * this.audioLaneH, this.audioLaneH]);
+    }
+    for (const [top, h] of bands) {
+      if (h <= 0) continue;
       ctx.fillStyle = C.trackAlt;
       ctx.fillRect(0, top, W, h);
       ctx.fillStyle = C.gridLine;
@@ -2485,6 +2945,7 @@ class TimelineEditor {
   drawGaps(ctx, start, count) {
     const top = RULER_H;
     const h = this.trackCount * TRACK_H;
+    if (h <= 0) return;
     const end = start + count;
     const spans = this.tl.clips.filter((c) => !c.audioOnly).map((c) => [Math.max(c.start, start), Math.min(c.start + c.length, end)]).filter(([a, b]) => b > a).sort((p, q) => p[0] - q[0]);
     let cursor = start;
@@ -2508,31 +2969,31 @@ class TimelineEditor {
     }
     paint(cursor, end);
   }
-  drawClip(ctx, c, lane) {
+  drawClip(ctx, c, lane2) {
     var _a;
     const x = this.xOf(c.start);
     const w = Math.max(2, this.xOf(c.start + c.length) - x);
-    const y = this.laneTop(lane, c.track) + 3;
-    const h = this.laneHeight(lane) - 6;
+    const y = this.laneTop(lane2, c.track) + 3;
+    const h = this.laneHeight(lane2) - 6;
     const isHover = (this.hover.kind === "clip" || this.hover.kind === "edge") && this.hover.clip === c;
-    const isDrag = this.drag && (this.drag.hit.kind === "clip" || this.drag.hit.kind === "edge") && this.drag.hit.clip === c;
+    const isDrag = this.drag && (this.drag.hit.kind === "clip" || this.drag.hit.kind === "edge" || this.drag.hit.kind === "fade") && this.drag.hit.clip === c;
     ctx.save();
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, 2);
-    const soundOnly = !!c.audioOnly && lane !== "audio";
-    ctx.fillStyle = lane === "audio" || soundOnly ? C.audioFill : lane === "mask" ? C.maskFill : C.clipFill;
+    const soundOnly = !!c.audioOnly && lane2 !== "audio";
+    ctx.fillStyle = lane2 === "audio" || soundOnly ? C.audioFill : lane2 === "mask" ? C.maskFill : C.clipFill;
     ctx.fill();
     ctx.clip();
     const selected = this.selection.has(c.id);
     if (h > CLIP_HEAD_H + 4) {
-      ctx.fillStyle = selected ? C.accent : lane === "audio" || soundOnly ? C.audioHead : lane === "mask" ? C.maskHead : C.clipHead;
+      ctx.fillStyle = selected ? C.accent : lane2 === "audio" || soundOnly ? C.audioHead : lane2 === "mask" ? C.maskHead : C.clipHead;
       ctx.fillRect(x, y, w, CLIP_HEAD_H);
     }
     const src = this.host.sourceFor(c.src);
     const body = y + (h > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
     const bodyH = y + h - body;
     if (src && bodyH > 6) {
-      if (lane === "audio") {
+      if (lane2 === "audio") {
         this.drawWaveform(ctx, c, src.ref, x, body, w, bodyH, this.host.getFps());
       } else if (soundOnly) {
         this.drawWaveform(
@@ -2550,6 +3011,7 @@ class TimelineEditor {
       }
     }
     if (soundOnly) this.drawHatch(ctx, x, y, w, h);
+    if (lane2 !== "mask" && bodyH > 6) this.drawFades(ctx, c, x, body, w, bodyH);
     if (w > 26) {
       ctx.fillStyle = selected ? "#0d1b24" : src ? C.clipName : C.dim;
       ctx.font = "10px system-ui, sans-serif";
@@ -2569,7 +3031,7 @@ class TimelineEditor {
       ctx.font = "9px system-ui, sans-serif";
       ctx.fillText("probing…", x + 5, y + h - 5);
     }
-    if (lane !== "mask" && w > 44 && h > CLIP_HEAD_H) {
+    if (lane2 !== "mask" && w > 44 && h > CLIP_HEAD_H) {
       this.drawSpeaker(ctx, x + w - MUTE_BOX, y, !!c.muted, isHover);
     }
     this.drawMarkers(ctx, c, y, h);
@@ -2635,34 +3097,110 @@ class TimelineEditor {
     }
     ctx.globalAlpha = 1;
   }
-  /** Peaks across the clip's own trimmed span, so trimming re-reads the wave. */
   /**
+   * The clip's level envelope, drawn as the line every NLE draws: HEIGHT IS LEVEL. A fade
+   * in rises from the floor at the head; a fade out falls to it at the tail; the shading
+   * is what has been taken away, ABOVE the line.
+   *
+   * The vertices come from `gainAt` - the same function the transport schedules and Python
+   * mirrors - rather than from geometry written out again here. The first version did
+   * write it again, and drew both ramps upside down: it shaded the ATTENUATION as if that
+   * were the shape, so a fade in sloped downwards. Deriving the picture from the curve
+   * makes that class of mistake impossible rather than merely fixed.
+   *
+   * The grips are painted even at zero, or a clip with no fade offers no clue it can have
+   * one.
+   */
+  drawFades(ctx, c, x, y, w, h) {
+    var _a;
+    const pxPerFrame = w / Math.max(1, c.length);
+    const fi = c.fadeIn ?? 0;
+    const fo = c.fadeOut ?? 0;
+    const g = c.gain ?? 1;
+    const onClip = (this.hover.kind === "clip" || this.hover.kind === "edge" || this.hover.kind === "fade" || this.hover.kind === "level") && this.hover.clip === c;
+    const touched = fi > 0 || fo > 0 || g !== 1 || !!c.muted;
+    if (touched || onClip) {
+      const pt = ([off, lvl]) => [x + off * pxPerFrame, this.levelY(lvl, y, h)];
+      const stops = levelStops(c).map(pt);
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      for (const p of stops) ctx.lineTo(...p);
+      ctx.lineTo(x + w, y);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(6,12,18,0.5)";
+      ctx.fill();
+      if (touched || onClip) {
+        const uy = Math.round(this.levelY(1, y, h)) + 0.5;
+        ctx.strokeStyle = "rgba(255,255,255,0.14)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x, uy);
+        ctx.lineTo(x + w, uy);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      const hotLevel = this.hover.kind === "level" && this.hover.clip === c || ((_a = this.drag) == null ? void 0 : _a.hit.kind) === "level" && this.drag.hit.clip === c;
+      ctx.beginPath();
+      stops.forEach((p, i) => i ? ctx.lineTo(...p) : ctx.moveTo(...p));
+      ctx.strokeStyle = hotLevel ? C.accent : "rgba(255,255,255,0.7)";
+      ctx.lineWidth = hotLevel ? 2 : 1;
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+    const grip = (gx, side) => {
+      var _a2;
+      const hot = this.hover.kind === "fade" && this.hover.clip === c && this.hover.side === side || ((_a2 = this.drag) == null ? void 0 : _a2.hit.kind) === "fade" && this.drag.hit.clip === c && this.drag.hit.side === side;
+      const r = hot ? 5 : onClip ? 4.5 : 3;
+      ctx.beginPath();
+      ctx.arc(gx, y + r + 1, r, 0, Math.PI * 2);
+      ctx.fillStyle = hot ? C.accent : "rgba(255,255,255,0.9)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(6,12,18,0.8)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    };
+    grip(x + fi * pxPerFrame, "in");
+    grip(x + w - fo * pxPerFrame, "out");
+    if (g !== 1 && w > 60) {
+      ctx.fillStyle = C.hover;
+      ctx.font = "9px system-ui, sans-serif";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillText(
+        `${(20 * Math.log10(Math.max(1e-4, g))).toFixed(1)} dB`,
+        x + w - 42,
+        y + h - 3
+      );
+    }
+  }
+  /** The clip's own trimmed span of the wave, so trimming re-reads it.
+   *
    * @param trimRate  fps that `c.trimIn` is counted in. An audio clip trims in TIMELINE
    *   frames, a video clip in SOURCE frames - passing the timeline rate for a video whose
    *   source runs at another cadence slides the whole wave off the picture it belongs to.
    */
   drawWaveform(ctx, c, ref, x, y, w, h, trimRate) {
     ensureAudio(ref, () => this.requestRender());
-    const peaks = peaksFor(ref);
+    const env = peaksFor(ref);
     const buf = audioBufferFor(ref);
-    if (!peaks || !buf) return;
-    const total = Math.max(1e-6, buf.duration);
-    const from = c.trimIn / Math.max(1, trimRate) / total;
-    const to = from + c.length / this.host.getFps() / total;
-    const mid = y + h / 2;
-    ctx.fillStyle = "rgba(150,215,255,0.85)";
-    for (let px = 0; px < w; px++) {
-      const t = from + (to - from) * (px / Math.max(1, w));
-      const peak = peaks[Math.max(0, Math.min(
-        PEAK_BUCKETS - 1,
-        Math.round(t * (PEAK_BUCKETS - 1))
-      ))];
-      if (!peak) continue;
-      const half = Math.max(0.5, peak * h / 2);
-      ctx.fillRect(x + px, mid - half, 1, half * 2);
-    }
-    ctx.fillStyle = "rgba(255,255,255,0.25)";
-    ctx.fillRect(x, mid, w, 1);
+    if (!env || !buf) return;
+    const fromSec = c.trimIn / Math.max(1, trimRate);
+    const toSec = fromSec + c.length / this.host.getFps();
+    drawWave(
+      ctx,
+      buf,
+      env,
+      fromSec,
+      toSec,
+      x,
+      y,
+      w,
+      h,
+      WAVE_COLORS,
+      this.waveDb,
+      0,
+      this.logicalWidth
+    );
   }
   /** Amber diagonals, the same colour the `generate` wash uses: this stretch produces no
    *  picture. Called inside `drawClip`'s clip region, so it never bleeds past the block. */
@@ -2792,7 +3330,7 @@ class TimelineEditor {
       const srcFps = ((_a = src.info) == null ? void 0 : _a.fps) ?? this.host.getFps();
       const sf = sourceFrame(clip, this.playhead, srcFps, this.host.getFps());
       const at = sf / (srcFps || 1);
-      const img = pictureAt(src.ref, at, this.transport.rate === 1);
+      const img = this.pool.pictureAt(src.ref, at, this.transport.rate === 1);
       if (!img) continue;
       const iw = img.videoWidth || img.width;
       const ih = img.videoHeight || img.height;
@@ -2827,7 +3365,7 @@ class TimelineEditor {
     if (!src) return;
     const srcFps = ((_a = src.info) == null ? void 0 : _a.fps) ?? this.host.getFps();
     const at = sourceFrame(top, this.playhead, srcFps, this.host.getFps()) / (srcFps || 1);
-    const img = pictureAt(src.ref, at, false);
+    const img = this.pool.pictureAt(src.ref, at, false);
     if (!img) return;
     const iw = img.videoWidth || img.width;
     const ih = img.videoHeight || img.height;
@@ -2854,6 +3392,7 @@ class TimelineEditor {
     ctx.globalAlpha = 1;
   }
   updateStatus(fps, count) {
+    var _a, _b;
     const rate = this.transport.rate;
     this.playBtn.innerHTML = `<i class="pi ${rate === 0 ? "pi-play" : "pi-pause"}"></i>`;
     this.playBtn.classList.toggle("on", rate !== 0);
@@ -2866,6 +3405,19 @@ class TimelineEditor {
     const start = this.host.getStartFrame();
     const marks = markerFrames(this.tl).filter((f) => f >= start && f < start + count).length;
     const mk = marks ? ` · ${marks} marker${marks > 1 ? "s" : ""}` : "";
+    if (this.hover.kind === "fade") {
+      const c = this.hover.clip;
+      const len = (this.hover.side === "in" ? c.fadeIn : c.fadeOut) ?? 0;
+      this.status.textContent = `Fade ${this.hover.side} · ${len} frames (${(len / (fps || 1)).toFixed(2)}s) · drag sideways to set, Shift snaps to the grid`;
+      return;
+    }
+    if (this.hover.kind === "level" || ((_a = this.drag) == null ? void 0 : _a.hit.kind) === "level") {
+      const c = ((_b = this.drag) == null ? void 0 : _b.hit.kind) === "level" ? this.drag.hit.clip : this.hover.clip;
+      const g = c.gain ?? 1;
+      const db = g <= 1e-4 ? "-inf" : (20 * Math.log10(g)).toFixed(1);
+      this.status.textContent = `Volume · ${db} dB · drag up and down, Shift snaps to ${GAIN_DB_STEP} dB, Ctrl for fine`;
+      return;
+    }
     this.status.textContent = `f ${this.playhead}${shuttle}${sel}${mk} · ${count} frames${q} · ${secs.toFixed(2)}s @ ${fps} fps`;
   }
   destroy() {
@@ -2882,6 +3434,7 @@ class TimelineEditor {
     this.canvas.removeEventListener("wheel", this.onWheel);
     this.root.removeEventListener("keydown", this.onKey);
     this.root.remove();
+    this.pool.releaseAll();
   }
 }
 const STYLE_ID = "nkd-timeline-styles";
@@ -3470,7 +4023,7 @@ async function loadConfig(force = false) {
   return inflight;
 }
 const setActive = (project, category) => post("/nkd/project/active", { project, category });
-const saveConfig = (cfg) => post("/nkd/project/config", cfg);
+const saveConfig = (cfg) => post("/nkd/project/save", cfg);
 function activeLabel() {
   if (!cache) return "…";
   return `${cache.active.project} · ${cache.active.category}`;
@@ -4474,6 +5027,8 @@ function registerVideoViewer() {
 }
 const NODE_NAME = "NKDTimeline";
 const EXT_NAME = "NKD.PreviewTools.Timeline";
+const AUDIO_NODE_NAME = "NKDAudioTimeline";
+const AUDIO_EXT_NAME = "NKD.PreviewTools.AudioTimeline";
 const MIN_W = 380;
 const SLOT_RE = /(?:^|\.)(media_\d+)$/;
 const TENSOR_DEFAULT_FRAMES = 24;
@@ -4522,7 +5077,7 @@ function readSetting(id, fallback) {
     return fallback;
   }
 }
-console.log("[NKD Timeline] rev 3.2.0");
+console.log("[NKD Timeline] rev 3.6.0");
 const VIEW_PROP = "nkdView";
 function restoreView(node, tl) {
   var _a;
@@ -4531,7 +5086,7 @@ function restoreView(node, tl) {
   if (Number.isFinite(Number(v.zoom))) tl.ui.zoom = Number(v.zoom);
   if (Number.isFinite(Number(v.scroll))) tl.ui.scroll = Number(v.scroll);
 }
-function makeHost(node, state) {
+function makeHost(node, state, pool, audioOnly = false) {
   const numW = (name, def) => {
     var _a;
     const v = Number((_a = findW(node, name)) == null ? void 0 : _a.value);
@@ -4585,7 +5140,7 @@ function makeHost(node, state) {
       return buf ? Math.round(buf.duration * host.getFps()) : null;
     },
     reloadSources() {
-      bustCaches();
+      pool().bust();
       srcCache.clear();
       node.setDirtyCanvas(true, true);
     },
@@ -4659,6 +5214,14 @@ function makeHost(node, state) {
         const kind = slotKind(node, m[1]);
         if (kind) out[kind].push(m[1]);
       }
+      if (audioOnly) {
+        return {
+          videos: [],
+          images: [],
+          masks: [],
+          audios: [...out.audio, ...out.video, ...out.image, ...out.mask]
+        };
+      }
       return {
         videos: out.video,
         images: out.image,
@@ -4691,7 +5254,7 @@ function makeHost(node, state) {
         if (!(t == null ? void 0 : t.filename) || !(t.tiles > 0)) continue;
         const prev = strips.get(slot);
         if ((prev == null ? void 0 : prev.ref.filename) === t.filename) continue;
-        if (prev) forget(prev.ref);
+        if (prev) pool().forget(prev.ref);
         const ref = {
           filename: t.filename,
           subfolder: t.subfolder ?? "",
@@ -4713,7 +5276,7 @@ function makeHost(node, state) {
     pruneStrips(live) {
       for (const slot of [...strips.keys()]) {
         if (live.has(slot)) continue;
-        forget(strips.get(slot).ref);
+        pool().forget(strips.get(slot).ref);
         strips.delete(slot);
       }
     },
@@ -4725,288 +5288,308 @@ function makeHost(node, state) {
   };
   return host;
 }
-app.registerExtension({
-  name: EXT_NAME,
-  // Surfaced in ComfyUI's own Settings dialog under "NKD Timeline", so the shortcuts are
-  // discoverable and rebindable in the place users already look for them.
-  settings: KEY_SETTINGS.map((k) => ({
-    id: k.id,
-    name: k.label,
-    type: "text",
-    defaultValue: k.def,
-    category: ["NKD Timeline", "Shortcuts", k.label],
-    tooltip: `Single key, lower-case. Default: ${k.def}`
-  })),
-  async beforeRegisterNodeDef(nodeType, nodeData) {
-    if ((nodeData == null ? void 0 : nodeData.name) !== NODE_NAME) return;
-    if (nodeType.prototype.__nkdTimelineWrapped) return;
-    nodeType.prototype.__nkdTimelineWrapped = true;
-    const origCreated = nodeType.prototype.onNodeCreated;
-    nodeType.prototype.onNodeCreated = function() {
-      var _a;
-      const result = origCreated == null ? void 0 : origCreated.apply(this, arguments);
-      ensureStyles();
-      const node = this;
-      const dataW = findW(node, "timeline");
-      hideWidget(dataW);
-      const ghost = (_a = node.inputs) == null ? void 0 : _a.findIndex((i) => i.name === "timeline");
-      if (ghost >= 0) node.removeInput(ghost);
-      const state = { tl: parseTimeline(dataW == null ? void 0 : dataW.value) };
-      restoreView(node, state.tl);
-      const host = makeHost(node, state);
-      const editor = new TimelineEditor(host);
-      const container = document.createElement("div");
-      container.style.width = "100%";
-      container.style.minWidth = `${MIN_W}px`;
-      container.appendChild(editor.root);
-      let measured = 0;
-      let inset = 0;
-      const estimate = () => {
-        var _a2;
-        const w = Math.max(((_a2 = node.size) == null ? void 0 : _a2[0]) ?? MIN_W, MIN_W);
-        const [ow, oh] = host.getOutSize();
-        return Math.min(Math.round((w - 24) * (oh / Math.max(1, ow))), PREVIEW_MAX_H$1) + editor.timelineHeight + 40;
-      };
-      const heightFor = () => (measured > 0 ? measured : estimate()) + ROW_SAFETY + inset;
-      node.addDOMWidget("nkd_timeline", "NKD_TIMELINE", container, {
-        getValue: () => (dataW == null ? void 0 : dataW.value) ?? "",
-        setValue: (v) => {
-          if (dataW) dataW.value = v;
-          state.tl = parseTimeline(v);
-          restoreView(node, state.tl);
-          editor.requestRender();
-        },
-        serialize: false,
-        hideOnZoom: false,
-        getMinHeight: heightFor,
-        getMaxHeight: heightFor,
-        getHeight: heightFor
-      });
-      const widthKeeper = keepDomWidgetSized(node, container, MIN_W);
-      const minNodeWidth = () => MIN_W + widthKeeper.margin();
-      const resizeToContent = () => {
-        node.setSize([Math.max(node.size[0], minNodeWidth()), node.computeSize()[1]]);
-        node.setDirtyCanvas(true, true);
-      };
-      let settling = false;
-      const calibrate = () => {
-        var _a2;
-        const hostH = ((_a2 = container.parentElement) == null ? void 0 : _a2.clientHeight) ?? 0;
-        if (hostH < 1) return false;
-        const gap = Math.min(MAX_INSET, Math.max(0, Math.round(heightFor() - hostH)));
-        if (Math.abs(gap - inset) <= 1) return false;
-        inset = gap;
-        return true;
-      };
-      const ro = new ResizeObserver(() => {
-        if (settling) return;
-        const h = editor.root.offsetHeight;
-        if (h < 1) return;
-        const grew = Math.abs(h - measured) > 1;
-        if (grew) measured = h;
-        if (!calibrate() && !grew) return;
-        settling = true;
-        resizeToContent();
-        requestAnimationFrame(() => {
-          settling = false;
+function registerTimelineNode(v) {
+  app.registerExtension({
+    name: v.ext,
+    // Surfaced in ComfyUI's own Settings dialog under "NKD Timeline", so the shortcuts are
+    // discoverable and rebindable in the place users already look for them.
+    //
+    // Declared by the VIDEO variant only. The ids are shared - both editors read the same
+    // bindings, which is the point - and registering an id twice is a conflict, not a
+    // second copy.
+    settings: v.audioOnly ? [] : KEY_SETTINGS.map((k) => ({
+      id: k.id,
+      name: k.label,
+      type: "text",
+      defaultValue: k.def,
+      category: ["NKD Timeline", "Shortcuts", k.label],
+      tooltip: `Single key, lower-case. Default: ${k.def}`
+    })),
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+      if ((nodeData == null ? void 0 : nodeData.name) !== v.node) return;
+      if (nodeType.prototype[v.flag]) return;
+      nodeType.prototype[v.flag] = true;
+      const origCreated = nodeType.prototype.onNodeCreated;
+      nodeType.prototype.onNodeCreated = function() {
+        var _a;
+        const result = origCreated == null ? void 0 : origCreated.apply(this, arguments);
+        ensureStyles();
+        const node = this;
+        const dataW = findW(node, "timeline");
+        hideWidget(dataW);
+        const ghost = (_a = node.inputs) == null ? void 0 : _a.findIndex((i) => i.name === "timeline");
+        if (ghost >= 0) node.removeInput(ghost);
+        const state = { tl: parseTimeline(dataW == null ? void 0 : dataW.value) };
+        restoreView(node, state.tl);
+        let editor;
+        const host = makeHost(node, state, () => editor.pool, v.audioOnly);
+        editor = new TimelineEditor(host, { audioOnly: v.audioOnly });
+        const container = document.createElement("div");
+        container.style.width = "100%";
+        container.style.minWidth = `${MIN_W}px`;
+        container.appendChild(editor.root);
+        let measured = 0;
+        let inset = 0;
+        const estimate = () => {
+          var _a2;
+          if (v.audioOnly) return editor.timelineHeight + 40;
+          const w = Math.max(((_a2 = node.size) == null ? void 0 : _a2[0]) ?? MIN_W, MIN_W);
+          const [ow, oh] = host.getOutSize();
+          return Math.min(Math.round((w - 24) * (oh / Math.max(1, ow))), PREVIEW_MAX_H$1) + editor.timelineHeight + 40;
+        };
+        const heightFor = () => (measured > 0 ? measured : estimate()) + ROW_SAFETY + inset;
+        node.addDOMWidget("nkd_timeline", "NKD_TIMELINE", container, {
+          getValue: () => (dataW == null ? void 0 : dataW.value) ?? "",
+          setValue: (v2) => {
+            if (dataW) dataW.value = v2;
+            state.tl = parseTimeline(v2);
+            restoreView(node, state.tl);
+            editor.requestRender();
+          },
+          serialize: false,
+          hideOnZoom: false,
+          getMinHeight: heightFor,
+          getMaxHeight: heightFor,
+          getHeight: heightFor
         });
-      });
-      ro.observe(editor.root);
-      editor.onHeightChange = () => requestAnimationFrame(resizeToContent);
-      const origResize = node.onResize;
-      node.onResize = function(size) {
-        origResize == null ? void 0 : origResize.apply(this, arguments);
-        const min = minNodeWidth();
-        if (size[0] < min) size[0] = min;
-        size[1] = this.computeSize(size[0])[1];
-        editor.requestRender();
-      };
-      const origComputeSize = node.computeSize.bind(node);
-      node.computeSize = function() {
-        const sz = origComputeSize();
-        const needed = heightFor();
-        if (sz[1] < needed) sz[1] = needed;
-        const min = minNodeWidth();
-        if (sz[0] < min) sz[0] = min;
-        return sz;
-      };
-      const syncQuantumStep = () => {
-        var _a2;
-        const w = findW(node, "frame_count");
-        if (!(w == null ? void 0 : w.options)) return;
-        const grid = quantizeGrid(host.getQuantize(), host.getQuantizeN());
-        const step = grid ? grid[0] : 1;
-        if (w.options.step2 === step) return;
-        w.options.step2 = step;
-        w.options.step = step * 10;
-        const snapped = quantizeCount(
-          Number(w.value) || 0,
-          host.getQuantize(),
-          host.getQuantizeN()
-        );
-        if (snapped > 0 && snapped !== w.value) {
-          w.value = snapped;
-          (_a2 = w.callback) == null ? void 0 : _a2.call(w, snapped);
-        }
-      };
-      requestAnimationFrame(() => {
-        measured = editor.root.offsetHeight || 0;
-        syncQuantumStep();
-        resizeToContent();
-        editor.requestRender();
-      });
-      const twinOf = (slot) => {
-        var _a2, _b, _c, _d;
-        const origin = (_a2 = resolveSource(node, slot, 6)) == null ? void 0 : _a2.filename;
-        if (!origin) return void 0;
-        const fps = host.getFps();
-        for (const c of [...state.tl.clips, ...state.tl.masks]) {
-          if (((_b = resolveSource(node, c.src, 6)) == null ? void 0 : _b.filename) !== origin) continue;
-          const srcFps = ((_d = (_c = host.sourceFor(c.src)) == null ? void 0 : _c.info) == null ? void 0 : _d.fps) || fps;
-          return {
-            start: c.start,
-            trimIn: Math.max(0, Math.round(c.trimIn * (fps / srcFps))),
-            length: c.length
-          };
-        }
-        return void 0;
-      };
-      const syncSlots = () => {
-        host.clearSourceCache();
-        const { videos, images, masks, audios } = host.connectedSlots();
-        const live = /* @__PURE__ */ new Set([...videos, ...images, ...masks, ...audios]);
-        host.pruneStrips(live);
-        if (editor.pruneToSlots(live)) host.commit();
-        for (const slot of videos) {
-          if (slotInUse(state.tl, slot)) continue;
-          const src = host.sourceFor(slot);
-          if (!src) continue;
-          const place = (info) => {
-            if (!info) return;
-            if (state.tl.clips.length === 0 && state.tl.masks.length === 0) {
-              host.conformToFirstClip(info);
-            }
-            const fps = host.getFps();
-            editor.addClipForSlot(
-              slot,
-              Math.round(info.frame_count * (fps / (info.fps || fps))),
-              "video"
-            );
-          };
-          if (src.info) place(src.info);
-          else void probe(src.ref).then(place);
-        }
-        const fallback = Math.max(1, host.getFrameCount() || TENSOR_DEFAULT_FRAMES);
-        for (const slot of images) {
-          if (!slotInUse(state.tl, slot)) editor.addClipForSlot(slot, fallback, "video");
-        }
-        for (const slot of masks) {
-          if (!slotInUse(state.tl, slot)) editor.addClipForSlot(slot, fallback, "mask");
-        }
-        for (const slot of audios) {
-          if (slotInUse(state.tl, slot)) continue;
-          const src = host.sourceFor(slot);
-          if (!src) continue;
-          const place = () => {
-            const buf = audioBufferFor(src.ref);
-            const len = buf ? Math.round(buf.duration * host.getFps()) : fallback;
-            editor.addClipForSlot(slot, len, "audio", twinOf(slot));
-          };
-          if (audioBufferFor(src.ref)) place();
-          else ensureAudio(src.ref, place);
-        }
-        const refs = [...state.tl.clips, ...state.tl.masks, ...state.tl.audio].map((c) => {
+        const widthKeeper = keepDomWidgetSized(node, container, MIN_W);
+        const minNodeWidth = () => MIN_W + widthKeeper.margin();
+        const resizeToContent = () => {
+          node.setSize([Math.max(node.size[0], minNodeWidth()), node.computeSize()[1]]);
+          node.setDirtyCanvas(true, true);
+        };
+        let settling = false;
+        const calibrate = () => {
           var _a2;
-          return (_a2 = host.sourceFor(c.src)) == null ? void 0 : _a2.ref;
-        }).filter(Boolean);
-        releaseUnused(refs);
-        editor.requestRender();
-      };
-      const origConn = node.onConnectionsChange;
-      node.onConnectionsChange = function(...args) {
-        const r = origConn == null ? void 0 : origConn.apply(this, args);
-        requestAnimationFrame(syncSlots);
-        return r;
-      };
-      const origConfigure = node.onConfigure;
-      node.onConfigure = function(...args) {
-        const r = origConfigure == null ? void 0 : origConfigure.apply(this, args);
+          const hostH = ((_a2 = container.parentElement) == null ? void 0 : _a2.clientHeight) ?? 0;
+          if (hostH < 1) return false;
+          const gap = Math.min(MAX_INSET, Math.max(0, Math.round(heightFor() - hostH)));
+          if (Math.abs(gap - inset) <= 1) return false;
+          inset = gap;
+          return true;
+        };
+        const ro = new ResizeObserver(() => {
+          if (settling) return;
+          const h = editor.root.offsetHeight;
+          if (h < 1) return;
+          const grew = Math.abs(h - measured) > 1;
+          if (grew) measured = h;
+          if (!calibrate() && !grew) return;
+          settling = true;
+          resizeToContent();
+          requestAnimationFrame(() => {
+            settling = false;
+          });
+        });
+        ro.observe(editor.root);
+        editor.onHeightChange = () => requestAnimationFrame(resizeToContent);
+        const origResize = node.onResize;
+        node.onResize = function(size) {
+          origResize == null ? void 0 : origResize.apply(this, arguments);
+          const min = minNodeWidth();
+          if (size[0] < min) size[0] = min;
+          size[1] = this.computeSize(size[0])[1];
+          editor.requestRender();
+        };
+        const origComputeSize = node.computeSize.bind(node);
+        node.computeSize = function() {
+          const sz = origComputeSize();
+          const needed = heightFor();
+          if (sz[1] < needed) sz[1] = needed;
+          const min = minNodeWidth();
+          if (sz[0] < min) sz[0] = min;
+          return sz;
+        };
+        const syncQuantumStep = () => {
+          var _a2;
+          const w = findW(node, "frame_count");
+          if (!(w == null ? void 0 : w.options)) return;
+          const grid = quantizeGrid(host.getQuantize(), host.getQuantizeN());
+          const step = grid ? grid[0] : 1;
+          if (w.options.step2 === step) return;
+          w.options.step2 = step;
+          w.options.step = step * 10;
+          const snapped = quantizeCount(
+            Number(w.value) || 0,
+            host.getQuantize(),
+            host.getQuantizeN()
+          );
+          if (snapped > 0 && snapped !== w.value) {
+            w.value = snapped;
+            (_a2 = w.callback) == null ? void 0 : _a2.call(w, snapped);
+          }
+        };
         requestAnimationFrame(() => {
-          var _a2;
-          state.tl = parseTimeline((_a2 = findW(node, "timeline")) == null ? void 0 : _a2.value);
-          restoreView(node, state.tl);
-          syncSlots();
+          measured = editor.root.offsetHeight || 0;
+          syncQuantumStep();
           resizeToContent();
           editor.requestRender();
         });
-        return r;
-      };
-      const onMeta = (e) => {
-        const d = e == null ? void 0 : e.detail;
-        if (!d || String(d.node) !== String(node.id)) return;
-        const gotStrips = host.applyStrips(d.tensors, () => {
+        const twinOf = (slot) => {
+          var _a2, _b, _c, _d;
+          const origin = (_a2 = resolveSource(node, slot, 6)) == null ? void 0 : _a2.filename;
+          if (!origin) return void 0;
+          const fps = host.getFps();
+          for (const c of [...state.tl.clips, ...state.tl.masks]) {
+            if (((_b = resolveSource(node, c.src, 6)) == null ? void 0 : _b.filename) !== origin) continue;
+            const srcFps = ((_d = (_c = host.sourceFor(c.src)) == null ? void 0 : _c.info) == null ? void 0 : _d.fps) || fps;
+            return {
+              start: c.start,
+              trimIn: Math.max(0, Math.round(c.trimIn * (fps / srcFps))),
+              length: c.length
+            };
+          }
+          return void 0;
+        };
+        const syncSlots = () => {
+          host.clearSourceCache();
+          const { videos, images, masks, audios } = host.connectedSlots();
+          const live = /* @__PURE__ */ new Set([...videos, ...images, ...masks, ...audios]);
+          host.pruneStrips(live);
+          if (editor.pruneToSlots(live)) host.commit();
+          for (const slot of videos) {
+            if (slotInUse(state.tl, slot)) continue;
+            const src = host.sourceFor(slot);
+            if (!src) continue;
+            const place = (info) => {
+              if (!info) return;
+              if (state.tl.clips.length === 0 && state.tl.masks.length === 0) {
+                host.conformToFirstClip(info);
+              }
+              const fps = host.getFps();
+              editor.addClipForSlot(
+                slot,
+                Math.round(info.frame_count * (fps / (info.fps || fps))),
+                "video"
+              );
+            };
+            if (src.info) place(src.info);
+            else void probe(src.ref).then(place);
+          }
+          const fallback = Math.max(1, host.getFrameCount() || TENSOR_DEFAULT_FRAMES);
+          for (const slot of images) {
+            if (!slotInUse(state.tl, slot)) editor.addClipForSlot(slot, fallback, "video");
+          }
+          for (const slot of masks) {
+            if (!slotInUse(state.tl, slot)) editor.addClipForSlot(slot, fallback, "mask");
+          }
+          for (const slot of audios) {
+            if (slotInUse(state.tl, slot)) continue;
+            const src = host.sourceFor(slot);
+            if (!src) continue;
+            const place = () => {
+              const buf = audioBufferFor(src.ref);
+              const len = buf ? Math.round(buf.duration * host.getFps()) : fallback;
+              editor.addClipForSlot(slot, len, "audio", twinOf(slot));
+            };
+            if (audioBufferFor(src.ref)) place();
+            else ensureAudio(src.ref, place);
+          }
+          const refs = [...state.tl.clips, ...state.tl.masks, ...state.tl.audio].map((c) => {
+            var _a2;
+            return (_a2 = host.sourceFor(c.src)) == null ? void 0 : _a2.ref;
+          }).filter(Boolean);
+          editor.pool.releaseUnused(refs);
+          editor.requestRender();
+        };
+        const origConn = node.onConnectionsChange;
+        node.onConnectionsChange = function(...args) {
+          const r = origConn == null ? void 0 : origConn.apply(this, args);
+          requestAnimationFrame(syncSlots);
+          return r;
+        };
+        const origConfigure = node.onConfigure;
+        node.onConfigure = function(...args) {
+          const r = origConfigure == null ? void 0 : origConfigure.apply(this, args);
+          requestAnimationFrame(() => {
+            var _a2;
+            state.tl = parseTimeline((_a2 = findW(node, "timeline")) == null ? void 0 : _a2.value);
+            restoreView(node, state.tl);
+            syncSlots();
+            resizeToContent();
+            editor.requestRender();
+          });
+          return r;
+        };
+        const onMeta = (e) => {
+          const d = e == null ? void 0 : e.detail;
+          if (!d || String(d.node) !== String(node.id)) return;
+          const gotStrips = host.applyStrips(d.tensors, () => {
+            editor.retightenToSources();
+            editor.requestRender();
+          });
+          const gotSize = host.applyMeta(d);
+          if (!gotStrips && !gotSize) return;
+          if (gotSize) resizeToContent();
+          editor.requestRender();
+        };
+        api.addEventListener("nkd-timeline-meta", onMeta);
+        const detectSourceSwaps = () => {
+          for (const slot of new Set(
+            [...state.tl.clips, ...state.tl.masks, ...state.tl.audio].map((c) => c.src)
+          )) {
+            const cached = host.peekSource(slot);
+            if (!cached) continue;
+            const now = resolveSource(node, slot);
+            if (!now || now.filename === cached.ref.filename) continue;
+            editor.pool.forget(cached.ref);
+            host.dropSource(slot);
+            editor.requestRender();
+          }
+        };
+        let lastAspect = null;
+        let lastModel = null;
+        const syncAspectWidgets = () => {
+          var _a2, _b;
+          if (v.audioOnly) return;
+          const aspect = String(((_a2 = findW(node, "aspect_ratio")) == null ? void 0 : _a2.value) ?? ASPECT_CUSTOM);
+          const model = String(((_b = findW(node, "model")) == null ? void 0 : _b.value) ?? "");
+          if (aspect === lastAspect && model === lastModel) return;
+          lastAspect = aspect;
+          lastModel = model;
+          const custom = aspect === ASPECT_CUSTOM;
+          setWidgetVisible(node, "width", custom);
+          setWidgetVisible(node, "height", custom);
+          setWidgetVisible(node, "megapixels", !custom);
+          setWidgetVisible(node, "size_multiple", !custom);
+          setWidgetVisible(node, "quantize_n", model === QUANTIZE_CUSTOM);
+          if (Array.isArray(node.widgets)) node.widgets = [...node.widgets];
+          resizeToContent();
+          editor.requestRender();
+        };
+        const tick = window.setInterval(() => {
+          syncAspectWidgets();
+          syncQuantumStep();
+          detectSourceSwaps();
           editor.retightenToSources();
           editor.requestRender();
-        });
-        const gotSize = host.applyMeta(d);
-        if (!gotStrips && !gotSize) return;
-        if (gotSize) resizeToContent();
-        editor.requestRender();
+        }, 300);
+        const origRemoved = node.onRemoved;
+        node.onRemoved = function(...args) {
+          window.clearInterval(tick);
+          ro.disconnect();
+          widthKeeper.release();
+          api.removeEventListener("nkd-timeline-meta", onMeta);
+          editor.destroy();
+          origRemoved == null ? void 0 : origRemoved.apply(this, args);
+        };
+        requestAnimationFrame(syncSlots);
+        return result;
       };
-      api.addEventListener("nkd-timeline-meta", onMeta);
-      const detectSourceSwaps = () => {
-        for (const slot of new Set(
-          [...state.tl.clips, ...state.tl.masks, ...state.tl.audio].map((c) => c.src)
-        )) {
-          const cached = host.peekSource(slot);
-          if (!cached) continue;
-          const now = resolveSource(node, slot);
-          if (!now || now.filename === cached.ref.filename) continue;
-          forget(cached.ref);
-          host.dropSource(slot);
-          editor.requestRender();
-        }
-      };
-      let lastAspect = null;
-      let lastModel = null;
-      const syncAspectWidgets = () => {
-        var _a2, _b;
-        const aspect = String(((_a2 = findW(node, "aspect_ratio")) == null ? void 0 : _a2.value) ?? ASPECT_CUSTOM);
-        const model = String(((_b = findW(node, "model")) == null ? void 0 : _b.value) ?? "");
-        if (aspect === lastAspect && model === lastModel) return;
-        lastAspect = aspect;
-        lastModel = model;
-        const custom = aspect === ASPECT_CUSTOM;
-        setWidgetVisible(node, "width", custom);
-        setWidgetVisible(node, "height", custom);
-        setWidgetVisible(node, "megapixels", !custom);
-        setWidgetVisible(node, "size_multiple", !custom);
-        setWidgetVisible(node, "quantize_n", model === QUANTIZE_CUSTOM);
-        if (Array.isArray(node.widgets)) node.widgets = [...node.widgets];
-        resizeToContent();
-        editor.requestRender();
-      };
-      const tick = window.setInterval(() => {
-        syncAspectWidgets();
-        syncQuantumStep();
-        detectSourceSwaps();
-        editor.retightenToSources();
-        editor.requestRender();
-      }, 300);
-      const origRemoved = node.onRemoved;
-      node.onRemoved = function(...args) {
-        window.clearInterval(tick);
-        ro.disconnect();
-        widthKeeper.release();
-        api.removeEventListener("nkd-timeline-meta", onMeta);
-        editor.destroy();
-        releaseUnused([]);
-        origRemoved == null ? void 0 : origRemoved.apply(this, args);
-      };
-      requestAnimationFrame(syncSlots);
-      return result;
-    };
-  }
+    }
+  });
+}
+registerTimelineNode({
+  node: NODE_NAME,
+  ext: EXT_NAME,
+  flag: "__nkdTimelineWrapped",
+  audioOnly: false
+});
+registerTimelineNode({
+  node: AUDIO_NODE_NAME,
+  ext: AUDIO_EXT_NAME,
+  flag: "__nkdAudioTimelineWrapped",
+  audioOnly: true
 });
 registerFreezeFrames();
 registerVideoViewer();

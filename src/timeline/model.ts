@@ -32,6 +32,20 @@ export type Clip = {
    */
   audioOnly?: boolean;
   /**
+   * Level for this clip's own sound, 0..2. Absent means 1 - the way it always behaved.
+   *
+   * A VIDEO clip carries audio too (the backend has always mixed it), so the level and the
+   * fades below live on the base clip rather than only on the audio lane. That plus the
+   * blade is what "mute this stretch and ease out of the cut" needs: split, then drop or
+   * fade the piece.
+   */
+  gain?: number;
+  /** Ramp from silence over this many TIMELINE frames from the clip's head. Anchored to
+   *  the CLIP, so moving or blading it carries the ramp along. */
+  fadeIn?: number;
+  /** Ramp to silence over this many TIMELINE frames into the clip's tail. */
+  fadeOut?: number;
+  /**
    * Freeze-frame markers, as offsets from `start` in TIMELINE frames, sorted and unique.
    *
    * Anchored to the CLIP, not to the timeline: the point of a marker is "this exact frame
@@ -45,11 +59,17 @@ export type Clip = {
 export type AudioClip = {
   id: string;
   src: string;      // "audio_0"
+  /** Lane to sit on. Always 0 in the video Timeline, which has one audio lane; the Audio
+   *  Timeline stacks them so two beds can overlap for a crossfade. Unlike a video track
+   *  this carries NO z-order - the mix is additive, so nothing covers anything. */
+  track: number;
   start: number;
   trimIn: number;
   length: number;
   gain: number;
   muted?: boolean;
+  fadeIn?: number;
+  fadeOut?: number;
 };
 
 /** `zoom` is how many times the content extent is magnified (1 = everything fits).
@@ -287,6 +307,122 @@ export function quantizeStops(max: number, mode: QuantizeMode, k = 8): number[] 
 
 /** Sorted, unique, inside `[0, length)`. The single gatekeeper: everything that touches
  *  markers goes through here, so no other code has to remember the invariant. */
+// ── Level and fades ───────────────────────────────────────────────────────────
+
+/** Anything with sound: the base `Clip` (a video carries its own audio) and `AudioClip`. */
+type Fadeable = { length: number; gain?: number; fadeIn?: number; fadeOut?: number;
+                  muted?: boolean };
+
+/** Parse `fadeIn`/`fadeOut`/`gain` off raw JSON, dropping the ones that mean "default".
+ *  Absent throughout means a workflow saved before fades existed loads bit-identically. */
+function fadeFields(raw: any, length: number): Partial<Fadeable> {
+  const g = num(raw?.gain, 1);
+  const c: Fadeable = {
+    length,
+    fadeIn: Math.max(0, int(raw?.fadeIn)),
+    fadeOut: Math.max(0, int(raw?.fadeOut)),
+  };
+  clampFades(c);
+  return {
+    ...(g !== 1 ? { gain: Math.max(0, Math.min(MAX_GAIN, g)) } : {}),
+    ...(c.fadeIn ? { fadeIn: c.fadeIn } : {}),
+    ...(c.fadeOut ? { fadeOut: c.fadeOut } : {}),
+  };
+}
+
+/** Ceiling for a clip's level. +6 dB is as much lift as is honest before clipping. */
+export const MAX_GAIN = 2;
+
+/**
+ * Keep the fades inside the clip after it changed length.
+ *
+ * Two ramps longer than the clip would overlap and the level would dip in the middle of a
+ * stretch the user never touched, so they are scaled down together rather than clipped
+ * independently - that preserves the SHAPE the user drew.
+ */
+export function clampFades(c: Fadeable): void {
+  const len = Math.max(0, c.length);
+  let fi = Math.max(0, Math.round(c.fadeIn ?? 0));
+  let fo = Math.max(0, Math.round(c.fadeOut ?? 0));
+  // NOT clamped to `len` one at a time first: doing that flattens a 3:1 shape to 1:1
+  // before the joint scale ever sees it.
+  if (fi + fo > len) {
+    const k = fi + fo ? len / (fi + fo) : 0;
+    fi = Math.floor(fi * k);
+    fo = Math.floor(fo * k);
+  }
+  if (fi > 0) c.fadeIn = fi; else delete c.fadeIn;
+  if (fo > 0) c.fadeOut = fo; else delete c.fadeOut;
+}
+
+/**
+ * The clip's level `offset` TIMELINE frames after its head.
+ *
+ * MIRRORED IN `nkd_timeline.py` (`clip_gain_ramp`). The preview and the render have to
+ * agree on the shape or a fade that sounds right while scrubbing lands differently in the
+ * file. Linear, because that is what the handle drawn on the clip depicts.
+ */
+export function gainAt(c: Fadeable, offset: number): number {
+  if (c.muted) return 0;
+  const g = c.gain ?? 1;
+  const len = Math.max(0, c.length);
+  if (offset < 0 || offset >= len) return 0;
+  let k = 1;
+  const fi = c.fadeIn ?? 0;
+  if (fi > 0 && offset < fi) k = offset / fi;
+  const fo = c.fadeOut ?? 0;
+  if (fo > 0) {
+    const fromEnd = len - offset;
+    if (fromEnd < fo) k = Math.min(k, fromEnd / fo);
+  }
+  return g * k;
+}
+
+/** Detent spacing for the volume line under Shift. 3 dB is the step a mixer is marked in,
+ *  and it is the smallest move most people can hear on one pass. */
+export const GAIN_DB_STEP = 3;
+/** Below this the detents stop and the next one down is silence. Snapping in dB never
+ *  reaches zero on its own - the scale is logarithmic, so it would step towards -inf
+ *  forever and the drag could never be pulled to a true mute. */
+const GAIN_DB_FLOOR = -30;
+
+/**
+ * The nearest 3 dB detent to `g`, for a Shift-drag on the volume line.
+ *
+ * In dB rather than in amplitude, because that is the scale the ear and every fader use:
+ * even steps of amplitude would be crowded at the top and useless at the bottom.
+ */
+export function snapGainToDb(g: number): number {
+  if (g <= 0) return 0;
+  const db = 20 * Math.log10(g);
+  if (db < GAIN_DB_FLOOR - GAIN_DB_STEP / 2) return 0;
+  const snapped = Math.round(db / GAIN_DB_STEP) * GAIN_DB_STEP;
+  return Math.min(MAX_GAIN, 10 ** (snapped / 20));
+}
+
+/**
+ * The clip's level as a polyline of `[offsetFrames, level]`, in order.
+ *
+ * The curve is linear between its breakpoints, so these few points describe it EXACTLY at
+ * any zoom - no sampling, no resolution to get wrong.
+ *
+ * It lives here, next to `gainAt` and away from the canvas, because the direction of these
+ * ramps is the thing this editor has already got backwards once: the first version drew
+ * the ATTENUATION, so a fade in sloped downwards. A pure function can be asserted; a shape
+ * buried in a paint call can only be looked at.
+ *
+ * The last point stops a hair INSIDE the clip: `gainAt` reports silence for an offset that
+ * is already past the end, so asking at exactly `length` would end every polyline with a
+ * cliff to the floor.
+ */
+export function levelStops(c: Fadeable): [number, number][] {
+  const len = Math.max(0, c.length);
+  const eps = Math.min(1e-6, len);
+  const offs = [0, c.fadeIn ?? 0, len - (c.fadeOut ?? 0), len - eps]
+    .map((o) => Math.max(0, Math.min(len - eps, o)));
+  return [...new Set(offs)].sort((a, b) => a - b).map((o) => [o, gainAt(c, o)]);
+}
+
 function cleanMarkers(raw: unknown, length: number): number[] {
   if (!Array.isArray(raw)) return [];
   const seen = new Set<number>();
@@ -358,6 +494,7 @@ function parseClipList(raw: any): Clip[] {
       length,
       ...(c.muted ? { muted: true } : {}),
       ...(c.audioOnly ? { audioOnly: true } : {}),
+      ...fadeFields(c, length),
       ...(markers.length ? { markers } : {}),
     });
   }
@@ -392,11 +529,13 @@ export function parseTimeline(raw: string | null | undefined): Timeline {
       out.audio.push({
         id: typeof a.id === "string" && a.id ? a.id : newId(),
         src: String(a.src),
+        track: Math.max(0, int(a.track)),
         start: Math.max(0, int(a.start)),
         trimIn: Math.max(0, int(a.trimIn)),
         length,
         gain: num(a.gain, 1),
         ...(a.muted ? { muted: true } : {}),
+        ...fadeFields(a, length),
       });
     }
   }
@@ -418,6 +557,9 @@ export function serialiseTimeline(t: Timeline): string {
     start: c.start, trimIn: c.trimIn, length: c.length,
     ...(c.muted ? { muted: true } : {}),   // omitted when false: keeps the JSON small
     ...(c.audioOnly ? { audioOnly: true } : {}),
+    ...(c.gain !== undefined && c.gain !== 1 ? { gain: c.gain } : {}),
+    ...(c.fadeIn ? { fadeIn: c.fadeIn } : {}),
+    ...(c.fadeOut ? { fadeOut: c.fadeOut } : {}),
     ...(c.markers?.length ? { markers: c.markers } : {}),
   });
   return JSON.stringify({
@@ -428,7 +570,10 @@ export function serialiseTimeline(t: Timeline): string {
     audio: t.audio.map((a) => ({
       id: a.id, src: a.src, start: a.start,
       trimIn: a.trimIn, length: a.length, gain: a.gain,
+      ...(a.track ? { track: a.track } : {}),
       ...(a.muted ? { muted: true } : {}),
+      ...(a.fadeIn ? { fadeIn: a.fadeIn } : {}),
+      ...(a.fadeOut ? { fadeOut: a.fadeOut } : {}),
     })),
     // ZOOM AND SCROLL ARE DELIBERATELY ABSENT. This string is a node INPUT, and a widget
     // value goes verbatim into ComfyUI's cache signature (comfy_execution/caching.py:126),
@@ -584,6 +729,7 @@ export function trimStart(clip: Clip, newStart: number, srcFps: number, fps: num
   clip.trimIn = Math.max(0, clip.trimIn + Math.round(delta * ratio));
   clip.start = s;
   clip.length = end - s;
+  clampFades(clip);
   // The clip's origin moved but its content did not, so every marker is now `delta`
   // frames closer to the head. Without this a head trim would silently slide the freeze
   // frames onto different pictures.
@@ -598,6 +744,7 @@ export function trimEnd(clip: Clip, newEnd: number, srcFrames: number,
     ? Math.max(1, Math.floor((srcFrames - clip.trimIn) / (ratio || 1)))
     : Number.MAX_SAFE_INTEGER;
   clip.length = Math.max(1, Math.min(Math.round(newEnd) - clip.start, maxLen));
+  clampFades(clip);
   pruneMarkers(clip);   // whatever fell off the tail is gone with it
 }
 
@@ -628,6 +775,10 @@ export function splitClip(clip: Clip, frame: number, srcFps: number, fps: number
   const marks = clip.markers ?? [];
   const rightMarks = marks.filter((m) => m >= leftLen).map((m) => m - leftLen);
   clip.length = leftLen;
+  // Each half keeps the ramp on the side it still has, shrunk to fit. Blading in the
+  // middle of a fade-out and leaving both halves fading out is the alternative.
+  clampFades(clip);
+  clampFades(right);
   clip.markers = cleanMarkers(marks, clip.length);
   if (!clip.markers.length) delete clip.markers;
   right.markers = cleanMarkers(rightMarks, right.length);
@@ -770,6 +921,7 @@ export function clampClipsToSources(t: Timeline, fps: number,
       const maxLen = Math.max(1, Math.floor((srcFrames - c.trimIn) / (ratio || 1)));
       if (c.length > maxLen) {
         c.length = maxLen;
+        clampFades(c);
         pruneMarkers(c);
         changed = true;
       }

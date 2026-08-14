@@ -22,7 +22,7 @@ import json
 import math
 import re
 import os
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import folder_paths
 import numpy as np
@@ -251,9 +251,32 @@ def _parse_clips(raw_list: Any) -> list[dict]:
             "muted": bool(c.get("muted")),
             "audioOnly": bool(c.get("audioOnly")),
             "markers": markers,
+            **_fade_fields(c, length),
         })
     out.sort(key=lambda c: (c["track"], c["start"]))
     return out
+
+
+MAX_GAIN = 2.0
+
+
+def _fade_fields(raw: dict, length: int) -> dict:
+    """`gain`/`fadeIn`/`fadeOut` off one clip's JSON, clamped inside the clip.
+
+    Mirrors `fadeFields` + `clampFades` in `src/timeline/model.ts`. The two ramps are
+    scaled together when they would overlap, so the shape the editor drew survives a clip
+    that has since been shortened.
+    """
+    gain = max(0.0, min(MAX_GAIN, _float(raw.get("gain"), 1.0)))
+    fi = max(0, _int(raw.get("fadeIn")))
+    fo = max(0, _int(raw.get("fadeOut")))
+    # NOT clamped to `length` one at a time first: doing that flattens a 3:1 shape to 1:1
+    # before the joint scale ever sees it. Scaling both by the same factor is what keeps
+    # the ramp the user drew recognisable after the clip is shortened.
+    if fi + fo > length:
+        k = length / (fi + fo) if fi + fo else 0
+        fi, fo = int(fi * k), int(fo * k)
+    return {"gain": gain, "fadeIn": fi, "fadeOut": fo}
 
 
 def parse_timeline(raw: Any) -> dict:
@@ -293,10 +316,10 @@ def parse_timeline(raw: Any) -> dict:
             "start": max(0, _int(a.get("start"))),
             "trimIn": max(0, _int(a.get("trimIn"))),
             "length": length,
-            "gain": _float(a.get("gain"), 1.0),
             "muted": bool(a.get("muted")),
             "markers": sorted({m for m in (_int(v, -1) for v in a.get("markers") or [])
                                if 0 <= m < length}),
+            **_fade_fields(a, length),
         })
 
     ui_state = data.get("ui")
@@ -495,8 +518,27 @@ def _queue_clip_audio(segments: list, clip: dict, kind: str, obj: Any, a: int, b
     s1 = source_frame(clip, b - 1, src_fps, fps)
     # The decoded window starts at min(s0,s1); the offset to `a` is the trim.
     trim = int(round((s0 - min(s0, s1)) / src_fps * sr))
-    segments.append((wave[0], sr, int(round((a - start_frame) / fps * sr)), trim, 1.0))
+    # `1.0` used to be hardcoded here, which is why a video clip's level and fades did
+    # nothing however the editor was set: the sound was always mixed flat.
+    segments.append((wave[0], sr, int(round((a - start_frame) / fps * sr)), trim,
+                     audio_env(clip, a, fps, sr)))
     return sr
+
+
+def audio_env(clip: dict, a: int, fps: float, sr: int) -> AudioEnv:
+    """A clip's level envelope, converted from timeline frames to output samples.
+
+    `a` is the first frame of the clip that the render window actually covers, so
+    `a - clip["start"]` is how much of the clip (and of its fade-in) was already cut away.
+    """
+    per = sr / max(1e-6, fps)
+    return AudioEnv(
+        gain=float(clip.get("gain", 1.0)),
+        fade_in=int(round(max(0, clip.get("fadeIn", 0)) * per)),
+        fade_out=int(round(max(0, clip.get("fadeOut", 0)) * per)),
+        length=int(round(clip["length"] * per)),
+        head=int(round(max(0, a - clip["start"]) * per)),
+    )
 
 
 # ── Resolution fitting ────────────────────────────────────────────────────────
@@ -595,17 +637,54 @@ def _as_2ch(wave: torch.Tensor) -> torch.Tensor:
     return wave[:2] if wave.shape[0] > 2 else wave
 
 
-def mix_audio(segments: list[tuple[torch.Tensor, int, int, int, float]],
+class AudioEnv(NamedTuple):
+    """One clip's level over time, in SAMPLES of the output rate.
+
+    `head` is the trap this type exists to make impossible to forget: a clip may start
+    before the rendered window, in which case `a = max(clip.start, start_frame)` chops its
+    beginning off. The ramp is anchored to the CLIP, not to the window, so the samples that
+    survive begin `head` into the fade - without it a clip whose head falls outside the
+    render would fade in again at the window's edge, which is a dip in the middle of a
+    stretch the user never touched.
+    """
+    gain: float = 1.0
+    fade_in: int = 0
+    fade_out: int = 0
+    #: Clip length. 0 disables the ramps entirely (nothing to measure the tail against).
+    length: int = 0
+    head: int = 0
+
+
+def clip_gain_ramp(env: AudioEnv, n: int) -> torch.Tensor | float:
+    """Per-sample level for `n` samples starting `env.head` into the clip.
+
+    Returns the plain float when there is no ramp, so the common case stays a scalar
+    multiply. MIRRORS `gainAt` in `src/timeline/model.ts`: same linear shape, same
+    `offset/fade_in` and `(length-offset)/fade_out` factors, so what the editor draws, what
+    the preview plays and what lands in the file are the same curve.
+    """
+    if env.length <= 0 or (env.fade_in <= 0 and env.fade_out <= 0) or n <= 0:
+        return env.gain
+    idx = torch.arange(n, dtype=torch.float32) + env.head
+    k = torch.ones(n, dtype=torch.float32)
+    if env.fade_in > 0:
+        k = torch.minimum(k, (idx / env.fade_in).clamp(0.0, 1.0))
+    if env.fade_out > 0:
+        k = torch.minimum(k, ((env.length - idx) / env.fade_out).clamp(0.0, 1.0))
+    return k * env.gain
+
+
+def mix_audio(segments: list[tuple[torch.Tensor, int, int, int, Any]],
               total_samples: int, sample_rate: int) -> torch.Tensor:
     """Additive mix into a [1,2,total_samples] buffer.
 
     Each segment is (waveform[C,T], source_sample_rate, offset_samples, trim_samples,
-    gain).
+    level), where `level` is an `AudioEnv` or a plain float for a flat clip.
     """
     buf = torch.zeros((2, max(0, total_samples)), dtype=torch.float32)
     if total_samples <= 0:
         return buf.unsqueeze(0)
-    for wave, sr, offset, trim, gain in segments:
+    for wave, sr, offset, trim, level in segments:
         if wave is None or wave.numel() == 0:
             continue
         w = _resample(_as_2ch(wave.to(torch.float32)).unsqueeze(0), sr, sample_rate)[0]
@@ -616,8 +695,19 @@ def mix_audio(segments: list[tuple[torch.Tensor, int, int, int, float]],
         dst_a = max(0, offset)
         src_a = max(0, -offset)
         n = min(w.shape[-1] - src_a, total_samples - dst_a)
+        env = level if isinstance(level, AudioEnv) else AudioEnv(gain=float(level))
+        # `src_a` samples were dropped off the front by the window, so they are also
+        # consumed from the ramp.
+        head = env.head + src_a
+        # The CLIP's length, not the source's. Nothing here used to enforce it, so an
+        # audio clip trimmed shorter than the file behind it kept playing to the end of
+        # the timeline - the tail trim was silently ignored for sound. `length == 0` means
+        # a caller that passed a bare float and has no clip to measure against.
+        if env.length > 0:
+            n = min(n, env.length - head)
         if n <= 0:
             continue
+        gain = clip_gain_ramp(env._replace(head=head), n)
         buf[:, dst_a:dst_a + n] += w[:, src_a:src_a + n] * gain
     return buf.clamp(-1.0, 1.0).unsqueeze(0)
 
@@ -1127,7 +1217,7 @@ class NKDTimeline(io.ComfyNode):
             trim = int(round((ac["trimIn"] + (a - ac["start"])) / fps * sr))
             audio_segments.append((src["waveform"][0], sr,
                                    int(round((a - start_frame) / fps * sr)), trim,
-                                   ac["gain"]))
+                                   audio_env(ac, a, fps, sr)))
 
         sample_rate = sample_rate or 44100
         total_samples = int(round(count / fps * sample_rate))
