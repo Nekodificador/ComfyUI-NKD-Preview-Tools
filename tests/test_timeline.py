@@ -69,10 +69,27 @@ def test_quantize():
     assert quantize_count(20, MOCHI) == 19
     assert quantize_count(7, MOCHI) == 7
     # MiniMax H3 is NOT an Nn+1 family: 5, 22, 39, 56... (124 is the node's own default)
+    # MiniMax H3 rounds the OTHER WAY, because the model does: `align_frame_count`
+    # walks up until n % 17 == 5, while the Nn+1 families floor their latent count.
     assert quantize_count(124, MINIMAX) == 124
-    assert quantize_count(130, MINIMAX) == 124
+    assert quantize_count(130, MINIMAX) == 141
     assert quantize_count(22, MINIMAX) == 22
-    assert quantize_count(21, MINIMAX) == 5
+    assert quantize_count(17, MINIMAX) == 22
+    assert quantize_count(20, MINIMAX) == 22
+
+    # Cross-checked against the real thing, not against our reading of it.
+    def align_frame_count(n):          # comfy_extras/nodes_minimax_h3.py:34, verbatim
+        while n % 17 != 5:
+            n += 1
+        return n
+
+    for n in range(6, 200):
+        assert quantize_count(n, MINIMAX) == align_frame_count(n), n
+    for mode, step in ((LTX, 8), (WAN, 4), (MOCHI, 6)):
+        for n in range(step + 2, 200):
+            core = ((n - 1) // step) * step + 1     # nodes_wan.py:44 and friends
+            assert quantize_count(n, mode) == core, (mode, n)
+    assert quantize_count(21, MINIMAX) == 22
     assert quantize_count(4, MINIMAX) == 5
     # Never below the first valid stop, not even for absurd input.
     assert quantize_count(1, LTX) == 9

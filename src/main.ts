@@ -8,7 +8,8 @@
 import { app as comfyApp, api as comfyApi } from "./comfyRuntime";
 import {
   type FitMode, type ImportMode, type QuantizeMode, type Timeline,
-  parseTimeline, quantizeCount, quantizeGrid, serialiseTimeline, slotInUse, viewState,
+  firstStop, parseTimeline, quantizeCount, quantizeGrid, serialiseTimeline, slotInUse,
+  viewState,
   ASPECT_CUSTOM, QUANTIZE_CUSTOM, resolveResolution,
 } from "./timeline/model";
 import {
@@ -160,9 +161,20 @@ function makeHost(node: any, state: { tl: Timeline }, pool: () => VideoPool,
     srcFramesFor(src: string) {
       const info = host.sourceFor(src)?.info;
       if (info?.frame_count) return info.frame_count;
-      const ref = srcCache.get(src)?.ref;
-      const buf = ref && audioBufferFor(ref);
       // Audio has no frame count of its own: its length is its duration at timeline rate.
+      return host.audioFramesFor(src);
+    },
+    /**
+     * The DECODED SOUND's length in timeline frames.
+     *
+     * Separate from `srcFramesFor` because a clip on the audio lane is bounded by the
+     * sound, and a VIDEO dropped there reports a frame count that measures the PICTURE -
+     * a different number, in a different cadence, that would clamp the clip against the
+     * wrong end of its own material.
+     */
+    audioFramesFor(src: string) {
+      const ref = host.sourceFor(src)?.ref;
+      const buf = ref && audioBufferFor(ref);
       return buf ? Math.round(buf.duration * host.getFps()) : null;
     },
     reloadSources() {
@@ -517,18 +529,56 @@ comfyApp.registerExtension({
        * `options.step` (10x the visual step, a legacy quirk) and newer frontends read
        * `options.step2`, so both are set.
        */
+      /**
+       * `frame_count` WALKS the model's legal counts. There is no invalid value to land
+       * on and then be corrected off - an arrow moves to the next legal count, full stop.
+       *
+       * The core states this in the schema: `io.Int.Input("length", min=5, step=17)` on
+       * MiniMax H3, so its widget reads 5, 22, 39... and nothing else. Copying that
+       * outright is not open to us, because `min` here is 0 and 0 MEANS something - "up
+       * to the end of the last clip". Worse, it is the default, so every saved workflow
+       * carries it: a min of 5 would have LiteGraph clamp those to 5 on load and quietly
+       * render five frames of a two-minute edit.
+       *
+       * So the walk is done by hand, with 0 sitting one notch below the first stop.
+       * Arrows step 0 -> 5 -> 22 -> 39 and back down into 0, and a typed number lands on
+       * the nearest legal count instead of being rejected.
+       */
+      /** Put `frame_count` back on "auto" - the one state its own arrows cannot reach. */
+      const setAutoFrameCount = () => {
+        const w = findW(node, "frame_count");
+        if (!w) return;
+        w.value = 0;
+        w.callback?.(0);
+        syncQuantumStep();
+        node.setDirtyCanvas(true, true);
+      };
+
       const syncQuantumStep = () => {
         const w = findW(node, "frame_count");
         if (!w?.options) return;
         const grid = quantizeGrid(host.getQuantize(), host.getQuantizeN());
-        const step = grid ? grid[0] : 1;
-        if (w.options.step2 === step) return;
+        const value = Number(w.value) || 0;
+        // Feed the frontend the pair it already knows how to walk. A number widget
+        // rounds to `min + k*step`, which is exactly why the core writes
+        // `min=5, step=17` on MiniMax H3's length and its arrows read 5, 22, 39 and
+        // nothing else. So `min` has to BE the first legal count, not 0.
+        //
+        // While the value is 0 - "auto", up to the end of the last clip - min stays 0
+        // and the step is the distance to the first stop, so one press leaves auto and
+        // lands ON it rather than one step past. Once off 0 the real pair takes over.
+        // Stepping down then floors at the first count, so auto is unreachable by arrow:
+        // that is what the context menu entry is for.
+        const [min, step] = !grid ? [0, 1]
+          : value <= 0 ? [0, firstStop(grid[0], grid[1])]
+            : [firstStop(grid[0], grid[1]), grid[0]];
+        if (w.options.step2 === step && w.options.min === min) return;
+        w.options.min = min;
         w.options.step2 = step;
-        w.options.step = step * 10;
-        // Re-land the current value on the grid so the very next nudge is already legal.
-        const snapped = quantizeCount(Number(w.value) || 0, host.getQuantize(),
-          host.getQuantizeN());
-        if (snapped > 0 && snapped !== w.value) {
+        w.options.step = step * 10;                 // LiteGraph's legacy 10x field
+        // Re-land the current value, for the case the MODEL changed under it.
+        const snapped = quantizeCount(value, host.getQuantize(), host.getQuantizeN());
+        if (snapped > 0 && snapped !== value) {
           w.value = snapped;
           w.callback?.(snapped);
         }
@@ -749,6 +799,20 @@ comfyApp.registerExtension({
         editor.retightenToSources();
         editor.requestRender();
       }, 300);
+
+      // The one state the arrows cannot walk back to, so it needs a door of its own.
+      const origMenu = node.getExtraMenuOptions;
+      node.getExtraMenuOptions = function (this: any, canvas: any, options: any[]) {
+        const r = origMenu?.apply(this, [canvas, options]);
+        const w = findW(node, "frame_count");
+        if (w && Number(w.value) > 0) {
+          options.push({
+            content: "Frame count: auto (to the end of the last clip)",
+            callback: setAutoFrameCount,
+          });
+        }
+        return r;
+      };
 
       const origRemoved = node.onRemoved;
       node.onRemoved = function (this: any, ...args: any[]) {

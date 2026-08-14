@@ -189,6 +189,103 @@ export function nativeFpsFor(mode: QuantizeMode): number | null {
   return QUANTIZE_NATIVE_FPS[mode] ?? null;
 }
 
+/**
+ * WHERE A CUT CAN LAND - a different grid from the frame COUNT above, and the one that
+ * was missing.
+ *
+ * A video VAE groups frames into latents, and a latent can only be denoised whole. So a
+ * hole that starts mid-group swallows the whole group: ask for a gap at frame 7 and the
+ * model regenerates from 5, silently, because `process_denoise_mask` max-pools the mask
+ * onto its own grid. The count grid (17n+5 and friends) says how LONG the render may be;
+ * this one says where inside it you may cut.
+ *
+ * `ratio` is the frames-per-latent the core's own downscale formula implies - it maps
+ * frame `a` to `floor((a + ratio - 1) / ratio)`, so the boundaries are frame 0 alone and
+ * then every `1 + ratio*k` (comfy/sd.py:588 Wan, :618 LTX/Cosmos, :723 Mochi).
+ *
+ * `chunk` is MiniMax H3's exception: its encoder restarts the pattern every 17 frames
+ * (`FRAME_PER_TOKEN = (1, 4, 4, 4, 4)`, comfy/ldm/minimax/model.py:30), so the boundaries
+ * are 0, 1, 5, 9, 13, then 17, 18, 22, 26, 30, then 34... rather than marching on.
+ *
+ * `audioMultiple` is the extra condition when sound is in play. H3 runs audio at 40/s
+ * against 24 fps video, i.e. 5/3 audio frames per picture frame, so only a frame count
+ * divisible by 3 lands on a whole audio frame. Both conditions at once leaves 0, 9, 18,
+ * 30, 39, 51, 60... Confirmed by the author of the masking PR, who put it as "the audio
+ * is a multiple of 3, so 17*3 = 51 is the lowest number that perfectly matches" and
+ * "if you are adding both audio and video, those really have to be on a common divisible
+ * value to be aligned properly".
+ */
+export const TOKEN_GRIDS: Record<string, { ratio: number; chunk: number; audioMultiple?: number }> = {
+  "Wan (4n+1)": { ratio: 4, chunk: 0 },
+  "Hunyuan (4n+1)": { ratio: 4, chunk: 0 },
+  "LTX (8n+1)": { ratio: 8, chunk: 0 },
+  "Cosmos (8n+1)": { ratio: 8, chunk: 0 },
+  "Mochi (6n+1)": { ratio: 6, chunk: 0 },
+  "MiniMax H3 (17n+5)": { ratio: 4, chunk: 17, audioMultiple: 3 },
+};
+
+/**
+ * Every legal cut position in `[0, max]`, measured from the start of the render.
+ *
+ * `withAudio` adds the sound's own condition where the preset states one; it is the
+ * caller's business whether this timeline actually carries audio, because a picture-only
+ * edit should not be held to a grid three times coarser for nothing.
+ */
+export function cutStops(max: number, mode: QuantizeMode, withAudio = false): number[] {
+  const grid = TOKEN_GRIDS[mode];
+  if (!grid || max < 0) return [];
+  const { ratio, chunk, audioMultiple } = grid;
+  if (ratio <= 0) return [];
+  const span = chunk > 0 ? chunk : max + 1;
+  const out: number[] = [];
+  for (let base = 0; base <= max; base += span) {
+    out.push(base);                                     // the lone single-frame latent
+    for (let f = base + 1; f <= max && f < base + span; f += ratio) out.push(f);
+  }
+  const every = withAudio ? (audioMultiple ?? 1) : 1;
+  return every > 1 ? out.filter((f) => f % every === 0) : out;
+}
+
+/**
+ * The canvas a model wants, ONLY where ComfyUI core states it outright.
+ *
+ * MiniMax H3 alone for now: `adapt_canvas` (comfy_extras/nodes_minimax_h3.py:50) builds a
+ * 768-short-edge frame capped at 768*1344 pixels and rounds each axis to 32. Falling off
+ * that grid is not cosmetic - the model re-scales every frame itself through PIL, which
+ * measured 5.35 s per 60 frames of 1080p. Same honesty rule as QUANTIZE_NATIVE_FPS: a
+ * family whose canvas the repo does not document stays out rather than being guessed.
+ */
+export const MODEL_CANVAS: Record<string, { multiple: number; shortEdge: number; maxPixels: number }> = {
+  "MiniMax H3 (17n+5)": { multiple: 32, shortEdge: 768, maxPixels: 768 * 1344 },
+};
+
+export function canvasFor(mode: QuantizeMode) {
+  return MODEL_CANVAS[mode] ?? null;
+}
+
+/**
+ * The canvas the model would have picked for this shape - a port of `adapt_canvas`.
+ *
+ * The pixel cap is applied BEFORE the round to `multiple`, so the answer can land a hair
+ * OVER the cap (2560x1210 -> 1472x704). That is the core's own order of operations, and
+ * matching it is the whole point: tightening it here would recommend a size H3 does not
+ * build, which is worse than the overshoot.
+ */
+export function adaptCanvas(width: number, height: number,
+                            spec: { multiple: number; shortEdge: number; maxPixels: number },
+                           ): [number, number] {
+  const { multiple: m, shortEdge, maxPixels } = spec;
+  const ratio = width / height;
+  let [w, h] = ratio >= 1 ? [shortEdge * ratio, shortEdge] : [shortEdge, shortEdge / ratio];
+  if (w * h > maxPixels) {
+    const s = Math.sqrt(maxPixels / (w * h));
+    w *= s;
+    h *= s;
+  }
+  const snapAxis = (v: number) => Math.max(m, Math.round(v / m) * m);
+  return [snapAxis(w), snapAxis(h)];
+}
+
 export const QUANTIZE_MODES = [
   QUANTIZE_FREE, ...Object.keys(QUANTIZE_PRESETS), QUANTIZE_CUSTOM,
 ];
@@ -283,6 +380,18 @@ export function resolveResolution(
   return [up(Math.sqrt((target * w) / h)), up(Math.sqrt((target * h) / w))];
 }
 
+/**
+ * Which way a family rounds an invalid count, taken from what the core actually
+ * produces rather than from how the formula looks:
+ *   Nn+1 families size the latent as `((length - 1) // step) + 1` (nodes_wan.py:44,
+ *   nodes_lt.py, nodes_mochi.py) - a FLOOR, so asking for 20 decodes back to 17.
+ *   MiniMax H3 is the odd one: `align_frame_count` walks UP until `n % 17 == 5`
+ *   (nodes_minimax_h3.py:34), so asking for 20 gives 22.
+ * Rounding the wrong way is silent: down where the model goes up throws material away,
+ * and a timeline asked for 17 rendered 5 of a 40-frame clip.
+ */
+export const QUANTIZE_ROUND_UP = new Set(["MiniMax H3 (17n+5)"]);
+
 export function quantizeCount(n: number, mode: QuantizeMode, k = 8): number {
   n = Math.max(0, int(n));
   const grid = quantizeGrid(mode, k);
@@ -290,7 +399,8 @@ export function quantizeCount(n: number, mode: QuantizeMode, k = 8): number {
   const [step, offset] = grid;
   const low = firstStop(step, offset);
   if (n <= low) return low;
-  return offset + Math.floor((n - offset) / step) * step;
+  const groups = (n - offset) / step;
+  return offset + (QUANTIZE_ROUND_UP.has(mode) ? Math.ceil(groups) : Math.floor(groups)) * step;
 }
 
 /** Every valid stop within [0, max] - what the editor paints on the ruler. */
@@ -700,12 +810,23 @@ export function snapCandidates(t: Timeline, extra: number[] = []): number[] {
  * block boundary.
  */
 export function snapFrameToGrid(frame: number, startFrame: number,
-                                 mode: QuantizeMode, k = 8): number {
+                                 mode: QuantizeMode, k = 8, withAudio = false): number {
+  // The TOKEN grid, not the count grid: a cut lands where a latent begins. Falling back
+  // to the count grid for `custom (multiple of N)` and anything without a documented
+  // token pattern - there the block size is all we know, and it is better than nothing.
+  const tokens = TOKEN_GRIDS[mode];
+  const rel = frame - startFrame;
+  if (tokens) {
+    if (rel <= 0) return startFrame;
+    const stops = cutStops(rel + Math.max(tokens.chunk, tokens.ratio) * 2, mode, withAudio);
+    let best = stops[0] ?? 0;
+    for (const s of stops) if (Math.abs(s - rel) < Math.abs(best - rel)) best = s;
+    return startFrame + best;
+  }
   const grid = quantizeGrid(mode, k);
   if (!grid) return Math.round(frame);
   const [step, offset] = grid;
   const low = firstStop(step, offset);
-  const rel = frame - startFrame;
   if (rel <= low) return startFrame + low;
   return startFrame + offset + Math.round((rel - offset) / step) * step;
 }
@@ -834,7 +955,7 @@ export function moveClipToLane(t: Timeline, clip: Clip, toMask: boolean): void {
  * Returns true if anything changed.
  */
 export function cropToRange(t: Timeline, start: number, end: number, fps: number,
-                            rateFor: (src: string) => number): boolean {
+                            rateFor: (c: Clip) => number): boolean {
   let changed = false;
   for (const lane of allLanes(t)) {
     const kept: Clip[] = [];
@@ -843,7 +964,7 @@ export function cropToRange(t: Timeline, start: number, end: number, fps: number
         changed = true;                      // entirely outside: gone
         continue;
       }
-      const rate = rateFor(c.src) || fps;
+      const rate = rateFor(c) || fps;
       if (c.start + c.length > end) {
         trimEnd(c, end, 0, rate, fps);       // 0 = no source cap; we only ever shorten
         changed = true;
@@ -875,14 +996,14 @@ export function cropToRange(t: Timeline, start: number, end: number, fps: number
  * Returns true if anything changed.
  */
 export function trimToPlayhead(t: Timeline, frame: number, side: "start" | "end",
-                               fps: number, rateFor: (src: string) => number,
+                               fps: number, rateFor: (c: Clip) => number,
                                only?: Set<string>): boolean {
   let changed = false;
   for (const lane of allLanes(t)) {
     for (const c of lane) {
       if (only && !only.has(c.id)) continue;
       if (frame <= c.start || frame >= c.start + c.length) continue;
-      const rate = rateFor(c.src) || fps;
+      const rate = rateFor(c) || fps;
       if (side === "start") trimStart(c, frame, rate, fps);
       else trimEnd(c, frame, 0, rate, fps);   // 0 = no source cap; only ever shortens
       changed = true;
@@ -906,14 +1027,14 @@ export function trimToPlayhead(t: Timeline, frame: number, side: "start" | "end"
  * Returns true if anything changed.
  */
 export function clampClipsToSources(t: Timeline, fps: number,
-                                    srcFramesFor: (src: string) => number | null,
-                                    rateFor: (src: string) => number): boolean {
+                                    srcFramesFor: (c: Clip) => number | null,
+                                    rateFor: (c: Clip) => number): boolean {
   let changed = false;
   for (const lane of allLanes(t)) {
     for (const c of lane) {
-      const srcFrames = srcFramesFor(c.src);
+      const srcFrames = srcFramesFor(c);
       if (srcFrames === null || srcFrames <= 0) continue;
-      const ratio = (rateFor(c.src) || fps) / (fps || 1);
+      const ratio = (rateFor(c) || fps) / (fps || 1);
       if (c.trimIn >= srcFrames) {        // the trim itself is now past the end
         c.trimIn = 0;
         changed = true;
@@ -947,16 +1068,16 @@ export function clampClipsToSources(t: Timeline, fps: number,
  * ask is to see all of the material, not to re-stack the timeline.
  */
 export function expandClipsToSources(t: Timeline, fps: number,
-                                     srcFramesFor: (src: string) => number | null,
-                                     rateFor: (src: string) => number,
+                                     srcFramesFor: (c: Clip) => number | null,
+                                     rateFor: (c: Clip) => number,
                                      ids?: Set<string>): boolean {
   let changed = false;
   for (const lane of allLanes(t)) {
     for (const c of lane) {
       if (ids && !ids.has(c.id)) continue;
-      const srcFrames = srcFramesFor(c.src);
+      const srcFrames = srcFramesFor(c);
       if (srcFrames === null || srcFrames <= 0) continue;
-      const ratio = (rateFor(c.src) || fps) / (fps || 1);
+      const ratio = (rateFor(c) || fps) / (fps || 1);
       const full = Math.max(1, Math.floor(srcFrames / (ratio || 1)));
       if (c.trimIn === 0 && c.length === full) continue;
       // Markers are offsets from `start` and the clip only grows here, so they stay put -

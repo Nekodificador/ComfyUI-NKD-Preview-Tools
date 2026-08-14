@@ -56,9 +56,11 @@ test("quantizeCount — parity table with Python", () => {
     [16, WAN, 4, 13], [13, WAN, 4, 13],
     [1, LTX, 8, 9], [3, WAN, 4, 5],
     [20, MOCHI, 6, 19], [7, MOCHI, 6, 7],
-    // MiniMax H3 is NOT an Nn+1 family: valid counts are 5, 22, 39, 56...
-    [124, MINIMAX, 17, 124], [130, MINIMAX, 17, 124], [4, MINIMAX, 17, 5],
-    [22, MINIMAX, 17, 22], [21, MINIMAX, 17, 5],
+    // MiniMax H3 is NOT an Nn+1 family: valid counts are 5, 22, 39, 56... and it rounds
+    // UP, because `align_frame_count` walks up while the Nn+1 families floor their
+    // latent count. Rounding it down threw material away: 17 asked for, 5 rendered.
+    [124, MINIMAX, 17, 124], [130, MINIMAX, 17, 141], [4, MINIMAX, 17, 5],
+    [22, MINIMAX, 17, 22], [21, MINIMAX, 17, 22], [17, MINIMAX, 17, 22],
     [0, LTX, 8, 0], [100, "free", 8, 100],
     [100, CUSTOM, 16, 96], [5, CUSTOM, 16, 16],
     // An unknown mode must degrade to no snapping, never to 0.
@@ -69,6 +71,17 @@ test("quantizeCount — parity table with Python", () => {
   }
   for (const mode of [WAN, LTX, MOCHI, MINIMAX]) {
     for (let n = 1; n < 300; n++) assert.ok(M.quantizeCount(n, mode) >= 5, `${mode} ${n}`);
+  }
+  // Checked against what the core actually builds, not against our reading of it.
+  const alignFrameCount = (n) => { while (n % 17 !== 5) n++; return n; };
+  for (let n = 6; n < 200; n++) {
+    assert.equal(M.quantizeCount(n, MINIMAX), alignFrameCount(n), `H3 ${n}`);
+  }
+  for (const [mode, step] of [[LTX, 8], [WAN, 4], [MOCHI, 6]]) {
+    for (let n = step + 2; n < 200; n++) {
+      assert.equal(M.quantizeCount(n, mode), Math.floor((n - 1) / step) * step + 1,
+        `${mode} ${n}`);
+    }
   }
 });
 
@@ -371,23 +384,73 @@ test("materialRange — what 'trim to material' crops to", () => {
   assert.equal(M.materialRange(onlyAudio), null);
 });
 
-test("snapFrameToGrid — Shift lands the playhead on a legal cut", () => {
+test("cutStops — where a latent begins, which is not where a count is valid", () => {
+  const H3 = "MiniMax H3 (17n+5)";
+  // The pattern restarts every 17 frames: 1 + 4 + 4 + 4 + 4. Straight off
+  // FRAME_PER_TOKEN in comfy/ldm/minimax/model.py.
+  assert.deepEqual(M.cutStops(40, H3),
+    [0, 1, 5, 9, 13, 17, 18, 22, 26, 30, 34, 35, 39]);
+  // With sound, only the ones that also land on a whole audio frame survive (40/24 =
+  // 5/3, so multiples of 3). This is the "51" the masking PR's author names.
+  assert.deepEqual(M.cutStops(60, H3, true), [0, 9, 18, 30, 39, 51, 60]);
+  assert.ok(M.cutStops(60, H3, true).every((f) => f % 3 === 0));
+  // The Nn+1 families do not restart: frame 0 alone, then every 1 + N*k.
+  assert.deepEqual(M.cutStops(20, "LTX (8n+1)"), [0, 1, 9, 17]);
+  assert.deepEqual(M.cutStops(14, "Wan (4n+1)"), [0, 1, 5, 9, 13]);
+  assert.deepEqual(M.cutStops(13, "Mochi (6n+1)"), [0, 1, 7, 13]);
+  // Audio is a no-op where the preset states no audio rate, so a picture-only family
+  // is never held to a grid it does not have.
+  assert.deepEqual(M.cutStops(20, "LTX (8n+1)", true), M.cutStops(20, "LTX (8n+1)"));
+  // No token pattern documented -> no claim.
+  assert.deepEqual(M.cutStops(50, "custom (multiple of N)"), []);
+  assert.deepEqual(M.cutStops(50, "free"), []);
+});
+
+test("snapFrameToGrid — Shift lands the playhead on a token boundary", () => {
   const LTX8 = "LTX (8n+1)";
-  // Measured FROM start_frame: with start 0 the legal ends are 9, 17, 25...
+  const H3 = "MiniMax H3 (17n+5)";
   assert.equal(M.snapFrameToGrid(20, 0, LTX8), 17);
   assert.equal(M.snapFrameToGrid(22, 0, LTX8), 25);
-  // Below the first stop it clamps up rather than to a count the model rejects.
-  assert.equal(M.snapFrameToGrid(2, 0, LTX8), 9);
+  // CHANGED semantics: this used to clamp up to the first valid COUNT (9). A cut is not
+  // a count - frame 1 really is where the second latent starts - so it snaps there now.
+  assert.equal(M.snapFrameToGrid(2, 0, LTX8), 1);
   // The grid rides start_frame, so trimming the head does not invalidate every cut.
   assert.equal(M.snapFrameToGrid(120, 100, LTX8), 117);
-  // Free mode is a no-op, and every result must be a valid count.
+  // Free mode is a no-op.
   assert.equal(M.snapFrameToGrid(37, 0, "free"), 37);
-  for (const mode of [LTX8, "Wan (4n+1)", "MiniMax H3 (17n+5)"]) {
-    for (let f = 0; f < 200; f++) {
-      const snapped = M.snapFrameToGrid(f, 0, mode);
-      assert.equal(M.quantizeCount(snapped, mode), snapped, `${mode} ${f} -> ${snapped}`);
+  // H3 gets the fine grid it never had: 40 was one frame past a boundary, which is
+  // exactly the off-by-one that puts a cut inside a latent.
+  assert.equal(M.snapFrameToGrid(40, 0, H3), 39);
+  assert.equal(M.snapFrameToGrid(7, 0, H3), 5);
+  assert.equal(M.snapFrameToGrid(20, 0, H3, 8, true), 18);   // audio: multiples of 3 only
+  // Whatever it returns is a legal cut, at any start frame, with or without sound.
+  for (const mode of [LTX8, "Wan (4n+1)", H3]) {
+    for (const withAudio of [false, true]) {
+      for (let f = 0; f < 200; f++) {
+        const got = M.snapFrameToGrid(f, 30, mode, 8, withAudio) - 30;
+        assert.ok(M.cutStops(400, mode, withAudio).includes(got),
+          `${mode} audio=${withAudio} ${f} -> ${got}`);
+      }
     }
   }
+});
+
+test("adaptCanvas — the size the model would have chosen", () => {
+  const H3 = M.canvasFor("MiniMax H3 (17n+5)");
+  // 16:9 lands on H3's own default, which is the check that the port is faithful.
+  assert.deepEqual(M.adaptCanvas(1920, 1080, H3), [1344, 768]);
+  assert.deepEqual(M.adaptCanvas(1080, 1920, H3), [768, 1344]);
+  assert.deepEqual(M.adaptCanvas(1000, 1000, H3), [768, 768]);
+  for (const [w, h] of [[1920, 1080], [1080, 1920], [1000, 1000], [2560, 1210], [640, 480]]) {
+    const [aw, ah] = M.adaptCanvas(w, h, H3);
+    assert.equal(aw % 32, 0);
+    assert.equal(ah % 32, 0);
+    // The cap is applied BEFORE the round to 32, so the final size can sit a hair over
+    // it - 2560x1210 gives 1472x704. That is the core's own behaviour and matching it is
+    // the point; "fixing" it here would put us off the size H3 actually builds.
+    assert.ok(aw * ah <= H3.maxPixels * 1.01, `${w}x${h} -> ${aw}x${ah}`);
+  }
+  assert.equal(M.canvasFor("Wan (4n+1)"), null);   // undocumented stays undocumented
 });
 
 test("track blend — stored per track, degrades on junk", () => {
@@ -645,12 +708,12 @@ test("clampClipsToSources — a swapped source pulls its clips back in", () => {
   // The three-minute track became ten seconds: clips come back inside it.
   const frames = { media_0: 120, media_1: 240 };
   assert.equal(M.clampClipsToSources(t, 24,
-    (s) => frames[s] ?? null, () => 24), true);
+    (c) => frames[c.src] ?? null, () => 24), true);
   assert.equal(t.clips[0].length, 120);
   assert.equal(t.audio[0].length, 240);
 
   // Idempotent: a second pass reports no change, so the button leaves no empty undo.
-  assert.equal(M.clampClipsToSources(t, 24, (s) => frames[s] ?? null, () => 24), false);
+  assert.equal(M.clampClipsToSources(t, 24, (c) => frames[c.src] ?? null, () => 24), false);
 
   // It only ever SHORTENS - a source that got longer must not undo a deliberate trim.
   assert.equal(M.clampClipsToSources(t, 24, () => 9999, () => 24), false);
@@ -783,8 +846,10 @@ test("expandClipsToSources - show all the material, without unrolling the world"
   t.audio = [{ id: "bed", src: "media_2", start: 0, trimIn: 0, length: 200, gain: 1 }];
   const frames = { media_0: 723, media_1: 240, media_2: 4320 };
   const rate = { media_0: 24, media_1: 30, media_2: 24 };
-  const framesFor = (s) => frames[s] ?? null;
-  const rateFor = (s) => rate[s] ?? 24;
+  // The callbacks take the CLIP now, so the editor can answer per LANE: an audio clip
+  // is measured in timeline frames, not in its source's cadence.
+  const framesFor = (c) => frames[c.src] ?? null;
+  const rateFor = (c) => rate[c.src] ?? 24;
 
   // With a selection, ONLY the selection moves - the three-minute bed stays put.
   assert.equal(M.expandClipsToSources(t, 24, framesFor, rateFor, new Set(["guess"])), true);
@@ -977,4 +1042,59 @@ test("snapGainToDb: the detents are 3 dB apart, and they can reach silence", () 
   // Never past the ceiling the model allows, however hard the drag pushes.
   assert.ok(M.snapGainToDb(99) <= 2);
   assert.ok(M.snapGainToDb(2) <= 2);
+});
+
+test("un clip del carril de audio no se mide en frames de la FUENTE", () => {
+  // El bug real (2026-08-14): dejar entrar VÍDEO en el carril de audio hizo que el probe
+  // empezara a devolver un frame rate para esas fuentes, y todas las conversiones
+  // timeline<->fuente se lo creyeron. Un clip de audio recorta en frames de TIMELINE.
+  //
+  // Aquí se reconstruye el comportamiento roto — pasarle la cadencia de la FUENTE — y se
+  // exige que dé mal, para que el test no pueda pasar por casualidad.
+  const audio = () => ({
+    id: "a", src: "media_0", track: 0, start: 0, trimIn: 0, length: 240, gain: 1,
+  });
+  const SRC_FPS = 16;     // un vídeo de IA típico
+  const TL_FPS = 24;
+
+  // ROTO: con la cadencia de la fuente, la mitad derecha apunta al sitio equivocado.
+  const bad = audio();
+  const badRight = M.splitClip(bad, 120, SRC_FPS, TL_FPS);
+  assert.notEqual(badRight.trimIn, 120, "el bug ya no se reproduce; revisa el test");
+  assert.equal(badRight.trimIn, 80);
+
+  // BIEN: en el carril de audio la cadencia ES la de la línea de tiempo, así que el corte
+  // en el frame 120 empieza en el frame 120 del sonido. Ni antes ni después.
+  const good = audio();
+  const right = M.splitClip(good, 120, TL_FPS, TL_FPS);
+  assert.equal(right.trimIn, 120);
+  assert.equal(good.length, 120);
+  assert.equal(right.length, 120);
+  // Y las dos mitades juntas siguen cubriendo exactamente el material original.
+  assert.equal(good.length + right.length, 240);
+});
+
+test("clampClipsToSources mide cada clip contra SU material", () => {
+  // El otro síntoma del mismo fallo. Escenario real: un vídeo de 11 s a 16 fps sobre una
+  // timeline a 24. Su SONIDO dura 264 frames de timeline, pero su IMAGEN son 176 frames.
+  // Cortando por el frame 200, la mitad derecha tiene trimIn 200 - que comparado contra
+  // los 176 del vídeo parece "más allá del final", y el trim se RESETEABA A CERO: el
+  // audio volvía al principio del fichero.
+  const clip = () => JSON.stringify({
+    audio: [{ id: "b", src: "media_0", track: 0, start: 200, trimIn: 200,
+              length: 64, gain: 1 }],
+  });
+
+  // ROTO: medido contra la imagen (176 frames) y en cadencia de la fuente (16 fps).
+  const bad = M.parseTimeline(clip());
+  M.clampClipsToSources(bad, 24, () => 176, () => 16);
+  assert.equal(bad.audio[0].trimIn, 0, "el bug ya no se reproduce; revisa el test");
+
+  // BIEN: medido contra el SONIDO (264 frames de timeline) y en cadencia de timeline, el
+  // clip cabe entero en su material y nadie lo toca.
+  const ok = M.parseTimeline(clip());
+  const changed = M.clampClipsToSources(ok, 24, () => 264, () => 24);
+  assert.equal(changed, false, "tocó un clip que cabía de sobra");
+  assert.equal(ok.audio[0].trimIn, 200);
+  assert.equal(ok.audio[0].length, 64);
 });

@@ -18,7 +18,8 @@ import {
   BLEND_MODES, type BlendMode, type ImportMode,
   clampFades, levelStops, snapGainToDb, clipsAt, cropToRange, effectiveCount, fitRect, materialRange, moveClip,
   moveClipToLane, MAX_GAIN,
-  clampClipsToSources, clipExtent, expandClipsToSources, nativeFpsFor, newId, slotInUse, splitClip,
+  adaptCanvas, canvasFor, clampClipsToSources, clipExtent, cutStops, expandClipsToSources,
+  nativeFpsFor, newId, slotInUse, splitClip,
   trimToPlayhead,
   placementFor, quantizeStops, setTrackBlend, slipClip, snap, snapCandidates,
   GAIN_DB_STEP, MAX_ZOOM, snapFrameToGrid, sortClips, sourceFrame, timelineSpan, trackBlend, trimEnd,
@@ -71,6 +72,9 @@ export interface TimelineHost {
   reloadSources(): void;
   /** Source length in SOURCE frames, or null while unknown. */
   srcFramesFor(src: string): number | null;
+  /** Length of a source's DECODED SOUND in timeline frames, or null until it lands. What
+   *  bounds a clip on the audio lane - a video's frame count does not. */
+  audioFramesFor(src: string): number | null;
 }
 
 // NKD palette for the chrome (see the nkd-node skill); the clips themselves follow the
@@ -232,6 +236,8 @@ export class TimelineEditor {
   private readonly tintCanvas = document.createElement("canvas");
   /** Last quantise/fps pair we warned about, so the toast fires on CHANGE only. */
   private lastFpsWarning = "";
+  /** Same, for the canvas warning. */
+  private lastCanvasWarning = "";
   /** Last (sources, output size) pair warned about. See `checkSourceScale`. */
   private lastScaleWarning = ""; 
   readonly transport: Transport;
@@ -375,20 +381,42 @@ export class TimelineEditor {
         this.dbBtn.classList.toggle("on", this.waveDb);
       });
 
+    /**
+     * One flex box per family of buttons, with a rule drawn between them by CSS.
+     *
+     * Sixteen identical squares in a row is a wall: every icon is found by reading its
+     * tooltip, which means finding it by elimination. Grouping is also what makes the bar
+     * wrap sensibly on a narrow node - a group breaks as a unit instead of leaving the
+     * zoom-out button stranded on the line above its own zoom-in.
+     */
+    const group = (...els: (HTMLElement | null)[]) => {
+      const g = document.createElement("div");
+      g.className = "nkd-tl-grp";
+      g.append(...els.filter((e): e is HTMLElement => e !== null));
+      return g;
+    };
+
     this.bar.append(
-      icon("pi-step-backward", "Reverse (J)", () => this.transport.shuttle(-1)),
-      this.playBtn,
-      icon("pi-step-forward", "Forward (L)", () => this.transport.shuttle(1)),
-      bracket("[", "Mark in point at the playhead (I)", () => this.setIn(this.playhead)),
-      bracket("]", "Mark out point at the playhead (O)", () => this.setOut(this.playhead)),
-      mdi("mdi-select-all", "pi-clone",
-        "Mark clip: fit in/out to the selected clip (X)", () => this.markClip()),
-      icon("pi-search-minus", "Zoom out (Ctrl + wheel)",
-        () => this.zoomBy(1 / 1.6, this.playhead)),
-      icon("pi-search-plus", "Zoom in (Ctrl + wheel)",
-        () => this.zoomBy(1.6, this.playhead)),
-      mdi("mdi-fit-to-screen", "pi-window-maximize", "Fit the whole timeline (F)",
-        () => this.zoomFit()),
+      group(                                                        // transport
+        icon("pi-step-backward", "Reverse (J)", () => this.transport.shuttle(-1)),
+        this.playBtn,
+        icon("pi-step-forward", "Forward (L)", () => this.transport.shuttle(1)),
+      ),
+      group(                                                        // in / out range
+        bracket("[", "Mark in point at the playhead (I)", () => this.setIn(this.playhead)),
+        bracket("]", "Mark out point at the playhead (O)", () => this.setOut(this.playhead)),
+        mdi("mdi-select-all", "pi-clone",
+          "Mark clip: fit in/out to the selected clip (X)", () => this.markClip()),
+      ),
+      group(                                                        // view
+        icon("pi-search-minus", "Zoom out (Ctrl + wheel)",
+          () => this.zoomBy(1 / 1.6, this.playhead)),
+        icon("pi-search-plus", "Zoom in (Ctrl + wheel)",
+          () => this.zoomBy(1.6, this.playhead)),
+        mdi("mdi-fit-to-screen", "pi-window-maximize", "Fit the whole timeline (F)",
+          () => this.zoomFit()),
+      ),
+      group(                                                        // material vs range
       mdi("mdi-arrow-collapse-horizontal", "pi-arrows-h",
         "Fit the range to the material (no gaps, no mask)",
         () => this.trimToMaterial()),
@@ -401,19 +429,24 @@ export class TimelineEditor {
         "Show all the material: open the SELECTED clips to their full length "
         + "(all of them if nothing is selected)",
         () => this.expandToSources()),
-      mdi("mdi-content-cut", "pi-filter",
-        "Crop the material to the in/out range (discards the rest)",
-        () => this.cropToInOut()),
-      icon("pi-sync", "Conform: take fps and resolution from the first clip",
-        () => this.host.conformToFirstClip()),
-      magnet,
-      // The mask overlay is a picture control: with no monitor there is nothing to lay it
-      // over, so it would be a button that does nothing.
-      ...(this.audioOnly ? [] : [this.maskBtn]),
-      this.dbBtn,
-      icon("pi-refresh", "Reload the connected media (after changing a file)",
-        () => this.reloadSources()),
-      icon("pi-undo", "Undo (Ctrl+Z)", () => this.undo()),
+        mdi("mdi-content-cut", "pi-filter",
+          "Crop the material to the in/out range (discards the rest)",
+          () => this.cropToInOut()),
+      ),
+      group(                                                        // toggles
+        magnet,
+        // The mask overlay is a picture control: with no monitor there is nothing to lay
+        // it over, so it would be a button that does nothing.
+        this.audioOnly ? null : this.maskBtn,
+        this.dbBtn,
+      ),
+      group(                                                        // sources
+        icon("pi-sync", "Conform: take fps and resolution from the first clip",
+          () => this.host.conformToFirstClip()),
+        icon("pi-refresh", "Reload the connected media (after changing a file)",
+          () => this.reloadSources()),
+      ),
+      group(icon("pi-undo", "Undo (Ctrl+Z)", () => this.undo())),
       this.status,
     );
   }
@@ -763,7 +796,7 @@ export class TimelineEditor {
     const gain = e.ctrlKey || e.metaKey ? 0.1 : 1;
     const toGrid = (f: number) => (e.shiftKey
       ? snapFrameToGrid(f, this.host.getStartFrame(), this.host.getQuantize(),
-        this.host.getQuantizeN())
+        this.host.getQuantizeN(), this.hasAudio())
       : f);
     const dFrames = Math.round((x - d.startX) * gain / this.logicalWidth * this.viewFrames);
 
@@ -819,10 +852,9 @@ export class TimelineEditor {
       }
       case "clip": {
         const c = d.hit.clip;
-        const info = this.infoFor(c);
         if (d.slip) {
           c.trimIn = d.origin.trimIn;
-          slipClip(c, -dFrames, info?.frame_count ?? 0, info?.fps ?? this.host.getFps(),
+          slipClip(c, -dFrames, this.framesOf(c) ?? 0, this.rateOf(c),
             this.host.getFps());
         } else {
           let start = toGrid(d.origin.start + dFrames);
@@ -861,7 +893,7 @@ export class TimelineEditor {
         const c = d.hit.clip;
         const info = this.infoFor(c);
         const fps = this.host.getFps();
-        const srcFps = info?.fps ?? fps;
+        const srcFps = this.rateOf(c);
         let frame = toGrid(d.hit.side === "start"
           ? d.origin.start + dFrames
           : d.origin.start + d.origin.length + dFrames);
@@ -935,21 +967,11 @@ export class TimelineEditor {
         || hit.kind === "level") {
       const c = hit.clip;
       if (hit.lane !== "mask") {
-        // Fixed stops rather than a slider: a canvas menu has no room for one, and these
-        // are the levels anyone actually reaches for. dB because that is what a mixer
-        // reads; the model stores the linear factor.
-        const setGain = (g: number) => () => {
-          this.pushUndo();
-          if (g === 1) delete c.gain; else c.gain = Math.min(MAX_GAIN, g);
-          this.host.commit();
-          if (this.transport.rate === 1) this.transport.refreshAudio();
-          this.requestRender();
-        };
-        for (const [label, g] of [["+6 dB", 2], ["0 dB", 1], ["-6 dB", 0.5],
-                                  ["-12 dB", 0.25]] as [string, number][]) {
-          items.push({ label: `Level: ${label}`, active: (c.gain ?? 1) === g,
-                       on: setGain(g) });
-        }
+        // No "Level: -6 dB" stops here any more. They were the ONLY way to set a level
+        // before the volume line existed; now the line is draggable right on the clip,
+        // with Ctrl for fine and Shift for 3 dB detents, and four fixed values in a menu
+        // are strictly worse than that - fewer choices, further away, and they made this
+        // menu long enough to bury the entries that have no other route.
         // The grips on the clip are the fast way, but nobody finds a grip they have not
         // been told about. These say the feature exists, and they are exact where a drag
         // is approximate: "to the playhead" is the same idiom as Trim head/tail.
@@ -1339,8 +1361,7 @@ export class TimelineEditor {
     const end = start + this.effCount();
     const fps = this.host.getFps();
     this.pushUndo();
-    const changed = cropToRange(this.tl, start, end, fps,
-      (src) => this.host.sourceFor(src)?.info?.fps ?? fps);
+    const changed = cropToRange(this.tl, start, end, fps, (c) => this.rateOf(c));
     if (!changed) {
       this.undoStack.pop();          // nothing to do: do not leave a no-op undo behind
       return;
@@ -1362,7 +1383,7 @@ export class TimelineEditor {
     const fps = this.host.getFps();
     this.pushUndo();
     const changed = trimToPlayhead(this.tl, this.playhead, side, fps,
-      (src) => this.host.sourceFor(src)?.info?.fps ?? fps,
+      (c) => this.rateOf(c),
       this.selection.size ? this.selection : undefined);
     if (!changed) {
       this.undoStack.pop();      // playhead outside everything: leave no empty undo
@@ -1412,9 +1433,7 @@ export class TimelineEditor {
     const ids = this.selection.size ? new Set(this.selection) : undefined;
     this.pushUndo();
     const changed = expandClipsToSources(this.tl, fps,
-      (src) => this.host.srcFramesFor(src),
-      (src) => this.host.sourceFor(src)?.info?.fps ?? fps,
-      ids);
+      (c) => this.framesOf(c), (c) => this.rateOf(c), ids);
     if (!changed) {
       this.undoStack.pop();       // nothing to expand: leave no empty undo behind
       return;
@@ -1428,8 +1447,7 @@ export class TimelineEditor {
     const fps = this.host.getFps();
     const before = JSON.stringify(this.tl);
     const changed = clampClipsToSources(this.tl, fps,
-      (src) => this.host.srcFramesFor(src),
-      (src) => this.host.sourceFor(src)?.info?.fps ?? fps);
+      (c) => this.framesOf(c), (c) => this.rateOf(c));
     if (!changed || JSON.stringify(this.tl) === before) return false;
     this.pushUndo();
     this.host.commit();
@@ -1467,9 +1485,37 @@ export class TimelineEditor {
     this.requestRender();
   }
 
-  /** Source frame rate for a clip, or the timeline's when it has none of its own. */
+  /** True when this clip lives on the audio lane. Identity, not `src`: the same file can
+   *  legitimately sit on both lanes at once. */
+  private isAudioClip(c: Clip): boolean {
+    return (this.tl.audio as unknown as Clip[]).includes(c);
+  }
+
+  /**
+   * The cadence a clip's `trimIn` and `length` are counted in.
+   *
+   * For the AUDIO lane that is the timeline's rate, always — sound has no cadence of its
+   * own, which is exactly what `player.ts` encodes as `sourceRate: false` and what
+   * `drawWaveform` takes as `trimRate`.
+   *
+   * This used to read the SOURCE's rate for every lane and got away with it, because the
+   * audio lane only ever held audio FILES and their probe reports no frame rate — so the
+   * `??` quietly handed back the timeline's and every ratio came out 1. The moment a VIDEO
+   * was allowed onto that lane the probe started answering, and every conversion below
+   * began scaling a trim that was never in source frames to begin with. Blading a clip
+   * then moved the second half to the wrong place in the file.
+   */
   private rateOf(c: Clip): number {
+    if (this.isAudioClip(c)) return this.host.getFps();
     return this.host.sourceFor(c.src)?.info?.fps ?? this.host.getFps();
+  }
+
+  /** How much material a clip has behind it, in the cadence `rateOf` reports. An audio
+   *  clip is bounded by the DECODED SOUND, not by the video's frame count. */
+  private framesOf(c: Clip): number | null {
+    return this.isAudioClip(c)
+      ? this.host.audioFramesFor(c.src)
+      : this.host.srcFramesFor(c.src);
   }
 
   private toggleMaskOverlay(): void {
@@ -1488,6 +1534,42 @@ export class TimelineEditor {
    * Only fires for families whose rate ComfyUI core actually documents, and only when the
    * pair CHANGES, so it never nags while you scrub.
    */
+  /** Is there any sound in this edit? Decides whether the cut grid takes the audio's
+   *  extra condition. Muted clips do not count: a muted picture has no join to align. */
+  private hasAudio(): boolean {
+    return this.tl.audio.length > 0 || this.tl.clips.some((c) => !c.muted);
+  }
+
+  /**
+   * Warn when the output size is off the model's own canvas.
+   *
+   * The twin of the fps warning, and the same kind of mistake: it still renders. It just
+   * makes the model re-scale every single frame through PIL on its way in - measured at
+   * 5.35 s per 60 frames of 1080p - for a cost nothing on screen attributes to the size
+   * widgets. Only fires for a family whose canvas core states outright, and only when the
+   * triple CHANGES, so it never nags while you drag.
+   */
+  private checkCanvasAgainstModel(): void {
+    const mode = this.host.getQuantize();
+    const spec = canvasFor(mode);
+    const [w, h] = this.host.getOutSize();
+    const stamp = `${mode}|${w}x${h}`;
+    if (stamp === this.lastCanvasWarning) return;
+    this.lastCanvasWarning = stamp;
+    if (!spec || w <= 0 || h <= 0) return;
+    const offGrid = w % spec.multiple !== 0 || h % spec.multiple !== 0;
+    const tooBig = w * h > spec.maxPixels;
+    if (!offGrid && !tooBig) return;
+    const [aw, ah] = adaptCanvas(w, h, spec);
+    this.host.notify(
+      "Output size is off the model's canvas",
+      `${mode.replace(/\s*\(.*\)$/, "")} works on a ${spec.shortEdge}px short edge in `
+      + `steps of ${spec.multiple}, capped at ${spec.maxPixels.toLocaleString()} pixels. `
+      + `${w}x${h} ${tooBig ? "is over that cap" : "is off the step"}, so the model will `
+      + `re-scale every frame itself. For this shape it wants ${aw}x${ah}.`,
+      "warn");
+  }
+
   private checkFpsAgainstModel(): void {
     const mode = this.host.getQuantize();
     const want = nativeFpsFor(mode);
@@ -1725,6 +1807,7 @@ export class TimelineEditor {
     this.drawPlayhead(ctx, H);
     this.updateStatus(fps, count);
     this.checkFpsAgainstModel();
+    this.checkCanvasAgainstModel();
     this.checkSourceScale();
   }
 
@@ -1758,21 +1841,32 @@ export class TimelineEditor {
       ctx.fillText(label, x + 3, RULER_H / 2 - 1);
     }
 
-    // Valid quantise stops, measured FROM start_frame: these are the only end points the
-    // model will accept. Seeing them beats finding out when the sampler blows up.
+    // Two grids, and they answer different questions. TALL: valid frame counts, i.e. the
+    // only end points the model will accept. SHORT: where a CUT can land - the token
+    // boundaries Shift snaps to. Seeing the short ones is the point: a hole that starts
+    // between them quietly grows to the nearest one when the mask hits the latent grid.
     const mode = this.host.getQuantize();
     if (mode !== QUANTIZE_FREE) {
       const start = this.host.getStartFrame();
-      ctx.strokeStyle = "rgba(74,180,255,0.55)";
-      for (const s of quantizeStops(this.contentFrames - start, mode,
-                                    this.host.getQuantizeN())) {
-        const x = Math.round(this.xOf(start + s)) + 0.5;
-        if (x < 0 || x > W) continue;
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, 5);
-        ctx.stroke();
+      const span = this.contentFrames - start;
+      const tick = (frames: number[], h: number, colour: string) => {
+        ctx.strokeStyle = colour;
+        for (const s of frames) {
+          const x = Math.round(this.xOf(start + s)) + 0.5;
+          if (x < 0 || x > W) continue;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, h);
+          ctx.stroke();
+        }
+      };
+      // Skipped below ~5 px apart: at that spacing it is a solid band, not a grid, and
+      // this runs on every render.
+      const cuts = cutStops(span, mode, this.hasAudio());
+      if (cuts.length > 1 && this.xOf(start + cuts[1]) - this.xOf(start + cuts[0]) >= 5) {
+        tick(cuts, 3, "rgba(74,180,255,0.28)");
       }
+      tick(quantizeStops(span, mode, this.host.getQuantizeN()), 5, "rgba(74,180,255,0.55)");
     }
 
     this.drawInOutBar(ctx, W);

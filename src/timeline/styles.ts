@@ -37,6 +37,13 @@ const CSS = `
   background: #1a1c22; border: 1px solid #3a3d46; border-radius: 6px;
   padding: 4px 6px;
 }
+/* Button families. The rule is drawn by the ADJACENT-sibling selector so it only ever
+   falls BETWEEN two groups: a separator element of its own would survive into a wrapped
+   line and hang there with nothing to its left. */
+.nkd-tl-grp { display: flex; align-items: center; gap: 4px; }
+.nkd-tl-grp + .nkd-tl-grp {
+  border-left: 1px solid #3a3d46; padding-left: 7px; margin-left: 3px;
+}
 .nkd-tl-btn {
   background: #252830; border: 1px solid #3a3d46; border-radius: 4px;
   color: #c8d0e0; cursor: pointer;

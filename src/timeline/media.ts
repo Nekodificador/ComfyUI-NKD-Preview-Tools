@@ -102,6 +102,16 @@ export function resolveSource(node: any, slotName: string, maxDepth = 6,
       };
     }
   }
+  // Un timeline REMEZCLA lo que sale por su salida: corta, deja huecos y mezcla el sonido
+  // propio de los vídeos. El paseo hacia arriba se apoya en que "los bytes siguen saliendo
+  // de ese fichero" (ver `sourceFor` en main.ts) y aquí eso es FALSO, así que seguir subiendo
+  // devuelve el fichero original entero — 36 s de onda para un clip de 8 s, con su longitud.
+  // Un bloque liso es la respuesta honesta, igual que para una ranura de tensor.
+  // ponytail: solo se cortan los nuestros, que son los que sabemos que transforman. Un nodo
+  // de terceros que edite audio sigue mintiendo; el arreglo de fondo sería que un timeline
+  // empuje su audio renderizado como hace con las hojas de contactos de los tensores.
+  if (src.type === "NKDTimeline" || src.type === "NKDAudioTimeline") return null;
+
   // Sin fichero propio: seguir subiendo por su primera entrada conectada.
   for (const inp of src.inputs ?? []) {
     if (inp.link == null) continue;

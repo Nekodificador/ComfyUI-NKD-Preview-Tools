@@ -190,8 +190,19 @@ def resolve_resolution(aspect: str, megapixels: float, width: int, height: int,
             up(math.sqrt(target * h_parts / w_parts)))
 
 
+# Which way a family rounds an invalid count, taken from what the core actually
+# produces rather than from the formula's look:
+#   Nn+1 families size the latent as `((length - 1) // step) + 1` (nodes_wan.py:44,
+#   nodes_lt.py, nodes_mochi.py) -- a FLOOR, so asking for 20 decodes back to 17.
+#   MiniMax H3 is the odd one: `align_frame_count` walks UP until `n % 17 == 5`
+#   (nodes_minimax_h3.py:34), so asking for 20 gives 22.
+# Rounding the wrong way is silent: down where the model goes up throws material
+# away, and a timeline asked for 17 rendered 5.
+QUANTIZE_ROUND_UP = {"MiniMax H3 (17n+5)"}
+
+
 def quantize_count(n: int, mode: str, k: int = 8) -> int:
-    """Round a frame count DOWN to the nearest valid stop, never below the first one."""
+    """Round a frame count to the nearest valid stop, the way THIS model rounds."""
     n = max(0, int(n))
     grid = quantize_grid(mode, k)
     if grid is None or n == 0:
@@ -200,6 +211,8 @@ def quantize_count(n: int, mode: str, k: int = 8) -> int:
     low = first_stop(step, offset)
     if n <= low:
         return low
+    if mode in QUANTIZE_ROUND_UP:
+        return offset + ((n - offset + step - 1) // step) * step
     return offset + ((n - offset) // step) * step
 
 
