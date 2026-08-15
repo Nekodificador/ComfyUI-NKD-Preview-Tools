@@ -20,7 +20,7 @@ import {
   moveClipToLane, MAX_GAIN,
   type CutEdge,
   adaptCanvas, canvasFor, clampClipsToSources, clipExtent, cutStops, expandClipsToSources,
-  nativeFpsFor, newId, slotInUse, splitClip,
+  nativeFpsFor, newId, rollEdit, slotInUse, splitClip,
   trimToPlayhead,
   placementFor, quantizeStops, setTrackBlend, slipClip, snap, snapCandidates,
   GAIN_DB_STEP, MAX_ZOOM, snapFrameToGrid, sortClips, sourceFrame, timelineSpan, trackBlend, trimEnd,
@@ -178,6 +178,7 @@ type Hit =
   | { kind: "mute"; clip: Clip; lane: Lane }
   | { kind: "clip"; clip: Clip; lane: Lane }
   | { kind: "edge"; clip: Clip; side: "start" | "end"; lane: Lane }
+  | { kind: "roll"; left: Clip; right: Clip; lane: Lane }
   | { kind: "fade"; clip: Clip; side: "in" | "out"; lane: Lane }
   | { kind: "level"; clip: Clip; lane: Lane };
 
@@ -658,6 +659,22 @@ export class TimelineEditor {
       : lane === "audio" && this.audioOnly
         ? this.laneOf(lane).filter((c) => (c.track ?? 0) === this.audioTrackOf(y))
         : this.laneOf(lane);
+    // The JUNCTION between two butted clips, tested before the per-clip edges - there both
+    // edges sit on the same pixel and whichever answered first would win by accident.
+    // Kept BELOW the fade band on purpose: the mute box and the fade-out grip live up
+    // there and are smaller targets, so they keep their pixels (same rule as the volume
+    // line). Not on the mask lane, which has neither.
+    if (lane !== "mask") {
+      for (const right of list) {
+        if (Math.abs(x - this.xOf(right.start)) > HANDLE_PX) continue;
+        const left = list.find((c) => c !== right && c.track === right.track
+          && c.start + c.length === right.start);
+        if (!left) continue;
+        const bodyTop = this.laneTop(lane, right.track)
+          + (this.laneHeight(lane) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0) + FADE_BAND_H;
+        if (y >= bodyTop) return { kind: "roll", left, right, lane };
+      }
+    }
     // Back to front: the last one drawn is the visible one, so it answers first.
     for (let i = list.length - 1; i >= 0; i--) {
       const c = list[i];
@@ -833,6 +850,15 @@ export class TimelineEditor {
     const dFrames = Math.round((x - d.startX) * gain / this.logicalWidth * this.viewFrames);
 
     switch (d.hit.kind) {
+      case "roll": {
+        const h = d.hit;
+        if (rollEdit(h.left, h.right, toGrid(this.frameOf(d.startX + (x - d.startX) * gain)), this.host.getFps(),
+                     (c) => this.host.srcFramesFor(c.src),
+                     (c) => this.host.sourceFor(c.src)?.info?.fps || this.host.getFps())) {
+          this.host.commit();
+        }
+        break;
+      }
       case "ruler":
       case "playhead":
         this.seek(toGrid(this.frameOf(d.startX + (x - d.startX) * gain)));
@@ -976,6 +1002,7 @@ export class TimelineEditor {
     }
     this.canvas.style.cursor =
       hit.kind === "mute" ? "pointer"
+      : hit.kind === "roll" ? "col-resize"
       : hit.kind === "fade" ? "col-resize"
       : hit.kind === "level" ? "ns-resize"
       : hit.kind === "edge" || hit.kind === "inPoint" || hit.kind === "outPoint" ? "ew-resize"

@@ -472,6 +472,50 @@ test("adaptCanvas — the size the model would have chosen", () => {
   assert.equal(M.canvasFor("Wan (4n+1)"), null);   // undocumented stays undocumented
 });
 
+test("rollEdit — moves a junction without ever opening a gap", () => {
+  const mk = (start, len, trimIn) => ({ id: "x" + start, src: "media_0", track: 0,
+                                        start, trimIn, length: len });
+  const src = () => 400, rate = () => 24;
+  const butted = (l, r) => assert.equal(l.start + l.length, r.start,
+    `junction split: ${l.start}+${l.length} vs ${r.start}`);
+
+  // Nominal: the cut slides, one shortens and the other grows by the same amount.
+  let a = mk(0, 100, 0), b = mk(100, 100, 100);
+  assert.ok(M.rollEdit(a, b, 120, 24, src, rate));
+  assert.equal(a.length, 120);
+  assert.equal(b.start, 120);
+  assert.equal(b.trimIn, 120);          // the right clip gave up 20 frames of its head
+  butted(a, b);
+
+  // The right clip cannot reach further back than the material its trimIn skipped.
+  a = mk(0, 100, 0); b = mk(100, 100, 10);
+  M.rollEdit(a, b, 50, 24, src, rate);
+  assert.equal(b.start, 90);            // 10 frames of handle, no more
+  assert.equal(b.trimIn, 0);
+  butted(a, b);                         // and the left one followed it exactly
+
+  // The left clip cannot outrun its own source. THIS is the case that would tear:
+  // trimEnd would clamp and trimStart would not, leaving a hole.
+  a = mk(0, 100, 0); b = mk(100, 100, 100);
+  M.rollEdit(a, b, 190, 24, () => 130, rate);
+  assert.equal(a.start + a.length, 130);
+  butted(a, b);
+
+  // Neither clip may vanish, and a no-op reports no change.
+  a = mk(0, 100, 0); b = mk(100, 100, 100);
+  assert.equal(M.rollEdit(a, b, 100, 24, src, rate), false);
+  M.rollEdit(a, b, -50, 24, src, rate);
+  assert.ok(a.length >= 1 && b.length >= 1);
+  butted(a, b);
+
+  // A source at another cadence converts: 30 fps material on a 24 fps timeline.
+  a = mk(0, 100, 0); b = mk(100, 100, 250);
+  M.rollEdit(a, b, 80, 24, src, () => 30);
+  assert.equal(b.start, 80);
+  assert.equal(b.trimIn, 250 - 25);     // 20 timeline frames = 25 source frames
+  butted(a, b);
+});
+
 test("track blend — stored per track, degrades on junk", () => {
   const t = M.emptyTimeline();
   assert.equal(M.trackBlend(t, 0), "normal");

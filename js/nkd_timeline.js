@@ -526,6 +526,21 @@ function trimEnd(clip, newEnd, srcFrames, srcFps, fps) {
   clampFades(clip);
   pruneMarkers(clip);
 }
+function rollEdit(left, right, frame, fps, srcFramesFor, rateFor) {
+  const lRate = rateFor(left) || fps;
+  const rRate = rateFor(right) || fps;
+  const lRatio = fps > 0 ? lRate / fps : 1;
+  const rRatio = fps > 0 ? rRate / fps : 1;
+  const lSrc = srcFramesFor(left);
+  const lMax = lSrc && lSrc > 0 ? left.start + Math.max(1, Math.floor((lSrc - left.trimIn) / (lRatio || 1))) : Number.MAX_SAFE_INTEGER;
+  const hi = Math.min(right.start + right.length - 1, lMax);
+  const lo = Math.max(left.start + 1, right.start - Math.floor(right.trimIn / (rRatio || 1)));
+  const f = Math.max(lo, Math.min(Math.round(frame), hi));
+  if (f === right.start || hi < lo) return false;
+  trimEnd(left, f, 0, lRate, fps);
+  trimStart(right, f, rRate, fps);
+  return true;
+}
 function splitClip(clip, frame, srcFps, fps) {
   const at = Math.round(frame);
   if (!(at > clip.start && at < clip.start + clip.length)) return null;
@@ -1662,6 +1677,23 @@ class TimelineEditor {
       ) : f;
       const dFrames = Math.round((x - d.startX) * gain / this.logicalWidth * this.viewFrames);
       switch (d.hit.kind) {
+        case "roll": {
+          const h = d.hit;
+          if (rollEdit(
+            h.left,
+            h.right,
+            toGrid(this.frameOf(d.startX + (x - d.startX) * gain)),
+            this.host.getFps(),
+            (c) => this.host.srcFramesFor(c.src),
+            (c) => {
+              var _a, _b;
+              return ((_b = (_a = this.host.sourceFor(c.src)) == null ? void 0 : _a.info) == null ? void 0 : _b.fps) || this.host.getFps();
+            }
+          )) {
+            this.host.commit();
+          }
+          break;
+        }
         case "ruler":
         case "playhead":
           this.seek(toGrid(this.frameOf(d.startX + (x - d.startX) * gain)));
@@ -1790,7 +1822,7 @@ class TimelineEditor {
         this.hover = hit;
         this.requestRender();
       }
-      this.canvas.style.cursor = hit.kind === "mute" ? "pointer" : hit.kind === "fade" ? "col-resize" : hit.kind === "level" ? "ns-resize" : hit.kind === "edge" || hit.kind === "inPoint" || hit.kind === "outPoint" ? "ew-resize" : hit.kind === "clip" ? e.altKey ? "col-resize" : "grab" : hit.kind === "playhead" ? "grab" : hit.kind === "ruler" ? "pointer" : "default";
+      this.canvas.style.cursor = hit.kind === "mute" ? "pointer" : hit.kind === "roll" ? "col-resize" : hit.kind === "fade" ? "col-resize" : hit.kind === "level" ? "ns-resize" : hit.kind === "edge" || hit.kind === "inPoint" || hit.kind === "outPoint" ? "ew-resize" : hit.kind === "clip" ? e.altKey ? "col-resize" : "grab" : hit.kind === "playhead" ? "grab" : hit.kind === "ruler" ? "pointer" : "default";
     });
     /**
      * Right-click menu. Two jobs that both belong to "this clip is not what you assumed":
@@ -2356,6 +2388,15 @@ class TimelineEditor {
     }
     const lane2 = y >= this.audioTop ? "audio" : y >= this.maskTop ? "mask" : "video";
     const list = lane2 === "video" ? this.tl.clips.filter((c) => c.track === this.trackOf(y)) : lane2 === "audio" && this.audioOnly ? this.laneOf(lane2).filter((c) => (c.track ?? 0) === this.audioTrackOf(y)) : this.laneOf(lane2);
+    if (lane2 !== "mask") {
+      for (const right of list) {
+        if (Math.abs(x - this.xOf(right.start)) > HANDLE_PX) continue;
+        const left = list.find((c) => c !== right && c.track === right.track && c.start + c.length === right.start);
+        if (!left) continue;
+        const bodyTop = this.laneTop(lane2, right.track) + (this.laneHeight(lane2) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0) + FADE_BAND_H;
+        if (y >= bodyTop) return { kind: "roll", left, right, lane: lane2 };
+      }
+    }
     for (let i = list.length - 1; i >= 0; i--) {
       const c = list[i];
       const a = this.xOf(c.start);

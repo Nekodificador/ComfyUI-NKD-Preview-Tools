@@ -902,6 +902,43 @@ export function trimEnd(clip: Clip, newEnd: number, srcFrames: number,
 }
 
 /**
+ * Roll edit: move the junction between two butted clips, trimming one and extending the
+ * other in the same gesture.
+ *
+ * The standard NLE gesture, and without it moving a cut is three operations - shove one
+ * clip aside to expose the other's handle, trim it, then butt them back together - each of
+ * which can leave a one-frame gap that renders as a whole regenerated token.
+ *
+ * The clamping is the whole job, and it is NOT the two trims' own clamps: applying them
+ * independently lets one give way while the other does not, which opens exactly the gap
+ * this exists to avoid. So the reachable frame is resolved FIRST, against both limits, and
+ * both edges are then moved to it.
+ */
+export function rollEdit(left: Clip, right: Clip, frame: number, fps: number,
+                         srcFramesFor: (c: Clip) => number | null,
+                         rateFor: (c: Clip) => number): boolean {
+  const lRate = rateFor(left) || fps;
+  const rRate = rateFor(right) || fps;
+  const lRatio = fps > 0 ? lRate / fps : 1;
+  const rRatio = fps > 0 ? rRate / fps : 1;
+  const lSrc = srcFramesFor(left);
+  // How far right the junction may go: the left clip must not outrun its own material,
+  // and the right one must keep at least a frame.
+  const lMax = lSrc && lSrc > 0
+    ? left.start + Math.max(1, Math.floor((lSrc - left.trimIn) / (lRatio || 1)))
+    : Number.MAX_SAFE_INTEGER;
+  const hi = Math.min(right.start + right.length - 1, lMax);
+  // ...and how far left: the right clip can only reach back through the material its
+  // trimIn already skipped.
+  const lo = Math.max(left.start + 1, right.start - Math.floor(right.trimIn / (rRatio || 1)));
+  const f = Math.max(lo, Math.min(Math.round(frame), hi));
+  if (f === right.start || hi < lo) return false;
+  trimEnd(left, f, 0, lRate, fps);     // 0: the cap was already applied above
+  trimStart(right, f, rRate, fps);
+  return true;
+}
+
+/**
  * Blade: cut a clip in two at a timeline frame. Returns the new right-hand clip, or null
  * when the frame is not strictly inside it (cutting at an edge is a no-op, not an error).
  *
