@@ -137,14 +137,15 @@ const HANDLE_PX = 16;
  * 10 clear pixels of single-edge trim on each side of it.
  */
 const ROLL_PX = 6;
-const MUTE_BOX = 16;                      // hit box of the per-clip mute toggle
+const MUTE_BOX = 16;                      // the speaker glyph itself
+const MUTE_PAD = 5;                       // breathing room in its plate
 /**
- * How far the speaker sits IN from the clip's right edge.
+ * Keep-out margin between the speaker and either clip edge.
  *
- * It used to be flush against it - the exact strip the end handle and the junction need,
- * and it is tested before both, so it swallowed them. Comfortably clear of HANDLE_PX
- * rather than merely equal to it: a control that only just misses the grab zone still
- * feels like fighting for the pixel.
+ * The speaker rides the middle of the clip now, so this only bites on a narrow one - where
+ * it decides whether the icon appears at all rather than crowd the handles. Comfortably
+ * clear of HANDLE_PX rather than merely equal to it: a control that only just misses the
+ * grab zone still feels like fighting for the pixel.
  */
 const MUTE_INSET = HANDLE_PX + 10;
 /**
@@ -724,10 +725,10 @@ export class TimelineEditor {
       if (x < a - HANDLE_PX || x > b + HANDLE_PX) continue;
       // The mute toggle sits inside the header, so it must be tested BEFORE the edges
       // and the body or it would never be reachable.
-      const muteY = this.muteCentreY(lane, c.track);
-      if (lane !== "mask" && b - a > 44 + MUTE_INSET
-          && x >= b - MUTE_INSET - MUTE_BOX && x <= b - MUTE_INSET
-          && Math.abs(y - muteY) <= (MUTE_BOX + 5) / 2) {
+      const muteX = lane === "mask" ? null : this.muteCentreX(a, b);
+      if (muteX !== null
+          && Math.abs(x - muteX) <= (MUTE_BOX + MUTE_PAD) / 2
+          && Math.abs(y - this.muteCentreY(lane, c.track)) <= (MUTE_BOX + MUTE_PAD) / 2) {
         return { kind: "mute", clip: c, lane };
       }
       // Fade grips, before the edges but only inside the shallow top band.
@@ -2197,9 +2198,11 @@ export class TimelineEditor {
       ctx.font = "9px system-ui, sans-serif";
       ctx.fillText("probing…", x + 5, y + h - 5);
     }
-    if (lane !== "mask" && w > 44 && h > CLIP_HEAD_H) {
-      this.drawSpeaker(ctx, x + w - MUTE_INSET - MUTE_BOX,
-                       this.muteCentreY(lane, c.track), !!c.muted, isHover);
+    if (lane !== "mask" && h > CLIP_HEAD_H) {
+      const mx = this.muteCentreX(x, x + w);
+      if (mx !== null) {
+        this.drawSpeaker(ctx, mx, this.muteCentreY(lane, c.track), !!c.muted, isHover);
+      }
     }
     this.drawMarkers(ctx, c, y, h);
     // Plus a wash over the body, the way an NLE marks a selection.
@@ -2417,6 +2420,26 @@ export class TimelineEditor {
     ctx.restore();
   }
 
+  /**
+   * Where the speaker sits horizontally, or null when the clip is too narrow for it.
+   *
+   * The CENTRE of the clip rather than a corner, because a corner is the contested pixel:
+   * every edge, junction and fade grip lives there, and an icon parked on top of them was
+   * the whole reason they could not be grabbed. In the middle it fights nothing.
+   *
+   * Centred on the VISIBLE slice, not on the whole clip: zoomed in, a long clip's true
+   * centre is off screen and the button would simply not exist. Clamped so it never drifts
+   * back into either edge's grab zone, which is the thing this is escaping.
+   */
+  private muteCentreX(a: number, b: number): number | null {
+    const half = (MUTE_BOX + MUTE_PAD) / 2;
+    const lo = a + MUTE_INSET + half;
+    const hi = b - MUTE_INSET - half;
+    if (hi < lo) return null;
+    const seen = (Math.max(a, 0) + Math.min(b, this.logicalWidth)) / 2;
+    return Math.round(Math.max(lo, Math.min(hi, seen)));
+  }
+
   /** Where the speaker sits vertically: in the clip BODY, out of the title band. One
    *  definition, so the drawing and the hit box can never drift apart. */
   private muteCentreY(lane: Lane, track: number): number {
@@ -2426,10 +2449,9 @@ export class TimelineEditor {
     return Math.round((bodyTop + top + h) / 2);
   }
 
-  private drawSpeaker(ctx: CanvasRenderingContext2D, x: number, cy: number,
+  private drawSpeaker(ctx: CanvasRenderingContext2D, cx: number, cy: number,
                       muted: boolean, hot: boolean): void {
     const s = MUTE_BOX;
-    const cx = x + s / 2;
     ctx.save();
     // A dark plate under the glyph. Without it the speaker is white-on-whatever: over a
     // pale filmstrip frame or a bright waveform it simply disappears, and a control you
@@ -2438,7 +2460,7 @@ export class TimelineEditor {
     // reads as a button, and it matches the chrome of the toolbar above.
     // Room around the glyph rather than a plate that hugs it, and the same 2px corner the
     // clips use - it reads as part of the same furniture instead of a sticker on top.
-    const bs = s + 5;
+    const bs = s + MUTE_PAD;
     const bx = Math.round(cx - bs / 2);
     const by = Math.round(cy - bs / 2);
     ctx.beginPath();

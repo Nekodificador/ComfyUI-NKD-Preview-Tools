@@ -1486,6 +1486,7 @@ const CLIP_HEAD_H = 15;
 const HANDLE_PX = 16;
 const ROLL_PX = 6;
 const MUTE_BOX = 16;
+const MUTE_PAD = 5;
 const MUTE_INSET = HANDLE_PX + 10;
 const PREVIEW_MAX_H$1 = 260;
 const TRACK_H = 46;
@@ -2408,8 +2409,8 @@ class TimelineEditor {
       const a = this.xOf(c.start);
       const b = this.xOf(c.start + c.length);
       if (x < a - HANDLE_PX || x > b + HANDLE_PX) continue;
-      const muteY = this.muteCentreY(lane2, c.track);
-      if (lane2 !== "mask" && b - a > 44 + MUTE_INSET && x >= b - MUTE_INSET - MUTE_BOX && x <= b - MUTE_INSET && Math.abs(y - muteY) <= (MUTE_BOX + 5) / 2) {
+      const muteX = lane2 === "mask" ? null : this.muteCentreX(a, b);
+      if (muteX !== null && Math.abs(x - muteX) <= (MUTE_BOX + MUTE_PAD) / 2 && Math.abs(y - this.muteCentreY(lane2, c.track)) <= (MUTE_BOX + MUTE_PAD) / 2) {
         return { kind: "mute", clip: c, lane: lane2 };
       }
       if (lane2 !== "mask" && b - a > 24) {
@@ -3274,14 +3275,11 @@ class TimelineEditor {
       ctx.font = "9px system-ui, sans-serif";
       ctx.fillText("probing…", x + 5, y + h - 5);
     }
-    if (lane2 !== "mask" && w > 44 && h > CLIP_HEAD_H) {
-      this.drawSpeaker(
-        ctx,
-        x + w - MUTE_INSET - MUTE_BOX,
-        this.muteCentreY(lane2, c.track),
-        !!c.muted,
-        isHover
-      );
+    if (lane2 !== "mask" && h > CLIP_HEAD_H) {
+      const mx = this.muteCentreX(x, x + w);
+      if (mx !== null) {
+        this.drawSpeaker(ctx, mx, this.muteCentreY(lane2, c.track), !!c.muted, isHover);
+      }
     }
     this.drawMarkers(ctx, c, y, h);
     if (selected) {
@@ -3466,6 +3464,25 @@ class TimelineEditor {
     ctx.stroke();
     ctx.restore();
   }
+  /**
+   * Where the speaker sits horizontally, or null when the clip is too narrow for it.
+   *
+   * The CENTRE of the clip rather than a corner, because a corner is the contested pixel:
+   * every edge, junction and fade grip lives there, and an icon parked on top of them was
+   * the whole reason they could not be grabbed. In the middle it fights nothing.
+   *
+   * Centred on the VISIBLE slice, not on the whole clip: zoomed in, a long clip's true
+   * centre is off screen and the button would simply not exist. Clamped so it never drifts
+   * back into either edge's grab zone, which is the thing this is escaping.
+   */
+  muteCentreX(a, b) {
+    const half = (MUTE_BOX + MUTE_PAD) / 2;
+    const lo = a + MUTE_INSET + half;
+    const hi = b - MUTE_INSET - half;
+    if (hi < lo) return null;
+    const seen = (Math.max(a, 0) + Math.min(b, this.logicalWidth)) / 2;
+    return Math.round(Math.max(lo, Math.min(hi, seen)));
+  }
   /** Where the speaker sits vertically: in the clip BODY, out of the title band. One
    *  definition, so the drawing and the hit box can never drift apart. */
   muteCentreY(lane2, track) {
@@ -3474,11 +3491,10 @@ class TimelineEditor {
     const bodyTop = top + (h > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
     return Math.round((bodyTop + top + h) / 2);
   }
-  drawSpeaker(ctx, x, cy, muted, hot) {
+  drawSpeaker(ctx, cx, cy, muted, hot) {
     const s = MUTE_BOX;
-    const cx = x + s / 2;
     ctx.save();
-    const bs = s + 5;
+    const bs = s + MUTE_PAD;
     const bx = Math.round(cx - bs / 2);
     const by = Math.round(cy - bs / 2);
     ctx.beginPath();
