@@ -118,16 +118,23 @@ const IO_BAR_H = 7;                       // in/out bar at the bottom of the rul
 const IO_BAR_TOP = RULER_H - IO_BAR_H;
 const IO_GRAB_PX = 7;
 const CLIP_HEAD_H = 15;                   // name band inside a clip
+/**
+ * Grab radius of an edge. Raised from 10 once the hit-test started giving the pixel to
+ * the NEAREST edge rather than to whichever clip the draw order reached first: while the
+ * winner was decided by order, a wider radius only widened the strip the right-hand clip
+ * stole. Now the two neighbours split it at the midpoint, so wider is simply easier.
+ */
+const HANDLE_PX = 16;
 const MUTE_BOX = 16;                      // hit box of the per-clip mute toggle
 /**
- * Gap between the speaker and the clip's right edge.
+ * How far the speaker sits IN from the clip's right edge.
  *
- * It used to sit flush against it, which is exactly the strip the end handle and the
- * junction between two clips need - and the speaker is tested first, so in the header band
- * it swallowed both. The tail of a clip with a neighbour behind it could not be grabbed at
- * all up there. HANDLE_PX wide, so what it clears is precisely the grab radius.
+ * It used to be flush against it - the exact strip the end handle and the junction need,
+ * and it is tested before both, so it swallowed them. Comfortably clear of HANDLE_PX
+ * rather than merely equal to it: a control that only just misses the grab zone still
+ * feels like fighting for the pixel.
  */
-const MUTE_INSET = 10;    // == HANDLE_PX, declared below
+const MUTE_INSET = HANDLE_PX + 10;
 /**
  * Tallest the preview is allowed to get, in logical px.
  *
@@ -149,7 +156,6 @@ const MAX_VIDEO_TRACKS = 8;
 // `audioTrackCount`.
 const MIN_AUDIO_TRACKS = 1;
 const MAX_AUDIO_TRACKS = 6;
-const HANDLE_PX = 10;      // grab radius of an edge
 // Area ratio above which a source is worth warning about. 6x is a bit over 2.4x per
 // axis - the point where the decoding a scrub throws away stops being noise. 4K into
 // 832x480 is 21x.
@@ -699,10 +705,10 @@ export class TimelineEditor {
       if (x < a - HANDLE_PX || x > b + HANDLE_PX) continue;
       // The mute toggle sits inside the header, so it must be tested BEFORE the edges
       // and the body or it would never be reachable.
-      const top = this.laneTop(lane, c.track) + 3;
+      const muteY = this.muteCentreY(lane, c.track);
       if (lane !== "mask" && b - a > 44 + MUTE_INSET
           && x >= b - MUTE_INSET - MUTE_BOX && x <= b - MUTE_INSET
-          && y >= top && y <= top + CLIP_HEAD_H) {
+          && Math.abs(y - muteY) <= MUTE_BOX / 2) {
         return { kind: "mute", clip: c, lane };
       }
       // Fade grips, before the edges but only inside the shallow top band.
@@ -2165,7 +2171,8 @@ export class TimelineEditor {
       ctx.fillText("probing…", x + 5, y + h - 5);
     }
     if (lane !== "mask" && w > 44 && h > CLIP_HEAD_H) {
-      this.drawSpeaker(ctx, x + w - MUTE_INSET - MUTE_BOX, y, !!c.muted, isHover);
+      this.drawSpeaker(ctx, x + w - MUTE_INSET - MUTE_BOX,
+                       this.muteCentreY(lane, c.track), !!c.muted, isHover);
     }
     this.drawMarkers(ctx, c, y, h);
     // Plus a wash over the body, the way an NLE marks a selection.
@@ -2383,11 +2390,19 @@ export class TimelineEditor {
     ctx.restore();
   }
 
-  private drawSpeaker(ctx: CanvasRenderingContext2D, x: number, y: number,
+  /** Where the speaker sits vertically: in the clip BODY, out of the title band. One
+   *  definition, so the drawing and the hit box can never drift apart. */
+  private muteCentreY(lane: Lane, track: number): number {
+    const top = this.laneTop(lane, track);
+    const h = this.laneHeight(lane);
+    const bodyTop = top + (h > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
+    return Math.round((bodyTop + top + h) / 2);
+  }
+
+  private drawSpeaker(ctx: CanvasRenderingContext2D, x: number, cy: number,
                       muted: boolean, hot: boolean): void {
     const s = MUTE_BOX;
     const cx = x + s / 2;
-    const cy = y + CLIP_HEAD_H / 2;
     ctx.save();
     // A dark disc under the glyph. Without it the speaker is white-on-whatever: over a
     // pale filmstrip frame or a bright waveform it simply disappears, and a control you

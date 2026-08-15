@@ -1487,8 +1487,9 @@ const IO_BAR_H = 7;
 const IO_BAR_TOP = RULER_H - IO_BAR_H;
 const IO_GRAB_PX = 7;
 const CLIP_HEAD_H = 15;
+const HANDLE_PX = 16;
 const MUTE_BOX = 16;
-const MUTE_INSET = 10;
+const MUTE_INSET = HANDLE_PX + 10;
 const PREVIEW_MAX_H$1 = 260;
 const TRACK_H = 46;
 const MASK_H = 30;
@@ -1498,7 +1499,6 @@ const MIN_VIDEO_TRACKS = 2;
 const MAX_VIDEO_TRACKS = 8;
 const MIN_AUDIO_TRACKS = 1;
 const MAX_AUDIO_TRACKS = 6;
-const HANDLE_PX = 10;
 const SCALE_WARN_RATIO = 6;
 const HANDLE_CORE = 4;
 const FADE_BAND_H = 12;
@@ -2407,8 +2407,8 @@ class TimelineEditor {
       const a = this.xOf(c.start);
       const b = this.xOf(c.start + c.length);
       if (x < a - HANDLE_PX || x > b + HANDLE_PX) continue;
-      const top = this.laneTop(lane2, c.track) + 3;
-      if (lane2 !== "mask" && b - a > 44 + MUTE_INSET && x >= b - MUTE_INSET - MUTE_BOX && x <= b - MUTE_INSET && y >= top && y <= top + CLIP_HEAD_H) {
+      const muteY = this.muteCentreY(lane2, c.track);
+      if (lane2 !== "mask" && b - a > 44 + MUTE_INSET && x >= b - MUTE_INSET - MUTE_BOX && x <= b - MUTE_INSET && Math.abs(y - muteY) <= MUTE_BOX / 2) {
         return { kind: "mute", clip: c, lane: lane2 };
       }
       if (lane2 !== "mask" && b - a > 24) {
@@ -3264,7 +3264,13 @@ class TimelineEditor {
       ctx.fillText("probing…", x + 5, y + h - 5);
     }
     if (lane2 !== "mask" && w > 44 && h > CLIP_HEAD_H) {
-      this.drawSpeaker(ctx, x + w - MUTE_INSET - MUTE_BOX, y, !!c.muted, isHover);
+      this.drawSpeaker(
+        ctx,
+        x + w - MUTE_INSET - MUTE_BOX,
+        this.muteCentreY(lane2, c.track),
+        !!c.muted,
+        isHover
+      );
     }
     this.drawMarkers(ctx, c, y, h);
     if (selected) {
@@ -3449,10 +3455,17 @@ class TimelineEditor {
     ctx.stroke();
     ctx.restore();
   }
-  drawSpeaker(ctx, x, y, muted, hot) {
+  /** Where the speaker sits vertically: in the clip BODY, out of the title band. One
+   *  definition, so the drawing and the hit box can never drift apart. */
+  muteCentreY(lane2, track) {
+    const top = this.laneTop(lane2, track);
+    const h = this.laneHeight(lane2);
+    const bodyTop = top + (h > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
+    return Math.round((bodyTop + top + h) / 2);
+  }
+  drawSpeaker(ctx, x, cy, muted, hot) {
     const s = MUTE_BOX;
     const cx = x + s / 2;
-    const cy = y + CLIP_HEAD_H / 2;
     ctx.save();
     ctx.beginPath();
     ctx.arc(cx, cy, s / 2 - 1, 0, Math.PI * 2);
