@@ -1488,6 +1488,7 @@ const IO_BAR_TOP = RULER_H - IO_BAR_H;
 const IO_GRAB_PX = 7;
 const CLIP_HEAD_H = 15;
 const HANDLE_PX = 16;
+const ROLL_PX = 6;
 const MUTE_BOX = 16;
 const MUTE_INSET = HANDLE_PX + 10;
 const PREVIEW_MAX_H$1 = 260;
@@ -2391,7 +2392,7 @@ class TimelineEditor {
     const list = lane2 === "video" ? this.tl.clips.filter((c) => c.track === this.trackOf(y)) : lane2 === "audio" && this.audioOnly ? this.laneOf(lane2).filter((c) => (c.track ?? 0) === this.audioTrackOf(y)) : this.laneOf(lane2);
     if (lane2 !== "mask") {
       for (const right of list) {
-        if (Math.abs(x - this.xOf(right.start)) > HANDLE_PX) continue;
+        if (Math.abs(x - this.xOf(right.start)) > ROLL_PX) continue;
         const left = list.find((c) => c !== right && c.track === right.track && c.start + c.length === right.start);
         if (!left) continue;
         const fadeTop = this.laneTop(lane2, right.track) + (this.laneHeight(lane2) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);

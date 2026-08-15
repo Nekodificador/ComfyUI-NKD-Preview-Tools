@@ -125,6 +125,18 @@ const CLIP_HEAD_H = 15;                   // name band inside a clip
  * stole. Now the two neighbours split it at the midpoint, so wider is simply easier.
  */
 const HANDLE_PX = 16;
+/**
+ * Grab radius of the JUNCTION, and deliberately much smaller than HANDLE_PX.
+ *
+ * The roll is tested before the individual edges, so it takes whatever it claims: sharing
+ * HANDLE_PX with them meant that once the handles grew, the junction swallowed the lot and
+ * trimming ONE side of a cut became impossible. A narrow core is also the convention -
+ * roll sits on the cut, and a few pixels either side is the trim of that side.
+ *
+ * The result is three distinct targets across 32px instead of one: 12 for the roll, and
+ * 10 clear pixels of single-edge trim on each side of it.
+ */
+const ROLL_PX = 6;
 const MUTE_BOX = 16;                      // hit box of the per-clip mute toggle
 /**
  * How far the speaker sits IN from the clip's right edge.
@@ -681,7 +693,7 @@ export class TimelineEditor {
     // line). Not on the mask lane, which has neither.
     if (lane !== "mask") {
       for (const right of list) {
-        if (Math.abs(x - this.xOf(right.start)) > HANDLE_PX) continue;
+        if (Math.abs(x - this.xOf(right.start)) > ROLL_PX) continue;
         const left = list.find((c) => c !== right && c.track === right.track
           && c.start + c.length === right.start);
         if (!left) continue;
