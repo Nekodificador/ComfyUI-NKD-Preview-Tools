@@ -120,6 +120,15 @@ const IO_GRAB_PX = 7;
 const CLIP_HEAD_H = 15;                   // name band inside a clip
 const MUTE_BOX = 16;                      // hit box of the per-clip mute toggle
 /**
+ * Gap between the speaker and the clip's right edge.
+ *
+ * It used to sit flush against it, which is exactly the strip the end handle and the
+ * junction between two clips need - and the speaker is tested first, so in the header band
+ * it swallowed both. The tail of a clip with a neighbour behind it could not be grabbed at
+ * all up there. HANDLE_PX wide, so what it clears is precisely the grab radius.
+ */
+const MUTE_INSET = 10;    // == HANDLE_PX, declared below
+/**
  * Tallest the preview is allowed to get, in logical px.
  *
  * Widening the node must NOT grow the picture. An NLE splits the space the other way: the
@@ -670,9 +679,14 @@ export class TimelineEditor {
         const left = list.find((c) => c !== right && c.track === right.track
           && c.start + c.length === right.start);
         if (!left) continue;
-        const bodyTop = this.laneTop(lane, right.track)
-          + (this.laneHeight(lane) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0) + FADE_BAND_H;
-        if (y >= bodyTop) return { kind: "roll", left, right, lane };
+        // With the speaker out of the way the header is free, so the junction reaches the
+        // full lane height. The fade band stays carved out: those grips are smaller
+        // targets and they sit on the same pixel when a fade is 0.
+        const fadeTop = this.laneTop(lane, right.track)
+          + (this.laneHeight(lane) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
+        if (y < fadeTop || y > fadeTop + FADE_BAND_H) {
+          return { kind: "roll", left, right, lane };
+        }
       }
     }
     const edges: { hit: Hit; dist: number; inside: boolean }[] = [];
@@ -686,7 +700,8 @@ export class TimelineEditor {
       // The mute toggle sits inside the header, so it must be tested BEFORE the edges
       // and the body or it would never be reachable.
       const top = this.laneTop(lane, c.track) + 3;
-      if (lane !== "mask" && b - a > 44 && x >= b - MUTE_BOX && x <= b
+      if (lane !== "mask" && b - a > 44 + MUTE_INSET
+          && x >= b - MUTE_INSET - MUTE_BOX && x <= b - MUTE_INSET
           && y >= top && y <= top + CLIP_HEAD_H) {
         return { kind: "mute", clip: c, lane };
       }
@@ -2150,7 +2165,7 @@ export class TimelineEditor {
       ctx.fillText("probing…", x + 5, y + h - 5);
     }
     if (lane !== "mask" && w > 44 && h > CLIP_HEAD_H) {
-      this.drawSpeaker(ctx, x + w - MUTE_BOX, y, !!c.muted, isHover);
+      this.drawSpeaker(ctx, x + w - MUTE_INSET - MUTE_BOX, y, !!c.muted, isHover);
     }
     this.drawMarkers(ctx, c, y, h);
     // Plus a wash over the body, the way an NLE marks a selection.
@@ -2374,7 +2389,18 @@ export class TimelineEditor {
     const cx = x + s / 2;
     const cy = y + CLIP_HEAD_H / 2;
     ctx.save();
-    ctx.strokeStyle = muted ? C.active : hot ? C.hover : "rgba(255,255,255,0.75)";
+    // A dark disc under the glyph. Without it the speaker is white-on-whatever: over a
+    // pale filmstrip frame or a bright waveform it simply disappears, and a control you
+    // cannot see is a control that is not there. It also draws the target, which matters
+    // more now that the icon has moved in from the edge.
+    ctx.beginPath();
+    ctx.arc(cx, cy, s / 2 - 1, 0, Math.PI * 2);
+    ctx.fillStyle = hot ? "rgba(10,12,16,0.88)" : "rgba(10,12,16,0.62)";
+    ctx.fill();
+    ctx.strokeStyle = hot ? C.hover : "rgba(255,255,255,0.22)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.strokeStyle = muted ? C.active : hot ? C.hover : "rgba(255,255,255,0.9)";
     ctx.fillStyle = ctx.strokeStyle;
     ctx.lineWidth = 1.4;
     ctx.lineJoin = "round";

@@ -1488,6 +1488,7 @@ const IO_BAR_TOP = RULER_H - IO_BAR_H;
 const IO_GRAB_PX = 7;
 const CLIP_HEAD_H = 15;
 const MUTE_BOX = 16;
+const MUTE_INSET = 10;
 const PREVIEW_MAX_H$1 = 260;
 const TRACK_H = 46;
 const MASK_H = 30;
@@ -2393,8 +2394,10 @@ class TimelineEditor {
         if (Math.abs(x - this.xOf(right.start)) > HANDLE_PX) continue;
         const left = list.find((c) => c !== right && c.track === right.track && c.start + c.length === right.start);
         if (!left) continue;
-        const bodyTop = this.laneTop(lane2, right.track) + (this.laneHeight(lane2) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0) + FADE_BAND_H;
-        if (y >= bodyTop) return { kind: "roll", left, right, lane: lane2 };
+        const fadeTop = this.laneTop(lane2, right.track) + (this.laneHeight(lane2) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
+        if (y < fadeTop || y > fadeTop + FADE_BAND_H) {
+          return { kind: "roll", left, right, lane: lane2 };
+        }
       }
     }
     const edges = [];
@@ -2405,7 +2408,7 @@ class TimelineEditor {
       const b = this.xOf(c.start + c.length);
       if (x < a - HANDLE_PX || x > b + HANDLE_PX) continue;
       const top = this.laneTop(lane2, c.track) + 3;
-      if (lane2 !== "mask" && b - a > 44 && x >= b - MUTE_BOX && x <= b && y >= top && y <= top + CLIP_HEAD_H) {
+      if (lane2 !== "mask" && b - a > 44 + MUTE_INSET && x >= b - MUTE_INSET - MUTE_BOX && x <= b - MUTE_INSET && y >= top && y <= top + CLIP_HEAD_H) {
         return { kind: "mute", clip: c, lane: lane2 };
       }
       if (lane2 !== "mask" && b - a > 24) {
@@ -3261,7 +3264,7 @@ class TimelineEditor {
       ctx.fillText("probing…", x + 5, y + h - 5);
     }
     if (lane2 !== "mask" && w > 44 && h > CLIP_HEAD_H) {
-      this.drawSpeaker(ctx, x + w - MUTE_BOX, y, !!c.muted, isHover);
+      this.drawSpeaker(ctx, x + w - MUTE_INSET - MUTE_BOX, y, !!c.muted, isHover);
     }
     this.drawMarkers(ctx, c, y, h);
     if (selected) {
@@ -3451,7 +3454,14 @@ class TimelineEditor {
     const cx = x + s / 2;
     const cy = y + CLIP_HEAD_H / 2;
     ctx.save();
-    ctx.strokeStyle = muted ? C.active : hot ? C.hover : "rgba(255,255,255,0.75)";
+    ctx.beginPath();
+    ctx.arc(cx, cy, s / 2 - 1, 0, Math.PI * 2);
+    ctx.fillStyle = hot ? "rgba(10,12,16,0.88)" : "rgba(10,12,16,0.62)";
+    ctx.fill();
+    ctx.strokeStyle = hot ? C.hover : "rgba(255,255,255,0.22)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.strokeStyle = muted ? C.active : hot ? C.hover : "rgba(255,255,255,0.9)";
     ctx.fillStyle = ctx.strokeStyle;
     ctx.lineWidth = 1.4;
     ctx.lineJoin = "round";
