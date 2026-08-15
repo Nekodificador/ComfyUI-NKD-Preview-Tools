@@ -20,8 +20,10 @@ jobs:
         uses: Comfy-Org/publish-node-action@main
         with:
           personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
-      # Keep the git-clone distribution channel (older ComfyUI-Manager installs)
-      # in sync with the registry by tagging + releasing each version bump.
+      # Anchor each published version to an exact commit. Without a tag, reproducing what
+      # a user actually has means hunting for the commit that last touched pyproject.toml.
+      # NOT a distribution channel: the Manager installs from the registry and its git path
+      # pulls the branch. This is for support, and for being able to go back.
       # Safe: the workflow no longer triggers on tag pushes, so this won't re-run.
       - name: Tag and create GitHub release
         env:
