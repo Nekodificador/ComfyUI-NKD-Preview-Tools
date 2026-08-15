@@ -38,12 +38,9 @@ from comfy_api.latest import InputImpl, io, ui
 #
 # Each preset is (step, offset): a valid count is `offset + step*k`. Values taken from the
 # EmptyLatent nodes in ComfyUI core, which are the authority:
-#   4n+1   comfy_extras/nodes_wan.py:44, nodes_hunyuan.py:61, nodes_kandinsky5.py:37,
-#          nodes_cosmos.py:106, nodes_scail.py:181, nodes_bernini.py:71
-#   8n+1   comfy_extras/nodes_lt.py:79 (LTXV), nodes_cosmos.py:28 (Cosmos 1)
-#   6n+1   comfy_extras/nodes_mochi.py:27
-#   17n+5  comfy_extras/nodes_minimax_h3.py:33 -- note this one is NOT of the Nn+1 family;
-#          `align_frame_count` walks up until `n % 17 == 5`.
+#   Each preset's (step, offset) is read off the matching EmptyLatent node in ComfyUI
+#   core. MiniMax H3 is the exception to the Nn+1 shape and also the only one that
+#   rounds UP. Verify against the core before adding or changing one.
 QUANTIZE_FREE = "free"
 QUANTIZE_CUSTOM = "custom (multiple of N)"
 # Split per MODEL rather than per grid, even where the grid is shared: Wan and Hunyuan
@@ -59,9 +56,8 @@ QUANTIZE_PRESETS: dict[str, tuple[int, int]] = {
 }
 
 # Frame rate each family was trained at, ONLY where ComfyUI core states it outright:
-#   Wan        16  comfy_extras/nodes_wan.py:526 ("model trained with 16 fps")
-#   LTX        25  comfy_extras/nodes_lt.py:549 (LTXVConditioning frame_rate default)
-#   MiniMax H3 24  comfy_extras/nodes_minimax_h3.py:29 (FPS = 24)
+#   Only the rates ComfyUI core states outright. A family the repo does not document
+#   stays out: a confident warning built on a guess is worse than no warning.
 # Hunyuan, Cosmos and Mochi are absent on purpose: no rate is documented in the repo, and
 # guessing one would produce a confident warning that might simply be wrong.
 QUANTIZE_NATIVE_FPS: dict[str, float] = {

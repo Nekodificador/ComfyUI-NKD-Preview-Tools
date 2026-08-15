@@ -190,30 +190,19 @@ export function nativeFpsFor(mode: QuantizeMode): number | null {
 }
 
 /**
- * WHERE A CUT CAN LAND - a different grid from the frame COUNT above, and the one that
- * was missing.
+ * WHERE A CUT CAN LAND - a different grid from the frame COUNT above.
  *
- * A video VAE groups frames into latents, and a latent can only be denoised whole. So a
- * hole that starts mid-group swallows the whole group: ask for a gap at frame 7 and the
- * model regenerates from 5, silently, because `process_denoise_mask` max-pools the mask
- * onto its own grid. The count grid (17n+5 and friends) says how LONG the render may be;
+ * A video VAE groups frames into latents and a latent is denoised whole, so a hole that
+ * starts mid-group swallows the group. The count grid says how LONG the render may be;
  * this one says where inside it you may cut.
  *
- * `ratio` is the frames-per-latent the core's own downscale formula implies - it maps
- * frame `a` to `floor((a + ratio - 1) / ratio)`, so the boundaries are frame 0 alone and
- * then every `1 + ratio*k` (comfy/sd.py:588 Wan, :618 LTX/Cosmos, :723 Mochi).
+ * `ratio` frames per latent · `chunk` frames after which the pattern restarts, 0 for
+ * none · `audioMultiple` extra divisor once sound is masked too · `cutEvery` / `cutLead`
+ * a family that only cuts where material resumes on a whole block, and how many frames
+ * before that boundary still work.
  *
- * `chunk` is MiniMax H3's exception: its encoder restarts the pattern every 17 frames
- * (`FRAME_PER_TOKEN = (1, 4, 4, 4, 4)`, comfy/ldm/minimax/model.py:30), so the boundaries
- * are 0, 1, 5, 9, 13, then 17, 18, 22, 26, 30, then 34... rather than marching on.
- *
- * `audioMultiple` is the extra condition when sound is in play. H3 runs audio at 40/s
- * against 24 fps video, i.e. 5/3 audio frames per picture frame, so only a frame count
- * divisible by 3 lands on a whole audio frame. Both conditions at once leaves 0, 9, 18,
- * 30, 39, 51, 60... Confirmed by the author of the masking PR, who put it as "the audio
- * is a multiple of 3, so 17*3 = 51 is the lowest number that perfectly matches" and
- * "if you are adding both audio and video, those really have to be on a common divisible
- * value to be aligned properly".
+ * The values are read off the model, never chosen. Do not add a family by analogy and do
+ * not widen a window: both are silent when wrong.
  */
 export const TOKEN_GRIDS: Record<string, { ratio: number; chunk: number; audioMultiple?: number;
                                            cutEvery?: number; cutLead?: number }> = {
