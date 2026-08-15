@@ -166,8 +166,8 @@ def resolve_resolution(aspect: str, megapixels: float, width: int, height: int,
 
     `multiple` is not cosmetic: a video model's canvas has its own grid (MiniMax H3 rounds
     to 32, `nodes_minimax_h3.py:adapt_canvas`), and landing off it means the model resizes
-    every frame again through `common_upscale`'s per-frame PIL loop - measured at 5.35s per
-    60 frames of 1080p. Matching the grid here is what avoids paying that twice.
+    every frame again through `common_upscale`'s per-frame loop. Matching the grid here is
+    what avoids paying for that resize twice.
     """
     mp0 = float(megapixels) if megapixels and float(megapixels) > 0 else 1.0
     if aspect == ASPECT_SOURCE:
@@ -557,15 +557,14 @@ def _resize(chw: torch.Tensor, width: int, height: int) -> torch.Tensor:
 
     NOT `comfy.utils.common_upscale(..., "lanczos")` on the way down. That helper's lanczos
     is not a tensor op at all: it loops in PYTHON converting every frame to a PIL image and
-    back (comfy/utils.py:1059). On a timeline that is per-frame work over a whole clip, and
-    with a 4K source it costs more than decoding the video did - measured at 11.0s for 81
-    4K frames, against 8.7s to decode them.
+    back. On a timeline that is per-frame work over a whole clip, and on a big source it
+    can cost more than decoding the video did - which is why the filter is picked by
+    direction here rather than left at one setting.
 
     Downscaling is what a timeline actually does (a camera source into a model-sized
-    output), and antialiased bicubic is 3.6x faster than that loop while matching it to
-    ~0.7% mean error on noise, the worst case for comparing resamplers. Plain bilinear
-    WITHOUT antialias is not the alternative: on a 4.6:1 reduction it aliases badly
-    (20x the error) and is still slower than area.
+    output), and antialiased bicubic is both faster than that loop and visually equal to
+    it. Plain bilinear WITHOUT antialias is not the alternative: on a large reduction it
+    aliases badly and is not even faster than area.
 
     Upscaling keeps lanczos: there is no aliasing to fight, it is the sharper filter, and
     at output sizes it is the faster of the two anyway.
@@ -1130,7 +1129,7 @@ class NKDTimeline(io.ComfyNode):
         height = int(height) if height > 0 else int(h0)
 
         # `empty`, not `zeros`: at 1920x1080x294 this buffer is 6.8 GiB and MEMSETTING it
-        # costs 2.4s - measured - only for the clips to overwrite it a moment later. The
+        # costs real seconds only for the clips to overwrite it a moment later. The
         # frames no clip covers are blacked out right after the loop, before anything reads
         # them, so the uninitialised memory is never observable.
         out = torch.empty((count, height, width, 3), dtype=torch.float32)

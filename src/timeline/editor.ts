@@ -727,7 +727,7 @@ export class TimelineEditor {
       const muteY = this.muteCentreY(lane, c.track);
       if (lane !== "mask" && b - a > 44 + MUTE_INSET
           && x >= b - MUTE_INSET - MUTE_BOX && x <= b - MUTE_INSET
-          && Math.abs(y - muteY) <= MUTE_BOX / 2) {
+          && Math.abs(y - muteY) <= (MUTE_BOX + 5) / 2) {
         return { kind: "mute", clip: c, lane };
       }
       // Fade grips, before the edges but only inside the shallow top band.
@@ -2437,15 +2437,20 @@ export class TimelineEditor {
     // cannot see is a control that is not there. It also draws the target, which matters
     // more now that the icon has moved in from the edge. Square rather than round: it
     // reads as a button, and it matches the chrome of the toolbar above.
-    const pad = 1;
-    const bx = Math.round(cx - s / 2) + pad;
-    const by = Math.round(cy - s / 2) + pad;
-    const bs = s - pad * 2;
+    // Room around the glyph rather than a plate that hugs it, and the same 2px corner the
+    // clips use - it reads as part of the same furniture instead of a sticker on top.
+    const bs = s + 5;
+    const bx = Math.round(cx - bs / 2);
+    const by = Math.round(cy - bs / 2);
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bs, bs, 2);
     ctx.fillStyle = hot ? "rgba(10,12,16,0.88)" : "rgba(10,12,16,0.62)";
-    ctx.fillRect(bx, by, bs, bs);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.roundRect(bx + 0.5, by + 0.5, bs - 1, bs - 1, 2);
     ctx.strokeStyle = hot ? C.hover : "rgba(255,255,255,0.22)";
     ctx.lineWidth = 1;
-    ctx.strokeRect(bx + 0.5, by + 0.5, bs - 1, bs - 1);
+    ctx.stroke();
     ctx.strokeStyle = muted ? C.active : hot ? C.hover : "rgba(255,255,255,0.9)";
     ctx.fillStyle = ctx.strokeStyle;
     ctx.lineWidth = 1.4;

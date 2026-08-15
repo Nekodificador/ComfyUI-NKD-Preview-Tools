@@ -148,18 +148,12 @@ def has_version(prefix: str) -> bool:
 FORMATS = {
     "mp4 / h264": {"ext": "mp4", "vcodec": "libx264", "acodec": "aac", "preview": "video",
                    "mime": 'video/mp4; codecs="avc1.42E01E"', "poster": False},
-    # ── h265 is DELIBERATELY ABSENT. Do not add it back without re-measuring. ──
-    # libx265 in this PyAV build corrupts the heap (Windows 0xc0000374) and takes the whole
-    # process down with it. Measured: 0/5 encodes survived in one stress run, 1-3 of 5 in
-    # others - non-deterministic, and it kills ComfyUI, not just the node. Every x265-params
-    # combination was tried (`pools=none`, `frame-threads=1`, `log-level=none`); none helped,
-    # so it is not the thread pool. h264, vp9 and ProRes all survive 5/5 in the same harness.
-    # A crash that eats a render in progress cannot be made safe with a warning label.
+    # h265 is DELIBERATELY ABSENT and this is not an oversight. Do not add it back without
+    # testing it to destruction first: what ruled it out is not a quality question.
     "webm / vp9": {"ext": "webm", "vcodec": "libvpx-vp9", "acodec": "libopus",
                    "preview": "video", "mime": 'video/webm; codecs="vp9"', "poster": False},
     # ProRes is the one case with no argument: no browser implements it and none will. It is
-    # an editing intermediate at hundreds of Mbit/s, not a delivery format. Measured here:
-    # `canPlayType('video/quicktime; codecs="apcn"')` comes back empty.
+    # an editing intermediate, not a delivery format.
     "mov / prores": {"ext": "mov", "vcodec": "prores_ks", "acodec": "pcm_s16le",
                      "preview": "none", "mime": None, "poster": True},
     "gif": {"ext": "gif", "vcodec": None, "acodec": None, "preview": "image",
@@ -172,14 +166,11 @@ FORMATS = {
 
 # prores_ks profile numbers, straight from ffmpeg.
 #
-# **4444 is the pack's only working alpha path.** Measured: a half-transparent clip encoded
-# and read back keeps alpha 0 on one side and 255 on the other - which vp9 does NOT (see
-# `encode_video`).
+# **4444 is the pack's only working alpha path.**
 #
 # The pixel format here is what the encoder is ASKED for, which is not what ends up in the
-# file: request `yuva444p10le` and prores_ks writes `yuva444p12le`. Requesting 12 directly
-# fails to open at all (EINVAL), so this is the value that has to be here - a test pinning
-# the stored format instead would be pinning the wrong one.
+# file, and asking for the stored one directly fails to open. So this is the value that has
+# to be here - a test pinning the stored format instead would be pinning the wrong one.
 PRORES_PROFILES = {
     "proxy": (0, "yuv422p10le"),
     "lt": (1, "yuv422p10le"),
