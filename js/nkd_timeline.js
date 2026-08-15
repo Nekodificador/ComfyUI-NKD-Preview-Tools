@@ -5369,7 +5369,7 @@ function readSetting(id, fallback) {
     return fallback;
   }
 }
-console.log("[NKD Timeline] rev 3.8.0");
+console.log("[NKD Timeline] rev 3.8.1");
 const VIEW_PROP = "nkdView";
 function restoreView(node, tl) {
   var _a;
