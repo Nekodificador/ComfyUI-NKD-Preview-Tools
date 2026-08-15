@@ -18,6 +18,7 @@ import {
   BLEND_MODES, type BlendMode, type ImportMode,
   clampFades, levelStops, snapGainToDb, clipsAt, cropToRange, effectiveCount, fitRect, materialRange, moveClip,
   moveClipToLane, MAX_GAIN,
+  type CutEdge,
   adaptCanvas, canvasFor, clampClipsToSources, clipExtent, cutStops, expandClipsToSources,
   nativeFpsFor, newId, slotInUse, splitClip,
   trimToPlayhead,
@@ -215,6 +216,20 @@ export class TimelineEditor {
   private drag: Drag | null = null;
   private hover: Hit = { kind: "none" };
   private snapping = true;
+  /**
+   * Does the cut grid have to respect the SOUNDTRACK's grid as well?
+   *
+   * The extra condition (frames divisible by 3, because 40 audio steps per second
+   * against 24 fps is 5/3) only bites where the audio mask actually has an EDGE - and
+   * with the soundtrack kept whole, it has none. Off by default because that is the
+   * common case, and holding everyone to a grid three times coarser costs four out of
+   * every five legal cuts for nothing.
+   *
+   * It cannot be inferred: whether the sound is kept or regenerated is decided
+   * downstream, in the AV latent node, which this editor cannot see. So it is asked.
+   * Not persisted, same as `snapping` - the default is the useful state.
+   */
+  private audioGrid = false;
   private raf = 0;
   private disposed = false;
   private lastTimelineH = 0;
@@ -369,6 +384,18 @@ export class TimelineEditor {
     });
     magnet.classList.add("on");
 
+    // Turning this ON asks the cut grid to satisfy the soundtrack's condition too, which
+    // roughly triples its spacing. Only worth it when the sound is actually regenerated
+    // across the cut; with the soundtrack kept whole there is no audio edge to align.
+    const audioGridBtn = icon("pi-volume-up",
+      "Cut grid also respects the soundtrack — turn this on only when the sound is "
+      + "regenerated across the cut. With the sound kept whole, leave it off and Shift "
+      + "reaches every legal cut instead of one in three.",
+      () => {
+        this.audioGrid = !this.audioGrid;
+        audioGridBtn.classList.toggle("on", this.audioGrid);
+      });
+
     this.playBtn = icon("pi-play", "Play / pause (Space) — J K L to shuttle",
       () => this.transport.toggle());
     this.maskBtn = icon("pi-eye-slash", "Show the mask over the picture (M)",
@@ -435,6 +462,7 @@ export class TimelineEditor {
       ),
       group(                                                        // toggles
         magnet,
+        audioGridBtn,
         // The mask overlay is a picture control: with no monitor there is nothing to lay
         // it over, so it would be a button that does nothing.
         this.audioOnly ? null : this.maskBtn,
@@ -794,9 +822,13 @@ export class TimelineEditor {
     // block boundary the model accepts. CTRL is the x0.1 fine drag (the pack convention
     // puts that on Shift, but landing on legal frames matters more on a timeline).
     const gain = e.ctrlKey || e.metaKey ? 0.1 : 1;
+    // The right edge of a clip is where material ENDS and generation begins - the head of
+    // a plain extension - and that junction never flashes, so it is not held to the resume
+    // window. Everything else lands where material comes BACK, which is the one that is.
+    const edge: CutEdge = d.hit.kind === "edge" && d.hit.side === "end" ? "end" : "resume";
     const toGrid = (f: number) => (e.shiftKey
       ? snapFrameToGrid(f, this.host.getStartFrame(), this.host.getQuantize(),
-        this.host.getQuantizeN(), this.hasAudio())
+        this.host.getQuantizeN(), this.audioGrid, edge)
       : f);
     const dFrames = Math.round((x - d.startX) * gain / this.logicalWidth * this.viewFrames);
 
@@ -1534,12 +1566,6 @@ export class TimelineEditor {
    * Only fires for families whose rate ComfyUI core actually documents, and only when the
    * pair CHANGES, so it never nags while you scrub.
    */
-  /** Is there any sound in this edit? Decides whether the cut grid takes the audio's
-   *  extra condition. Muted clips do not count: a muted picture has no join to align. */
-  private hasAudio(): boolean {
-    return this.tl.audio.length > 0 || this.tl.clips.some((c) => !c.muted);
-  }
-
   /**
    * Warn when the output size is off the model's own canvas.
    *
@@ -1862,7 +1888,7 @@ export class TimelineEditor {
       };
       // Skipped below ~5 px apart: at that spacing it is a solid band, not a grid, and
       // this runs on every render.
-      const cuts = cutStops(span, mode, this.hasAudio());
+      const cuts = cutStops(span, mode, this.audioGrid);
       if (cuts.length > 1 && this.xOf(start + cuts[1]) - this.xOf(start + cuts[0]) >= 5) {
         tick(cuts, 3, "rgba(74,180,255,0.28)");
       }

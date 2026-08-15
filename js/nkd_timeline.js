@@ -68,13 +68,28 @@ const TOKEN_GRIDS = {
   "LTX (8n+1)": { ratio: 8, chunk: 0 },
   "Cosmos (8n+1)": { ratio: 8, chunk: 0 },
   "Mochi (6n+1)": { ratio: 6, chunk: 0 },
-  "MiniMax H3 (17n+5)": { ratio: 4, chunk: 17, audioMultiple: 3 }
+  // H3 cuts only on WHOLE BLOCKS, not on every token, and that is measured rather than
+  // derived. Same seed, one frame apart: a cut at 132 flashes, one at 133 does not. Both
+  // resume the real material at 136 - what changes is whether the token 132-135 ends up
+  // PRESERVED (132) or generated (133). A preserved latent left alone between generated
+  // ones decodes contaminated, because the video VAE's decoder has temporal context.
+  // So the rule is about where the material RESUMES: on a multiple of 17.
+  "MiniMax H3 (17n+5)": { ratio: 4, chunk: 17, audioMultiple: 3, cutEvery: 17, cutLead: 3 }
 };
-function cutStops(max, mode, withAudio = false) {
+function cutStops(max, mode, withAudio = false, edge = "resume") {
   const grid = TOKEN_GRIDS[mode];
   if (!grid || max < 0) return [];
-  const { ratio, chunk, audioMultiple } = grid;
+  const { ratio, chunk, audioMultiple, cutEvery, cutLead } = grid;
   if (ratio <= 0) return [];
+  if (cutEvery && edge === "resume") {
+    const lead = Math.max(0, cutLead ?? 0);
+    const out2 = [0];
+    for (let b = cutEvery; b <= max; b += cutEvery) {
+      for (let f = Math.max(1, b - lead); f <= b; f++) out2.push(f);
+    }
+    const every2 = withAudio ? audioMultiple ?? 1 : 1;
+    return every2 > 1 ? out2.filter((f) => f % every2 === 0) : out2;
+  }
   const span = chunk > 0 ? chunk : max + 1;
   const out = [];
   for (let base = 0; base <= max; base += span) {
@@ -471,12 +486,12 @@ function snapCandidates(t, extra = []) {
   }
   return out;
 }
-function snapFrameToGrid(frame, startFrame, mode, k = 8, withAudio = false) {
+function snapFrameToGrid(frame, startFrame, mode, k = 8, withAudio = false, edge = "resume") {
   const tokens = TOKEN_GRIDS[mode];
   const rel = frame - startFrame;
   if (tokens) {
     if (rel <= 0) return startFrame;
-    const stops = cutStops(rel + Math.max(tokens.chunk, tokens.ratio) * 2, mode, withAudio);
+    const stops = cutStops(rel + Math.max(tokens.chunk, tokens.ratio) * 2, mode, withAudio, edge);
     let best = stops[0] ?? 0;
     for (const s of stops) if (Math.abs(s - rel) < Math.abs(best - rel)) best = s;
     return startFrame + best;
@@ -1489,6 +1504,20 @@ class TimelineEditor {
     __publicField(this, "drag", null);
     __publicField(this, "hover", { kind: "none" });
     __publicField(this, "snapping", true);
+    /**
+     * Does the cut grid have to respect the SOUNDTRACK's grid as well?
+     *
+     * The extra condition (frames divisible by 3, because 40 audio steps per second
+     * against 24 fps is 5/3) only bites where the audio mask actually has an EDGE - and
+     * with the soundtrack kept whole, it has none. Off by default because that is the
+     * common case, and holding everyone to a grid three times coarser costs four out of
+     * every five legal cuts for nothing.
+     *
+     * It cannot be inferred: whether the sound is kept or regenerated is decided
+     * downstream, in the AV latent node, which this editor cannot see. So it is asked.
+     * Not persisted, same as `snapping` - the default is the useful state.
+     */
+    __publicField(this, "audioGrid", false);
     __publicField(this, "raf", 0);
     __publicField(this, "disposed", false);
     __publicField(this, "lastTimelineH", 0);
@@ -1622,12 +1651,14 @@ class TimelineEditor {
       const d = this.drag;
       d.moved = true;
       const gain = e.ctrlKey || e.metaKey ? 0.1 : 1;
+      const edge = d.hit.kind === "edge" && d.hit.side === "end" ? "end" : "resume";
       const toGrid = (f) => e.shiftKey ? snapFrameToGrid(
         f,
         this.host.getStartFrame(),
         this.host.getQuantize(),
         this.host.getQuantizeN(),
-        this.hasAudio()
+        this.audioGrid,
+        edge
       ) : f;
       const dFrames = Math.round((x - d.startX) * gain / this.logicalWidth * this.viewFrames);
       switch (d.hit.kind) {
@@ -2053,6 +2084,14 @@ class TimelineEditor {
       paintMagnet();
     });
     magnet.classList.add("on");
+    const audioGridBtn = icon(
+      "pi-volume-up",
+      "Cut grid also respects the soundtrack — turn this on only when the sound is regenerated across the cut. With the sound kept whole, leave it off and Shift reaches every legal cut instead of one in three.",
+      () => {
+        this.audioGrid = !this.audioGrid;
+        audioGridBtn.classList.toggle("on", this.audioGrid);
+      }
+    );
     this.playBtn = icon(
       "pi-play",
       "Play / pause (Space) — J K L to shuttle",
@@ -2144,6 +2183,7 @@ class TimelineEditor {
       group(
         // toggles
         magnet,
+        audioGridBtn,
         // The mask overlay is a picture control: with no monitor there is nothing to lay
         // it over, so it would be a button that does nothing.
         this.audioOnly ? null : this.maskBtn,
@@ -2724,11 +2764,6 @@ class TimelineEditor {
    * Only fires for families whose rate ComfyUI core actually documents, and only when the
    * pair CHANGES, so it never nags while you scrub.
    */
-  /** Is there any sound in this edit? Decides whether the cut grid takes the audio's
-   *  extra condition. Muted clips do not count: a muted picture has no join to align. */
-  hasAudio() {
-    return this.tl.audio.length > 0 || this.tl.clips.some((c) => !c.muted);
-  }
   /**
    * Warn when the output size is off the model's own canvas.
    *
@@ -3003,7 +3038,7 @@ class TimelineEditor {
           ctx.stroke();
         }
       };
-      const cuts = cutStops(span, mode, this.hasAudio());
+      const cuts = cutStops(span, mode, this.audioGrid);
       if (cuts.length > 1 && this.xOf(start + cuts[1]) - this.xOf(start + cuts[0]) >= 5) {
         tick(cuts, 3, "rgba(74,180,255,0.28)");
       }

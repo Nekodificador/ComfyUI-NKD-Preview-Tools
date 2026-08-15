@@ -215,13 +215,20 @@ export function nativeFpsFor(mode: QuantizeMode): number | null {
  * "if you are adding both audio and video, those really have to be on a common divisible
  * value to be aligned properly".
  */
-export const TOKEN_GRIDS: Record<string, { ratio: number; chunk: number; audioMultiple?: number }> = {
+export const TOKEN_GRIDS: Record<string, { ratio: number; chunk: number; audioMultiple?: number;
+                                           cutEvery?: number; cutLead?: number }> = {
   "Wan (4n+1)": { ratio: 4, chunk: 0 },
   "Hunyuan (4n+1)": { ratio: 4, chunk: 0 },
   "LTX (8n+1)": { ratio: 8, chunk: 0 },
   "Cosmos (8n+1)": { ratio: 8, chunk: 0 },
   "Mochi (6n+1)": { ratio: 6, chunk: 0 },
-  "MiniMax H3 (17n+5)": { ratio: 4, chunk: 17, audioMultiple: 3 },
+  // H3 cuts only on WHOLE BLOCKS, not on every token, and that is measured rather than
+  // derived. Same seed, one frame apart: a cut at 132 flashes, one at 133 does not. Both
+  // resume the real material at 136 - what changes is whether the token 132-135 ends up
+  // PRESERVED (132) or generated (133). A preserved latent left alone between generated
+  // ones decodes contaminated, because the video VAE's decoder has temporal context.
+  // So the rule is about where the material RESUMES: on a multiple of 17.
+  "MiniMax H3 (17n+5)": { ratio: 4, chunk: 17, audioMultiple: 3, cutEvery: 17, cutLead: 3 },
 };
 
 /**
@@ -231,11 +238,35 @@ export const TOKEN_GRIDS: Record<string, { ratio: number; chunk: number; audioMu
  * caller's business whether this timeline actually carries audio, because a picture-only
  * edit should not be held to a grid three times coarser for nothing.
  */
-export function cutStops(max: number, mode: QuantizeMode, withAudio = false): number[] {
+export type CutEdge = "resume" | "end";
+
+export function cutStops(max: number, mode: QuantizeMode, withAudio = false,
+                         edge: CutEdge = "resume"): number[] {
   const grid = TOKEN_GRIDS[mode];
   if (!grid || max < 0) return [];
-  const { ratio, chunk, audioMultiple } = grid;
+  const { ratio, chunk, audioMultiple, cutEvery, cutLead } = grid;
   if (ratio <= 0) return [];
+  // A family whose material has to RESUME on a block boundary. The safe cut is a WINDOW,
+  // not a point: anywhere in `[B - cutLead, B]` leaves at least one gap frame inside the
+  // block's last token, so that token generates and nothing preserved is left stranded
+  // among generated neighbours. All four land the material at B either way - the earliest
+  // of them simply leaves real pixels under the regenerated token instead of black, which
+  // a leaky masked patch can only benefit from.
+  // Only where the material RESUMES. The video VAE's decoder is CAUSAL - it reads
+  // backwards - so a preserved latent is contaminated by generated ones BEFORE it and
+  // never by those after. Measured: a montage's head (real -> generated) comes back at
+  // 1.3/255 against the source, correlation 0.9926, while its tail flashes. So the edge
+  // where material ENDS only wants a token boundary, to avoid handing 3 of its frames to
+  // the `max`; it has no window to satisfy.
+  if (cutEvery && edge === "resume") {
+    const lead = Math.max(0, cutLead ?? 0);
+    const out: number[] = [0];
+    for (let b = cutEvery; b <= max; b += cutEvery) {
+      for (let f = Math.max(1, b - lead); f <= b; f++) out.push(f);
+    }
+    const every = withAudio ? (audioMultiple ?? 1) : 1;
+    return every > 1 ? out.filter((f) => f % every === 0) : out;
+  }
   const span = chunk > 0 ? chunk : max + 1;
   const out: number[] = [];
   for (let base = 0; base <= max; base += span) {
@@ -810,7 +841,8 @@ export function snapCandidates(t: Timeline, extra: number[] = []): number[] {
  * block boundary.
  */
 export function snapFrameToGrid(frame: number, startFrame: number,
-                                 mode: QuantizeMode, k = 8, withAudio = false): number {
+                                 mode: QuantizeMode, k = 8, withAudio = false,
+                                 edge: CutEdge = "resume"): number {
   // The TOKEN grid, not the count grid: a cut lands where a latent begins. Falling back
   // to the count grid for `custom (multiple of N)` and anything without a documented
   // token pattern - there the block size is all we know, and it is better than nothing.
@@ -818,7 +850,7 @@ export function snapFrameToGrid(frame: number, startFrame: number,
   const rel = frame - startFrame;
   if (tokens) {
     if (rel <= 0) return startFrame;
-    const stops = cutStops(rel + Math.max(tokens.chunk, tokens.ratio) * 2, mode, withAudio);
+    const stops = cutStops(rel + Math.max(tokens.chunk, tokens.ratio) * 2, mode, withAudio, edge);
     let best = stops[0] ?? 0;
     for (const s of stops) if (Math.abs(s - rel) < Math.abs(best - rel)) best = s;
     return startFrame + best;
