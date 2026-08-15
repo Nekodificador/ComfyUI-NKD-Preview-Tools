@@ -1818,11 +1818,11 @@ class TimelineEditor {
       if (this.drag) return;
       const { x, y } = this.localPos(e);
       const hit = this.hitTest(x, y);
-      if (hit.kind !== this.hover.kind || hit.kind === "clip" && this.hover.kind === "clip" && hit.clip !== this.hover.clip) {
+      if (hit.kind !== this.hover.kind || hit.kind === "clip" && this.hover.kind === "clip" && hit.clip !== this.hover.clip || hit.kind === "roll" && this.hover.kind === "roll" && hit.right !== this.hover.right || hit.kind === "fade" && this.hover.kind === "fade" && (hit.clip !== this.hover.clip || hit.side !== this.hover.side)) {
         this.hover = hit;
         this.requestRender();
       }
-      this.canvas.style.cursor = hit.kind === "mute" ? "pointer" : hit.kind === "roll" ? "col-resize" : hit.kind === "fade" ? "col-resize" : hit.kind === "level" ? "ns-resize" : hit.kind === "edge" || hit.kind === "inPoint" || hit.kind === "outPoint" ? "ew-resize" : hit.kind === "clip" ? e.altKey ? "col-resize" : "grab" : hit.kind === "playhead" ? "grab" : hit.kind === "ruler" ? "pointer" : "default";
+      this.canvas.style.cursor = hit.kind === "mute" ? "pointer" : hit.kind === "roll" ? "col-resize" : hit.kind === "fade" ? hit.side === "in" ? "nesw-resize" : "nwse-resize" : hit.kind === "level" ? "ns-resize" : hit.kind === "edge" || hit.kind === "inPoint" || hit.kind === "outPoint" ? "ew-resize" : hit.kind === "clip" ? e.altKey ? "col-resize" : "grab" : hit.kind === "playhead" ? "grab" : hit.kind === "ruler" ? "pointer" : "default";
     });
     /**
      * Right-click menu. Two jobs that both belong to "this clip is not what you assumed":
@@ -3029,6 +3029,7 @@ class TimelineEditor {
     for (const c of this.tl.clips) this.drawClip(ctx, c, "video");
     for (const m of this.tl.masks) this.drawClip(ctx, m, "mask");
     for (const a of this.tl.audio) this.drawClip(ctx, a, "audio");
+    this.drawRollHint(ctx);
     this.drawOutside(ctx, W, H, start, count);
     this.drawPlayhead(ctx, H);
     this.updateStatus(fps, count);
@@ -3092,6 +3093,41 @@ class TimelineEditor {
    * brackets as the grab handles - the same idiom as an NLE's work-area bar, so the range
    * can be set by dragging instead of only from the buttons.
    */
+  /**
+   * Light the junction when the pointer is on it, so a roll announces itself.
+   *
+   * `col-resize` against `ew-resize` is a real distinction but a subtle one, and this is
+   * the newest of the three edits - the one nobody is looking for. Two arrows pointing
+   * apart say "this moves both of them" in a way no cursor can.
+   */
+  drawRollHint(ctx) {
+    var _a;
+    const h = this.hover;
+    const d = (_a = this.drag) == null ? void 0 : _a.hit;
+    const hit = (d == null ? void 0 : d.kind) === "roll" ? d : h.kind === "roll" ? h : null;
+    if (!hit) return;
+    const x = Math.round(this.xOf(hit.right.start)) + 0.5;
+    const top = this.laneTop(hit.lane, hit.right.track);
+    const bot = top + this.laneHeight(hit.lane);
+    ctx.save();
+    ctx.strokeStyle = C.accent;
+    ctx.fillStyle = C.accent;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bot);
+    ctx.stroke();
+    const my = Math.round((top + bot) / 2);
+    for (const dir of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(x + dir * 9, my);
+      ctx.lineTo(x + dir * 3, my - 4);
+      ctx.lineTo(x + dir * 3, my + 4);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
   drawInOutBar(ctx, W) {
     var _a;
     const a = this.xOf(this.host.getStartFrame());
