@@ -1678,9 +1678,9 @@ export class TimelineEditor {
    * Warn when the output size is off the model's own canvas.
    *
    * The twin of the fps warning, and the same kind of mistake: it still renders. It just
-   * makes the model re-scale every single frame through PIL on its way in - measured at
-   * 5.35 s per 60 frames of 1080p - for a cost nothing on screen attributes to the size
-   * widgets. Only fires for a family whose canvas core states outright, and only when the
+   * makes the model re-scale every single frame itself on its way in, for a cost nothing
+   * on screen attributes to the size widgets. Only fires for a family whose canvas core
+   * states outright, and only when the
    * triple CHANGES, so it never nags while you drag.
    */
   private checkCanvasAgainstModel(): void {
@@ -1725,10 +1725,9 @@ export class TimelineEditor {
    *
    * A seek costs however many pixels have to be decoded from the last keyframe, and the
    * browser cannot be asked to decode a `<video>` at reduced resolution - that knob simply
-   * does not exist. So a 4K source into an 832x480 output decodes 21x the pixels it needs,
-   * on every scrub step, per layer, and nothing downstream can claw that back. Measured on
-   * exactly that case: two 4K layers spend 85% of wall time inside seeks and the monitor
-   * updates ~6 times a second.
+   * does not exist. So a big source into a small output decodes far more pixels than it
+   * needs on every scrub step, per layer, and nothing downstream can claw that back - at
+   * which point the monitor is limited by the decoder, not by the drawing.
    *
    * This is the cheapest possible fix for it: SAY SO. The user can conform the material
    * and get both a usable preview and a much faster render, but only if anyone tells them

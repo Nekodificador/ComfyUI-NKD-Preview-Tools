@@ -345,7 +345,7 @@ def encode_video(images: torch.Tensor, path: str, spec: dict, fps: float,
                  profile: str | None = None) -> None:
     """h264 / vp9 / ProRes through PyAV.
 
-    **Alpha survives on ProRes 4444 and nowhere else.** Both halves measured, not assumed,
+    **Alpha survives on ProRes 4444 and nowhere else.** Both halves checked,
     by encoding a half-transparent clip and reading it back:
 
     - **ProRes 4444: yes.** Comes back with alpha 0 on one side and 255 on the other.

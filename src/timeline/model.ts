@@ -261,11 +261,9 @@ export function cutStops(max: number, mode: QuantizeMode, withAudio = false,
 /**
  * The canvas a model wants, ONLY where ComfyUI core states it outright.
  *
- * MiniMax H3 alone for now: `adapt_canvas` (comfy_extras/nodes_minimax_h3.py:50) builds a
- * 768-short-edge frame capped at 768*1344 pixels and rounds each axis to 32. Falling off
- * that grid is not cosmetic - the model re-scales every frame itself through PIL, which
- * measured 5.35 s per 60 frames of 1080p. Same honesty rule as QUANTIZE_NATIVE_FPS: a
- * family whose canvas the repo does not document stays out rather than being guessed.
+ * MiniMax H3 alone for now. Falling off its grid is not cosmetic: the model then re-scales
+ * every frame itself, which is slow. Same honesty rule as QUANTIZE_NATIVE_FPS - a family
+ * whose canvas the repo does not document stays out rather than being guessed.
  */
 export const MODEL_CANVAS: Record<string, { multiple: number; shortEdge: number; maxPixels: number }> = {
   "MiniMax H3 (17n+5)": { multiple: 32, shortEdge: 768, maxPixels: 768 * 1344 },
