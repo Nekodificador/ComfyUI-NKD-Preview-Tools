@@ -675,6 +675,8 @@ export class TimelineEditor {
         if (y >= bodyTop) return { kind: "roll", left, right, lane };
       }
     }
+    const edges: { hit: Hit; dist: number; inside: boolean }[] = [];
+    let bodyHit: Hit | null = null;
     // Back to front: the last one drawn is the visible one, so it answers first.
     for (let i = list.length - 1; i >= 0; i--) {
       const c = list[i];
@@ -714,14 +716,34 @@ export class TimelineEditor {
           return { kind: "level", clip: c, lane };
         }
       }
+      // Edges are COLLECTED, not returned on the spot. Two neighbours both reach into the
+      // pixels between them, and returning the first match made the loop order decide:
+      // it runs back to front, so the clip on the RIGHT always won and the tail of the
+      // one on the left was simply unreachable. Nearest edge wins instead, and on a tie
+      // the clip the pointer is actually over does - which is what the eye expects.
+      const offer = (edgeX: number, side: "start" | "end") => edges.push({
+        hit: { kind: "edge", clip: c, side, lane },
+        dist: Math.abs(x - edgeX),
+        inside: x >= a && x <= b,
+      });
+      let matched = false;
       if (Math.abs(x - a) <= HANDLE_PX && x - a < (b - a) / 2 - HANDLE_CORE) {
-        return { kind: "edge", clip: c, side: "start", lane };
+        offer(a, "start");
+        matched = true;
       }
       if (Math.abs(x - b) <= HANDLE_PX && b - x < (b - a) / 2 - HANDLE_CORE) {
-        return { kind: "edge", clip: c, side: "end", lane };
+        offer(b, "end");
+        matched = true;
       }
-      if (x >= a && x <= b) return { kind: "clip", clip: c, lane };
+      // The body only answers once no edge of ANY clip is in play, or a body hit here
+      // would beat a nearer edge belonging to the neighbour.
+      if (!matched && x >= a && x <= b) bodyHit = bodyHit ?? { kind: "clip", clip: c, lane };
     }
+    if (edges.length) {
+      edges.sort((p, q) => p.dist - q.dist || Number(q.inside) - Number(p.inside));
+      return edges[0].hit;
+    }
+    if (bodyHit) return bodyHit;
     return { kind: "none" };
   }
 

@@ -2397,6 +2397,8 @@ class TimelineEditor {
         if (y >= bodyTop) return { kind: "roll", left, right, lane: lane2 };
       }
     }
+    const edges = [];
+    let bodyHit = null;
     for (let i = list.length - 1; i >= 0; i--) {
       const c = list[i];
       const a = this.xOf(c.start);
@@ -2425,14 +2427,27 @@ class TimelineEditor {
           return { kind: "level", clip: c, lane: lane2 };
         }
       }
+      const offer = (edgeX, side) => edges.push({
+        hit: { kind: "edge", clip: c, side, lane: lane2 },
+        dist: Math.abs(x - edgeX),
+        inside: x >= a && x <= b
+      });
+      let matched = false;
       if (Math.abs(x - a) <= HANDLE_PX && x - a < (b - a) / 2 - HANDLE_CORE) {
-        return { kind: "edge", clip: c, side: "start", lane: lane2 };
+        offer(a, "start");
+        matched = true;
       }
       if (Math.abs(x - b) <= HANDLE_PX && b - x < (b - a) / 2 - HANDLE_CORE) {
-        return { kind: "edge", clip: c, side: "end", lane: lane2 };
+        offer(b, "end");
+        matched = true;
       }
-      if (x >= a && x <= b) return { kind: "clip", clip: c, lane: lane2 };
+      if (!matched && x >= a && x <= b) bodyHit = bodyHit ?? { kind: "clip", clip: c, lane: lane2 };
     }
+    if (edges.length) {
+      edges.sort((p, q) => p.dist - q.dist || Number(q.inside) - Number(p.inside));
+      return edges[0].hit;
+    }
+    if (bodyHit) return bodyHit;
     return { kind: "none" };
   }
   localPos(e) {
