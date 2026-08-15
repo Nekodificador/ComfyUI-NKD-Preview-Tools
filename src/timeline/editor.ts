@@ -707,7 +707,14 @@ export class TimelineEditor {
         }
       }
     }
-    const edges: { hit: Hit; dist: number; inside: boolean }[] = [];
+    type Cand = { hit: Hit; dist: number; inside: boolean };
+    // Nearest wins, and a tie goes to the clip the pointer is actually over. At a junction
+    // that is what separates "the tail fade of the one on the left" from "the head fade of
+    // the one on the right" - they sit on the same pixel and differ only by which side.
+    const nearest = (list: Cand[]) => list.sort(
+      (p, q) => p.dist - q.dist || Number(q.inside) - Number(p.inside))[0].hit;
+    const fades: Cand[] = [];
+    const edges: Cand[] = [];
     let bodyHit: Hit | null = null;
     // Back to front: the last one drawn is the visible one, so it answers first.
     for (let i = list.length - 1; i >= 0; i--) {
@@ -728,10 +735,21 @@ export class TimelineEditor {
         const bodyTop = this.laneTop(lane, c.track)
           + (this.laneHeight(lane) > CLIP_HEAD_H + 4 ? CLIP_HEAD_H : 0);
         if (y >= bodyTop && y <= bodyTop + FADE_BAND_H) {
+          // Collected, not returned - same reason as the edges below. Two butted clips put
+          // the left one's fade-OUT grip and the right one's fade-IN grip on the very same
+          // pixel, and the loop runs right to left, so the right clip took both and the
+          // tail fade of the clip before it could not be grabbed at all.
           const fi = this.xOf(c.start + (c.fadeIn ?? 0));
           const fo = this.xOf(c.start + c.length - (c.fadeOut ?? 0));
-          if (Math.abs(x - fi) <= FADE_GRIP) return { kind: "fade", clip: c, side: "in", lane };
-          if (Math.abs(x - fo) <= FADE_GRIP) return { kind: "fade", clip: c, side: "out", lane };
+          const inside = x >= a && x <= b;
+          if (Math.abs(x - fi) <= FADE_GRIP) {
+            fades.push({ hit: { kind: "fade", clip: c, side: "in", lane },
+                         dist: Math.abs(x - fi), inside });
+          }
+          if (Math.abs(x - fo) <= FADE_GRIP) {
+            fades.push({ hit: { kind: "fade", clip: c, side: "out", lane },
+                         dist: Math.abs(x - fo), inside });
+          }
         }
       }
       // The plateau between the two ramps IS the volume line, so it is grabbable like
@@ -772,10 +790,9 @@ export class TimelineEditor {
       // would beat a nearer edge belonging to the neighbour.
       if (!matched && x >= a && x <= b) bodyHit = bodyHit ?? { kind: "clip", clip: c, lane };
     }
-    if (edges.length) {
-      edges.sort((p, q) => p.dist - q.dist || Number(q.inside) - Number(p.inside));
-      return edges[0].hit;
-    }
+    // Fades keep their precedence over edges: a smaller target inside a larger one.
+    if (fades.length) return nearest(fades);
+    if (edges.length) return nearest(edges);
     if (bodyHit) return bodyHit;
     return { kind: "none" };
   }

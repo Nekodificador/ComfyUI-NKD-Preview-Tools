@@ -2401,6 +2401,10 @@ class TimelineEditor {
         }
       }
     }
+    const nearest = (list2) => list2.sort(
+      (p, q) => p.dist - q.dist || Number(q.inside) - Number(p.inside)
+    )[0].hit;
+    const fades = [];
     const edges = [];
     let bodyHit = null;
     for (let i = list.length - 1; i >= 0; i--) {
@@ -2417,8 +2421,21 @@ class TimelineEditor {
         if (y >= bodyTop && y <= bodyTop + FADE_BAND_H) {
           const fi = this.xOf(c.start + (c.fadeIn ?? 0));
           const fo = this.xOf(c.start + c.length - (c.fadeOut ?? 0));
-          if (Math.abs(x - fi) <= FADE_GRIP) return { kind: "fade", clip: c, side: "in", lane: lane2 };
-          if (Math.abs(x - fo) <= FADE_GRIP) return { kind: "fade", clip: c, side: "out", lane: lane2 };
+          const inside = x >= a && x <= b;
+          if (Math.abs(x - fi) <= FADE_GRIP) {
+            fades.push({
+              hit: { kind: "fade", clip: c, side: "in", lane: lane2 },
+              dist: Math.abs(x - fi),
+              inside
+            });
+          }
+          if (Math.abs(x - fo) <= FADE_GRIP) {
+            fades.push({
+              hit: { kind: "fade", clip: c, side: "out", lane: lane2 },
+              dist: Math.abs(x - fo),
+              inside
+            });
+          }
         }
       }
       if (lane2 !== "mask" && b - a > 24) {
@@ -2447,10 +2464,8 @@ class TimelineEditor {
       }
       if (!matched && x >= a && x <= b) bodyHit = bodyHit ?? { kind: "clip", clip: c, lane: lane2 };
     }
-    if (edges.length) {
-      edges.sort((p, q) => p.dist - q.dist || Number(q.inside) - Number(p.inside));
-      return edges[0].hit;
-    }
+    if (fades.length) return nearest(fades);
+    if (edges.length) return nearest(edges);
     if (bodyHit) return bodyHit;
     return { kind: "none" };
   }
