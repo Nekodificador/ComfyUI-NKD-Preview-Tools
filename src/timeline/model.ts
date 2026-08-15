@@ -222,12 +222,8 @@ export const TOKEN_GRIDS: Record<string, { ratio: number; chunk: number; audioMu
   "LTX (8n+1)": { ratio: 8, chunk: 0 },
   "Cosmos (8n+1)": { ratio: 8, chunk: 0 },
   "Mochi (6n+1)": { ratio: 6, chunk: 0 },
-  // H3 cuts only on WHOLE BLOCKS, not on every token, and that is measured rather than
-  // derived. Same seed, one frame apart: a cut at 132 flashes, one at 133 does not. Both
-  // resume the real material at 136 - what changes is whether the token 132-135 ends up
-  // PRESERVED (132) or generated (133). A preserved latent left alone between generated
-  // ones decodes contaminated, because the video VAE's decoder has temporal context.
-  // So the rule is about where the material RESUMES: on a multiple of 17.
+  // H3 accepts a cut only where the preserved material RESUMES on a whole block.
+  // `cutLead` is how many frames before that boundary are also valid. Do not widen it.
   "MiniMax H3 (17n+5)": { ratio: 4, chunk: 17, audioMultiple: 3, cutEvery: 17, cutLead: 3 },
 };
 
@@ -252,12 +248,8 @@ export function cutStops(max: number, mode: QuantizeMode, withAudio = false,
   // among generated neighbours. All four land the material at B either way - the earliest
   // of them simply leaves real pixels under the regenerated token instead of black, which
   // a leaky masked patch can only benefit from.
-  // Only where the material RESUMES. The video VAE's decoder is CAUSAL - it reads
-  // backwards - so a preserved latent is contaminated by generated ones BEFORE it and
-  // never by those after. Measured: a montage's head (real -> generated) comes back at
-  // 1.3/255 against the source, correlation 0.9926, while its tail flashes. So the edge
-  // where material ENDS only wants a token boundary, to avoid handing 3 of its frames to
-  // the `max`; it has no window to satisfy.
+  // The block rule applies only to the edge where material RESUMES. The edge where it
+  // ENDS wants a plain token boundary, so the `max` does not claim frames it should keep.
   if (cutEvery && edge === "resume") {
     const lead = Math.max(0, cutLead ?? 0);
     const out: number[] = [0];

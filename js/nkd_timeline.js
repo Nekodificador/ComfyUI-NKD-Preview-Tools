@@ -68,12 +68,8 @@ const TOKEN_GRIDS = {
   "LTX (8n+1)": { ratio: 8, chunk: 0 },
   "Cosmos (8n+1)": { ratio: 8, chunk: 0 },
   "Mochi (6n+1)": { ratio: 6, chunk: 0 },
-  // H3 cuts only on WHOLE BLOCKS, not on every token, and that is measured rather than
-  // derived. Same seed, one frame apart: a cut at 132 flashes, one at 133 does not. Both
-  // resume the real material at 136 - what changes is whether the token 132-135 ends up
-  // PRESERVED (132) or generated (133). A preserved latent left alone between generated
-  // ones decodes contaminated, because the video VAE's decoder has temporal context.
-  // So the rule is about where the material RESUMES: on a multiple of 17.
+  // H3 accepts a cut only where the preserved material RESUMES on a whole block.
+  // `cutLead` is how many frames before that boundary are also valid. Do not widen it.
   "MiniMax H3 (17n+5)": { ratio: 4, chunk: 17, audioMultiple: 3, cutEvery: 17, cutLead: 3 }
 };
 function cutStops(max, mode, withAudio = false, edge = "resume") {
@@ -5354,7 +5350,7 @@ function readSetting(id, fallback) {
     return fallback;
   }
 }
-console.log("[NKD Timeline] rev 3.7.0");
+console.log("[NKD Timeline] rev 3.8.0");
 const VIEW_PROP = "nkdView";
 function restoreView(node, tl) {
   var _a;

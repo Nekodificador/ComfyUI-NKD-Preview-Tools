@@ -386,25 +386,19 @@ test("materialRange — what 'trim to material' crops to", () => {
 
 test("cutStops — where a latent begins, which is not where a count is valid", () => {
   const H3 = "MiniMax H3 (17n+5)";
-  // WHOLE BLOCKS, not every token - measured, not derived. Same seed one frame apart: a
-  // cut at 132 flashes and one at 133 does not, and both resume the real material at 136.
-  // What differs is whether the token 132-135 is PRESERVED (132) or generated (133): a
-  // preserved latent left alone among generated ones decodes contaminated, because the
-  // video VAE's decoder carries temporal context. So the material has to RESUME on a
-  // multiple of 17, and the cuts that achieve that are 17g-3 .. 17g.
-  // The safe cut is a WINDOW of four, not a point: 133..136 all land the material at 136.
+  // H3 cuts on whole blocks: the material has to resume on a multiple of 17, and the
+  // cuts that achieve that are 17g-3 .. 17g.
+  // A window of four, not a point: 133..136 all land the material at 136.
   assert.deepEqual(M.cutStops(40, H3),
     [0, 14, 15, 16, 17, 31, 32, 33, 34]);
-  // and 132 - the first frame of that token, the one measured to flash - is NOT in it
+  // and 132 - the first frame of that token - is NOT in it
   assert.ok(!M.cutStops(140, H3).includes(132));
   assert.ok([133, 134, 135, 136].every((f) => M.cutStops(140, H3).includes(f)));
   // With sound, the window is intersected with the multiples of 3 (40/24 = 5/3), which
   // still leaves one or two per block rather than one every 51 frames.
   assert.deepEqual(M.cutStops(40, H3, true), [0, 15, 33]);
   assert.ok(M.cutStops(140, H3, true).every((f) => f % 3 === 0));
-  // The edge where material ENDS is a different question, and the answer is the plain
-  // token grid: the VAE's decoder is causal, so nothing after a preserved latent can
-  // contaminate it. Measured - a montage's head comes back at 1.3/255 against the source.
+  // The edge where material ENDS takes the plain token grid instead.
   assert.deepEqual(M.cutStops(40, H3, false, "end"),
     [0, 1, 5, 9, 13, 17, 18, 22, 26, 30, 34, 35, 39]);
   assert.ok(M.cutStops(140, H3, false, "end").includes(132));   // free where the window is not
@@ -432,11 +426,9 @@ test("snapFrameToGrid — Shift lands the playhead on a token boundary", () => {
   assert.equal(M.snapFrameToGrid(120, 100, LTX8), 117);
   // Free mode is a no-op.
   assert.equal(M.snapFrameToGrid(37, 0, "free"), 37);
-  // H3 lands on whole blocks. 133 (the measured good cut) resolves to 136 - the same
-  // place the material resumes either way, and the one that leaves no isolated
-  // preserved token at the seam.
+  // H3 lands on whole blocks: 133 resolves to 136, where the material resumes.
   assert.equal(M.snapFrameToGrid(133, 0, H3), 133);   // already safe: left where it is
-  assert.equal(M.snapFrameToGrid(132, 0, H3), 133);   // the measured bad one moves one on
+  assert.equal(M.snapFrameToGrid(132, 0, H3), 133);   // outside the window: moves one on
   // ...but the same 132 is fine on the edge where material ENDS - a plain extension.
   assert.equal(M.snapFrameToGrid(132, 0, H3, 8, false, "end"), 132);
   assert.equal(M.snapFrameToGrid(130, 0, H3, 8, false, "end"), 128);

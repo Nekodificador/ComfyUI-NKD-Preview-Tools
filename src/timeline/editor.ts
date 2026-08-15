@@ -911,9 +911,8 @@ export class TimelineEditor {
     // block boundary the model accepts. CTRL is the x0.1 fine drag (the pack convention
     // puts that on Shift, but landing on legal frames matters more on a timeline).
     const gain = e.ctrlKey || e.metaKey ? 0.1 : 1;
-    // The right edge of a clip is where material ENDS and generation begins - the head of
-    // a plain extension - and that junction never flashes, so it is not held to the resume
-    // window. Everything else lands where material comes BACK, which is the one that is.
+    // A clip's right edge is where material ENDS; everything else lands where it comes
+    // BACK, and only that one is held to the resume window.
     const edge: CutEdge = d.hit.kind === "edge" && d.hit.side === "end" ? "end" : "resume";
     const toGrid = (f: number) => (e.shiftKey
       ? snapFrameToGrid(f, this.host.getStartFrame(), this.host.getQuantize(),
