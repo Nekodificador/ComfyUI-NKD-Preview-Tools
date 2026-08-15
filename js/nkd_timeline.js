@@ -3494,23 +3494,24 @@ class TimelineEditor {
     ctx.fillStyle = ctx.strokeStyle;
     ctx.lineWidth = 1.4;
     ctx.lineJoin = "round";
+    const gx = cx - 1;
     ctx.beginPath();
-    ctx.moveTo(cx - 4, cy - 2);
-    ctx.lineTo(cx - 2, cy - 2);
-    ctx.lineTo(cx + 1, cy - 5);
-    ctx.lineTo(cx + 1, cy + 5);
-    ctx.lineTo(cx - 2, cy + 2);
-    ctx.lineTo(cx - 4, cy + 2);
+    ctx.moveTo(gx - 4, cy - 2);
+    ctx.lineTo(gx - 2, cy - 2);
+    ctx.lineTo(gx + 1, cy - 5);
+    ctx.lineTo(gx + 1, cy + 5);
+    ctx.lineTo(gx - 2, cy + 2);
+    ctx.lineTo(gx - 4, cy + 2);
     ctx.closePath();
     ctx.fill();
     if (muted) {
       ctx.beginPath();
-      ctx.moveTo(cx - 5, cy + 5);
-      ctx.lineTo(cx + 5, cy - 5);
+      ctx.moveTo(gx - 5, cy + 5);
+      ctx.lineTo(gx + 5, cy - 5);
       ctx.stroke();
     } else {
       ctx.beginPath();
-      ctx.arc(cx + 2, cy, 4, -0.9, 0.9);
+      ctx.arc(gx + 2, cy, 4, -0.9, 0.9);
       ctx.stroke();
     }
     ctx.restore();

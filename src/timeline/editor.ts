@@ -2454,24 +2454,28 @@ export class TimelineEditor {
     ctx.fillStyle = ctx.strokeStyle;
     ctx.lineWidth = 1.4;
     ctx.lineJoin = "round";
+    // The glyph is NOT symmetric about its own origin: the cone runs from -4 to +1 and the
+    // wave arc reaches +6, so drawing it at the centre of the plate leaves it visibly off.
+    // Shifted by half its own span, which is what puts the ink in the middle of the box.
+    const gx = cx - 1;
     // Cone: a small box plus a triangle opening to the right.
     ctx.beginPath();
-    ctx.moveTo(cx - 4, cy - 2);
-    ctx.lineTo(cx - 2, cy - 2);
-    ctx.lineTo(cx + 1, cy - 5);
-    ctx.lineTo(cx + 1, cy + 5);
-    ctx.lineTo(cx - 2, cy + 2);
-    ctx.lineTo(cx - 4, cy + 2);
+    ctx.moveTo(gx - 4, cy - 2);
+    ctx.lineTo(gx - 2, cy - 2);
+    ctx.lineTo(gx + 1, cy - 5);
+    ctx.lineTo(gx + 1, cy + 5);
+    ctx.lineTo(gx - 2, cy + 2);
+    ctx.lineTo(gx - 4, cy + 2);
     ctx.closePath();
     ctx.fill();
     if (muted) {
       ctx.beginPath();               // struck through when silent
-      ctx.moveTo(cx - 5, cy + 5);
-      ctx.lineTo(cx + 5, cy - 5);
+      ctx.moveTo(gx - 5, cy + 5);
+      ctx.lineTo(gx + 5, cy - 5);
       ctx.stroke();
     } else {
       ctx.beginPath();               // one arc is enough at this size
-      ctx.arc(cx + 2, cy, 4, -0.9, 0.9);
+      ctx.arc(gx + 2, cy, 4, -0.9, 0.9);
       ctx.stroke();
     }
     ctx.restore();
