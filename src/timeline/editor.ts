@@ -276,6 +276,7 @@ export class TimelineEditor {
   /** Draw the wave on a logarithmic scale. UI-only, like the mask overlay: it changes
    *  nothing the backend renders, so it stays out of the widget and its cache signature. */
   private waveDb = false;
+  private showClipWave = false;
   /** Scratch canvas for tinting the mask; reused so playback does not allocate. */
   private readonly tintCanvas = document.createElement("canvas");
   /** Last quantise/fps pair we warned about, so the toast fires on CHANGE only. */
@@ -436,6 +437,15 @@ export class TimelineEditor {
         this.waveDb = !this.waveDb;
         this.dbBtn.classList.toggle("on", this.waveDb);
       });
+    // The sound a video clip carries is invisible until it plays — this paints it as a
+    // band under the filmstrip, which is where every NLE puts it. A toggle, not always-on:
+    // the band costs a third of the filmstrip's height on every clip.
+    const waveBtn = mdi("mdi-waveform", "pi-chart-bar",
+      "Show each video clip's soundtrack under its filmstrip", () => {
+        this.showClipWave = !this.showClipWave;
+        waveBtn.classList.toggle("on", this.showClipWave);
+        this.requestRender();
+      });
 
     /**
      * One flex box per family of buttons, with a rule drawn between them by CSS.
@@ -496,6 +506,8 @@ export class TimelineEditor {
         // it over, so it would be a button that does nothing.
         this.audioOnly ? null : this.maskBtn,
         this.dbBtn,
+        // In audio-only mode every clip already IS a waveform.
+        this.audioOnly ? null : waveBtn,
       ),
       group(                                                        // sources
         icon("pi-sync", "Conform: take fps and resolution from the first clip",
@@ -2168,6 +2180,19 @@ export class TimelineEditor {
           src.info?.fps || this.host.getFps());
       } else if (src.info) {
         this.drawFilmstrip(ctx, c, src.ref, src.info, x, body, w, bodyH);
+        // The soundtrack band, under the filmstrip like any NLE. A scrim behind it,
+        // because a wave drawn straight over the stills is unreadable on both counts.
+        // Muted clips keep the band: it is a guide to what is IN the material, and the
+        // per-clip speaker already says whether it plays.
+        if (this.showClipWave && lane === "video" && bodyH > 24) {
+          const wh = Math.max(12, Math.round(bodyH * 0.35));
+          const wy = body + bodyH - wh;
+          ctx.fillStyle = "rgba(6,12,18,0.55)";
+          ctx.fillRect(x, wy, w, wh);
+          // A video clip's trimIn counts SOURCE frames — same rate rule as `soundOnly`.
+          this.drawWaveform(ctx, c, src.ref, x, wy, w, wh,
+            src.info.fps || this.host.getFps());
+        }
       }
     }
     // Diagonal hatch over the body: "the picture here is a hole", the same thing the amber
