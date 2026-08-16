@@ -889,6 +889,21 @@ test("markerFrames deduplicates across lanes", () => {
   assert.deepEqual(M.markerFrames(t), [4, 5, 9]);
 });
 
+test("clipBoundFrames walks the clips in editor order - parity with clip_bound_indices", () => {
+  const t = M.emptyTimeline();
+  // Parse order deliberately NOT start order, and one audioOnly clip in the middle.
+  t.clips.push(clip({ id: "b", start: 40, length: 10 }));
+  t.clips.push(clip({ id: "hole", track: 1, start: 20, length: 5, audioOnly: true }));
+  t.clips.push(clip({ id: "a", start: 0, length: 38 }));
+  // Sorted by (start, track), NOT deduplicated, absolute frames: each bound is its own
+  // Freeze Frames socket. The same fixture as the Python side, plus the audioOnly hole.
+  assert.deepEqual(M.clipBoundFrames(t), [0, 37, 40, 49]);
+  // A single-frame clip: in and out are the SAME frame, and both survive.
+  const one = M.emptyTimeline();
+  one.clips.push(clip({ id: "x", start: 3, length: 1 }));
+  assert.deepEqual(M.clipBoundFrames(one), [3, 3]);
+});
+
 test("expandClipsToSources - show all the material, without unrolling the world", () => {
   const t = M.emptyTimeline();
   // A clip that landed on a guessed length because its source is a tensor, and a music

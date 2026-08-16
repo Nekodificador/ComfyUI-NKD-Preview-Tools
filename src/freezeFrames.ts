@@ -11,7 +11,7 @@
  * every later index down and silently repoint a saved link at a different frame.
  */
 import { app as comfyApp } from "./comfyRuntime";
-import { effectiveCount, markerFrames, parseTimeline } from "./timeline/model";
+import { clipBoundFrames, effectiveCount, markerFrames, parseTimeline } from "./timeline/model";
 
 export const FREEZE_NODE = "NKDFreezeFrames";
 /** `images` and `count`. Never trimmed, never reordered. */
@@ -33,7 +33,7 @@ const num = (v: unknown, d: number): number => {
  * outside it. Duplicated here rather than waited for, because the count has to be known
  * BEFORE the graph runs - that is the whole point of drawing the sockets.
  */
-function markerCountOf(timelineNode: any): number {
+function markerPlanOf(timelineNode: any): { count: number; labels: string[] } {
   const tl = parseTimeline(widgetValue(timelineNode, "timeline"));
   const start = Math.max(0, num(widgetValue(timelineNode, "start_frame"), 0));
   const count = effectiveCount(
@@ -42,7 +42,17 @@ function markerCountOf(timelineNode: any): number {
     // frame grid follows from it.
     String(widgetValue(timelineNode, "model") ?? ""),
     num(widgetValue(timelineNode, "quantize_n"), 8));
-  return markerFrames(tl).filter((f) => f >= start && f < start + count).length;
+  const inRange = (f: number) => f >= start && f < start + count;
+  const labels: string[] = [];
+  // Clip bounds first, refs after - the same order the backend writes the string in, so
+  // label k names the frame socket k actually carries.
+  if (widgetValue(timelineNode, "clip_markers") === true) {
+    clipBoundFrames(tl).forEach((f, i) => {
+      if (inRange(f)) labels.push(`clip ${Math.floor(i / 2) + 1} ${i % 2 ? "out" : "in"}`);
+    });
+  }
+  markerFrames(tl).filter(inRange).forEach((_, i) => labels.push(`ref ${i + 1}`));
+  return { count: labels.length, labels };
 }
 
 export const TIMELINE_NODE = "NKDTimeline";
@@ -81,15 +91,15 @@ function findMarkerSource(node: any, slotName: string, depth = 0): any | null {
  * Null is not zero: a `frames` string coming from somewhere unreadable only has a value at
  * execution time, and guessing would tear down sockets the user had wired.
  */
-function wantedFrames(node: any): number | null {
+function wantedFrames(node: any): { count: number; labels: string[] | null } | null {
   const slot = node.inputs?.find((i: any) => i.name === "frames");
   if (slot?.link != null) {
     const timeline = findMarkerSource(node, "frames");
-    return timeline ? markerCountOf(timeline) : null;
+    return timeline ? markerPlanOf(timeline) : null;
   }
   const text = widgetValue(node, "frames");
   if (typeof text !== "string") return null;
-  return (text.match(/-?\d+/g) ?? []).length;
+  return { count: (text.match(/-?\d+/g) ?? []).length, labels: null };
 }
 
 /** Highest frame socket that is actually wired, so a resync can never cut a live link. */
@@ -103,18 +113,27 @@ function linkedDepth(node: any): number {
 
 export function syncFreezeOutputs(node: any): void {
   if (!node?.outputs) return;
-  const n = wantedFrames(node);
-  if (n === null) return;
+  const plan = wantedFrames(node);
+  if (plan === null) return;
   // At least one frame socket even with nothing marked yet: a node with no visible output
   // looks broken.
-  const want = FIXED_OUTPUTS + Math.min(MAX_FRAME_OUTPUTS, Math.max(1, n));
+  const want = FIXED_OUTPUTS + Math.min(MAX_FRAME_OUTPUTS, Math.max(1, plan.count));
   const target = Math.max(want, linkedDepth(node));
-  if (node.outputs.length === target) return;
+  let dirty = node.outputs.length !== target;
   while (node.outputs.length > target) node.removeOutput(node.outputs.length - 1);
   while (node.outputs.length < target) {
     node.addOutput(`frame_${node.outputs.length - FIXED_OUTPUTS + 1}`, "IMAGE");
   }
-  node.setDirtyCanvas?.(true, true);
+  // Socket labels from the marker plan - "clip 1 in", "ref 2" - so the boundary frames
+  // read as what they are without counting sockets against the timeline. The NAME stays
+  // `frame_N` (links and the backend tuple go by slot, never by label), and a socket past
+  // the plan (kept alive by linkedDepth, or a hand-typed frames string) falls back to it.
+  node.outputs.forEach((o: any, i: number) => {
+    if (i < FIXED_OUTPUTS || !o) return;
+    const label = plan.labels?.[i - FIXED_OUTPUTS];
+    if ((o.label ?? undefined) !== label) { o.label = label; dirty = true; }
+  });
+  if (dirty) node.setDirtyCanvas?.(true, true);
 }
 
 /** Re-sync every Freeze Frames node in the graph. Called when a timeline commits, so

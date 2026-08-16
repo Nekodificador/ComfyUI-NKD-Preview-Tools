@@ -595,6 +595,22 @@ export function markerFrames(t: Timeline): number[] {
   return [...out].sort((a, b) => a - b);
 }
 
+/**
+ * First and last frame of every picture clip, as ABSOLUTE timeline frames, clip by clip
+ * in (start, track) order. Mirror of `clip_bound_indices` in nkd_timeline.py - NOT
+ * deduplicated, because each bound is its own Freeze Frames socket. `audioOnly` clips
+ * contribute no picture, so they contribute no bounds either.
+ */
+export function clipBoundFrames(t: Timeline): number[] {
+  const out: number[] = [];
+  const clips = [...t.clips].sort((a, b) => a.start - b.start || a.track - b.track);
+  for (const c of clips) {
+    if (c.audioOnly) continue;
+    out.push(c.start, c.start + c.length - 1);
+  }
+  return out;
+}
+
 // ── Defensive parsing ─────────────────────────────────────────────────────────
 
 function parseClipList(raw: any): Clip[] {

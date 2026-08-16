@@ -307,6 +307,15 @@ function markerFrames(t) {
   }
   return [...out].sort((a, b) => a - b);
 }
+function clipBoundFrames(t) {
+  const out = [];
+  const clips = [...t.clips].sort((a, b) => a.start - b.start || a.track - b.track);
+  for (const c of clips) {
+    if (c.audioOnly) continue;
+    out.push(c.start, c.start + c.length - 1);
+  }
+  return out;
+}
 function parseClipList(raw) {
   const out = [];
   if (!Array.isArray(raw)) return out;
@@ -1549,6 +1558,7 @@ class TimelineEditor {
     /** Draw the wave on a logarithmic scale. UI-only, like the mask overlay: it changes
      *  nothing the backend renders, so it stays out of the widget and its cache signature. */
     __publicField(this, "waveDb", false);
+    __publicField(this, "showClipWave", false);
     /** Scratch canvas for tinting the mask; reused so playback does not allocate. */
     __publicField(this, "tintCanvas", document.createElement("canvas"));
     /** Last quantise/fps pair we warned about, so the toast fires on CHANGE only. */
@@ -2142,6 +2152,16 @@ class TimelineEditor {
         this.dbBtn.classList.toggle("on", this.waveDb);
       }
     );
+    const waveBtn = mdi(
+      "mdi-waveform",
+      "pi-chart-bar",
+      "Show each video clip's soundtrack under its filmstrip",
+      () => {
+        this.showClipWave = !this.showClipWave;
+        waveBtn.classList.toggle("on", this.showClipWave);
+        this.requestRender();
+      }
+    );
     const group = (...els) => {
       const g = document.createElement("div");
       g.className = "nkd-tl-grp";
@@ -2218,7 +2238,9 @@ class TimelineEditor {
         // The mask overlay is a picture control: with no monitor there is nothing to lay
         // it over, so it would be a button that does nothing.
         this.audioOnly ? null : this.maskBtn,
-        this.dbBtn
+        this.dbBtn,
+        // In audio-only mode every clip already IS a waveform.
+        this.audioOnly ? null : waveBtn
       ),
       group(
         // sources
@@ -3252,6 +3274,22 @@ class TimelineEditor {
         );
       } else if (src.info) {
         this.drawFilmstrip(ctx, c, src.ref, src.info, x, body, w, bodyH);
+        if (this.showClipWave && lane2 === "video" && bodyH > 24) {
+          const wh = Math.max(12, Math.round(bodyH * 0.35));
+          const wy = body + bodyH - wh;
+          ctx.fillStyle = "rgba(6,12,18,0.55)";
+          ctx.fillRect(x, wy, w, wh);
+          this.drawWaveform(
+            ctx,
+            c,
+            src.ref,
+            x,
+            wy,
+            w,
+            wh,
+            src.info.fps || this.host.getFps()
+          );
+        }
       }
     }
     if (soundOnly) this.drawHatch(ctx, x, y, w, h);
@@ -3920,7 +3958,7 @@ const num = (v, d) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
 };
-function markerCountOf(timelineNode) {
+function markerPlanOf(timelineNode) {
   const tl = parseTimeline(widgetValue(timelineNode, "timeline"));
   const start = Math.max(0, num(widgetValue(timelineNode, "start_frame"), 0));
   const count = effectiveCount(
@@ -3932,7 +3970,15 @@ function markerCountOf(timelineNode) {
     String(widgetValue(timelineNode, "model") ?? ""),
     num(widgetValue(timelineNode, "quantize_n"), 8)
   );
-  return markerFrames(tl).filter((f) => f >= start && f < start + count).length;
+  const inRange = (f) => f >= start && f < start + count;
+  const labels = [];
+  if (widgetValue(timelineNode, "clip_markers") === true) {
+    clipBoundFrames(tl).forEach((f, i) => {
+      if (inRange(f)) labels.push(`clip ${Math.floor(i / 2) + 1} ${i % 2 ? "out" : "in"}`);
+    });
+  }
+  markerFrames(tl).filter(inRange).forEach((_, i) => labels.push(`ref ${i + 1}`));
+  return { count: labels.length, labels };
 }
 const TIMELINE_NODE = "NKDTimeline";
 function findMarkerSource(node, slotName, depth = 0) {
@@ -3958,11 +4004,11 @@ function wantedFrames(node) {
   const slot = (_a = node.inputs) == null ? void 0 : _a.find((i) => i.name === "frames");
   if ((slot == null ? void 0 : slot.link) != null) {
     const timeline = findMarkerSource(node, "frames");
-    return timeline ? markerCountOf(timeline) : null;
+    return timeline ? markerPlanOf(timeline) : null;
   }
   const text = widgetValue(node, "frames");
   if (typeof text !== "string") return null;
-  return (text.match(/-?\d+/g) ?? []).length;
+  return { count: (text.match(/-?\d+/g) ?? []).length, labels: null };
 }
 function linkedDepth(node) {
   var _a;
@@ -3976,16 +4022,25 @@ function linkedDepth(node) {
 function syncFreezeOutputs(node) {
   var _a;
   if (!(node == null ? void 0 : node.outputs)) return;
-  const n = wantedFrames(node);
-  if (n === null) return;
-  const want = FIXED_OUTPUTS + Math.min(MAX_FRAME_OUTPUTS, Math.max(1, n));
+  const plan = wantedFrames(node);
+  if (plan === null) return;
+  const want = FIXED_OUTPUTS + Math.min(MAX_FRAME_OUTPUTS, Math.max(1, plan.count));
   const target = Math.max(want, linkedDepth(node));
-  if (node.outputs.length === target) return;
+  let dirty = node.outputs.length !== target;
   while (node.outputs.length > target) node.removeOutput(node.outputs.length - 1);
   while (node.outputs.length < target) {
     node.addOutput(`frame_${node.outputs.length - FIXED_OUTPUTS + 1}`, "IMAGE");
   }
-  (_a = node.setDirtyCanvas) == null ? void 0 : _a.call(node, true, true);
+  node.outputs.forEach((o, i) => {
+    var _a2;
+    if (i < FIXED_OUTPUTS || !o) return;
+    const label = (_a2 = plan.labels) == null ? void 0 : _a2[i - FIXED_OUTPUTS];
+    if ((o.label ?? void 0) !== label) {
+      o.label = label;
+      dirty = true;
+    }
+  });
+  if (dirty) (_a = node.setDirtyCanvas) == null ? void 0 : _a.call(node, true, true);
 }
 function syncAllFreezeNodes() {
   var _a;
@@ -5730,6 +5785,15 @@ function registerTimelineNode(v) {
             (_a2 = w.callback) == null ? void 0 : _a2.call(w, snapped);
           }
         };
+        const clipMarkersW = findW(node, "clip_markers");
+        if (clipMarkersW) {
+          const origClipMarkersCb = clipMarkersW.callback;
+          clipMarkersW.callback = (...args) => {
+            const out = origClipMarkersCb == null ? void 0 : origClipMarkersCb.apply(clipMarkersW, args);
+            syncAllFreezeNodes();
+            return out;
+          };
+        }
         requestAnimationFrame(() => {
           measured = editor.root.offsetHeight || 0;
           syncQuantumStep();

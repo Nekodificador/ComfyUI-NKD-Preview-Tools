@@ -584,6 +584,18 @@ comfyApp.registerExtension({
         }
       };
 
+      // Toggling the clip-bounds markers changes how many sockets a downstream Freeze
+      // Frames needs, and a plain widget flip never passes through host.commit().
+      const clipMarkersW = findW(node, "clip_markers");
+      if (clipMarkersW) {
+        const origClipMarkersCb = clipMarkersW.callback;
+        clipMarkersW.callback = (...args: any[]) => {
+          const out = origClipMarkersCb?.apply(clipMarkersW, args);
+          syncAllFreezeNodes();
+          return out;
+        };
+      }
+
       requestAnimationFrame(() => {
         measured = editor.root.offsetHeight || 0;
         syncQuantumStep();

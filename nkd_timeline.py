@@ -353,6 +353,28 @@ def marker_indices(lanes: list[list[dict]], start_frame: int, count: int) -> lis
     return sorted(i for i in out if 0 <= i < count)
 
 
+def clip_bound_indices(clips: list[dict], start_frame: int, count: int) -> list[int]:
+    """First and last frame of every picture clip, as indices into the rendered batch.
+
+    Ordered clip by clip - (start, track), the reading order of the editor - and NOT
+    deduplicated: `clip 1 out` and `clip 2 in` are different sockets on Freeze Frames
+    even when two stacked clips share a frame. `audioOnly` clips are skipped: their
+    picture is a hole, so there is no frame to freeze.
+
+    Same range rule as `marker_indices`: a bound outside the rendered window is dropped,
+    not clamped - clamping would freeze a frame the clip does not actually show.
+    """
+    out = []
+    for c in sorted(clips, key=lambda c: (c["start"], c.get("track", 0))):
+        if c.get("audioOnly"):
+            continue
+        for f in (c["start"], c["start"] + c["length"] - 1):
+            i = f - start_frame
+            if 0 <= i < count:
+                out.append(i)
+    return out
+
+
 def timeline_span(*lanes: list[dict]) -> int:
     """Last frame occupied by any lane."""
     ends = [c["start"] + c["length"] for lane in lanes for c in lane]
@@ -1006,6 +1028,15 @@ class NKDTimeline(io.ComfyNode):
                              tooltip="0 = up to the end of the last clip."),
                 io.Boolean.Input("clip_audio", default=True,
                                  tooltip="Include the videos' own audio in the mix."),
+                # Appended last, as the rule says: `widgets_values` is positional.
+                io.Boolean.Input("clip_markers", default=False,
+                                 display_name="clip in/out markers",
+                                 tooltip="Also emit the first and last frame of every "
+                                         "picture clip on the 'markers' output, AHEAD of "
+                                         "the hand-placed markers: clip 1 in, clip 1 out, "
+                                         "clip 2 in… NKD Freeze Frames then freezes each "
+                                         "cut's boundary frames without marking them by "
+                                         "hand."),
             ],
             # ORDER DELIBERATELY REBUILT (Neko, 2026-08-09) - a ONE-OFF break.
             #
@@ -1071,7 +1102,8 @@ class NKDTimeline(io.ComfyNode):
     def execute(cls, media: io.Autogrow.Type, timeline: str, import_mode: str,
                 aspect_ratio: str, width: int, height: int, megapixels: float,
                 size_multiple: int, fit: str, fps: float, model: str, quantize_n: int,
-                start_frame: int, frame_count: int, clip_audio: bool) -> io.NodeOutput:
+                start_frame: int, frame_count: int, clip_audio: bool,
+                clip_markers: bool = False) -> io.NodeOutput:
         del import_mode   # placement happens in the editor; the backend reads the result
         sources, auds = build_sources(media)
 
@@ -1244,8 +1276,13 @@ class NKDTimeline(io.ComfyNode):
         # moment a model grid is in play.
         duration = count / fps
 
-        markers = ", ".join(str(i) for i in marker_indices(
-            [clips, maskclips, auclips], start_frame, count))
+        # Clip bounds FIRST, hand-placed markers after: the bounds are a stable prefix
+        # (clip 1 in, clip 1 out, clip 2 in…) so adding a manual marker never repoints
+        # a Freeze Frames socket that was wired to a cut boundary.
+        marker_list = (clip_bound_indices(clips, start_frame, count)
+                       if clip_markers else [])
+        marker_list += marker_indices([clips, maskclips, auclips], start_frame, count)
+        markers = ", ".join(str(i) for i in marker_list)
 
         # Tell the editor what was ACTUALLY rendered.
         #

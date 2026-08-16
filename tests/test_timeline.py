@@ -27,7 +27,8 @@ from nkd_timeline import (  # noqa: E402
     blend_pixels, resolve_resolution,
     build_sources, classify,
     AudioEnv, audio_env, clip_gain_ramp,
-    fit_frames, gather_window, marker_indices, mix_audio, parse_frame_list,
+    clip_bound_indices, fit_frames, gather_window, marker_indices, mix_audio,
+    parse_frame_list,
     parse_timeline, quantize_count, quantize_stops,
     source_frame, source_meta, timeline_span, track_blend,
 )
@@ -599,6 +600,26 @@ def test_marker_indices_are_relative_to_the_rendered_batch():
 
 def test_marker_indices_survive_a_timeline_with_no_markers():
     assert marker_indices([[{"src": "a", "start": 0, "length": 5}]], 0, 5) == []
+
+
+def test_clip_bound_indices_walk_the_clips_in_editor_order():
+    """First/last frame per picture clip, clip by clip, NOT deduplicated - each bound is
+    its own Freeze Frames socket. Mirrors clipBoundFrames in model.ts."""
+    clips = [
+        {"src": "b", "start": 40, "length": 10, "track": 0},
+        {"src": "a", "start": 0, "length": 38, "track": 0},
+    ]
+    # Sorted by (start, track): clip "a" first even though it parses second.
+    assert clip_bound_indices(clips, 0, 100) == [0, 37, 40, 49]
+    # Relative to the rendered batch, out-of-range bounds DROPPED, not clamped.
+    assert clip_bound_indices(clips, 10, 100) == [27, 30, 39]
+    # An audioOnly clip contributes no picture, so no bounds either.
+    clips[0]["audioOnly"] = True
+    assert clip_bound_indices(clips, 0, 100) == [0, 37]
+    # Adjacent cuts share nothing but still emit all four bounds (out 4, in 5).
+    cut = [{"src": "a", "start": 0, "length": 5, "track": 0},
+           {"src": "a", "start": 5, "length": 5, "track": 0}]
+    assert clip_bound_indices(cut, 0, 10) == [0, 4, 5, 9]
 
 
 def test_parse_frame_list():
