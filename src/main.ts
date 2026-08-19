@@ -76,7 +76,10 @@ function readSetting(id: string, fallback: string): string {
 }
 // A console version stamp: a cached bundle is the number one confounder when debugging
 // frontend behaviour that "should" already be fixed.
-console.log("[NKD Timeline] rev 3.8.1");
+// Bump WITH every release: this stamp is how a stale cached bundle gets caught in the
+// user's console, and it spent 3.8.1→3.10.1 frozen — exactly the confusion it exists
+// to prevent.
+console.log("[NKD Timeline] rev 3.10.2");
 
 // ── Host: everything the editor needs to know about the node ──────────────────
 

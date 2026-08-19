@@ -2718,7 +2718,13 @@ export class TimelineEditor {
     if (!src) return;
     const srcFps = src.info?.fps ?? this.host.getFps();
     const at = sourceFrame(top, this.playhead, srcFps, this.host.getFps()) / (srcFps || 1);
-    const img = this.pool.pictureAt(src.ref, at, false);
+    // Same playing flag as the picture layers. Passing `false` here made the overlay
+    // scrub-seek every frame DURING playback — and when the mask clip points at the same
+    // file as a picture clip they share one pooled <video>, so playback kept playing it
+    // forward while the overlay dragged it back with a quantised seek per frame: the
+    // "steps frame to frame" stutter, measured live (seeks to a repeated rounded target
+    // while currentTime advanced past it).
+    const img = this.pool.pictureAt(src.ref, at, this.transport.rate === 1);
     if (!img) return;
     const iw = (img as HTMLVideoElement).videoWidth || (img as HTMLCanvasElement).width;
     const ih = (img as HTMLVideoElement).videoHeight || (img as HTMLCanvasElement).height;

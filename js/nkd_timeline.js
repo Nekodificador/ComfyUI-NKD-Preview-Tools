@@ -3723,7 +3723,7 @@ class TimelineEditor {
     if (!src) return;
     const srcFps = ((_a = src.info) == null ? void 0 : _a.fps) ?? this.host.getFps();
     const at = sourceFrame(top, this.playhead, srcFps, this.host.getFps()) / (srcFps || 1);
-    const img = this.pool.pictureAt(src.ref, at, false);
+    const img = this.pool.pictureAt(src.ref, at, this.transport.rate === 1);
     if (!img) return;
     const iw = img.videoWidth || img.width;
     const ih = img.videoHeight || img.height;
@@ -5717,7 +5717,7 @@ function readSetting(id, fallback) {
     return fallback;
   }
 }
-console.log("[NKD Timeline] rev 3.8.1");
+console.log("[NKD Timeline] rev 3.10.2");
 const VIEW_PROP = "nkdView";
 function restoreView(node, tl) {
   var _a;
