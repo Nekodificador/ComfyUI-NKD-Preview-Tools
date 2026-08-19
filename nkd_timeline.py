@@ -1109,17 +1109,18 @@ class NKDTimeline(io.ComfyNode):
                 # workflows: sockets wire by index, width…markers shifted by 2). Same-day
                 # outputs, grouped with the sound they describe.
                 io.Mask.Output(display_name="audio_mask",
-                               tooltip="WHITE on the frames covered by a MUTED clip — the "
-                                       "stretches you silenced so a model can regenerate "
-                                       "their sound. One value per frame: feeds the audio "
-                                       "mask of 😺NKD AV Latent / 😺NKD Audio Mask "
-                                       "directly. For MVEx Audio Mask To Latent use "
-                                       "audio_ranges instead."),
+                               tooltip="WHITE where the rendered soundtrack is silent: "
+                                       "frames covered by a MUTED clip, and frames no "
+                                       "clip gives sound to at all — silence is a region "
+                                       "to generate, like a picture gap in coverage. One "
+                                       "value per frame: feeds the audio mask of 😺NKD "
+                                       "AV Latent / 😺NKD Audio Mask directly. For MVEx "
+                                       "Audio Mask To Latent use audio_ranges instead."),
                 io.String.Output(display_name="audio_ranges",
-                                 tooltip="The same muted stretches as in,out second pairs "
-                                         "(e.g. 0.292,0.833), relative to the rendered "
-                                         "range — the exact syntax MVEx Audio Mask To "
-                                         "Latent's time_ranges input parses."),
+                                 tooltip="The same silent stretches as in,out second "
+                                         "pairs (e.g. 0.292,0.833), relative to the "
+                                         "rendered range — the exact syntax MVEx Audio "
+                                         "Mask To Latent's time_ranges input parses."),
                 # No VIDEO output. It only ever got split back into components downstream,
                 # and core's own Create Video makes one from `images` + `audio` in one node
                 # for the rare case that wants the container.
@@ -1240,6 +1241,11 @@ class NKDTimeline(io.ComfyNode):
         # no finer hook to report from. Ticked at the TOP of each body so the count still
         # lands on the total when a clip falls outside the range and is skipped.
         pbar = comfy.utils.ProgressBar(len(clips) + len(maskclips) + len(auclips))
+        # 1.0 where some clip actually contributes SOUND to the mix. Marked at the queue
+        # sites, so it honours everything they already decide: clip_audio off, a video
+        # with no audio track, a muted clip. The audio mask is its complement (plus the
+        # muted spans): silence is a region to generate, same thesis as `coverage`.
+        heard = torch.zeros(count, dtype=torch.float32)
         for clip in clips:  # already sorted by track, so higher ones overwrite
             pbar.update(1)
             a = max(clip["start"], start_frame)
@@ -1256,8 +1262,11 @@ class NKDTimeline(io.ComfyNode):
             # rides along. That is "cut the middle out, refill it, keep the sound".
             if clip.get("audioOnly"):
                 if clip_audio and audio is not None and not clip.get("muted"):
-                    sample_rate = _queue_clip_audio(audio_segments, clip, kind, obj,
-                                                    a, b, fps, audio, start_frame)                         or sample_rate
+                    got = _queue_clip_audio(audio_segments, clip, kind, obj,
+                                            a, b, fps, audio, start_frame)
+                    if got:
+                        heard[lo_i:hi_i] = 1.0
+                    sample_rate = got or sample_rate
                 continue
             fitted = fit_frames(_to_rgb(frames), width, height, fit)
             mode = track_blend(tl["tracks"], clip["track"])
@@ -1273,8 +1282,11 @@ class NKDTimeline(io.ComfyNode):
             cover_rows[lo_i:hi_i] = 1.0
 
             if clip_audio and audio is not None and not clip.get("muted"):
-                sample_rate = _queue_clip_audio(audio_segments, clip, kind, obj,
-                                                a, b, fps, audio, start_frame) or sample_rate
+                got = _queue_clip_audio(audio_segments, clip, kind, obj,
+                                        a, b, fps, audio, start_frame)
+                if got:
+                    heard[lo_i:hi_i] = 1.0
+                sample_rate = got or sample_rate
 
         # Black out the frames no clip reached. This is what makes `torch.empty` above safe,
         # so it MUST stay ahead of every read of `out` - the mask lane and the audio mix do
@@ -1312,6 +1324,7 @@ class NKDTimeline(io.ComfyNode):
             audio_segments.append((src["waveform"][0], sr,
                                    int(round((a - start_frame) / fps * sr)), trim,
                                    audio_env(ac, a, fps, sr)))
+            heard[a - start_frame:b - start_frame] = 1.0
 
         sample_rate = sample_rate or 44100
         total_samples = int(round(count / fps * sample_rate))
@@ -1382,10 +1395,16 @@ class NKDTimeline(io.ComfyNode):
         else:
             generate = torch.maximum(mask_out, gap_rows.view(count, 1, 1))
 
-        # The mute gesture, exported: white per frame for our own AV nodes (batch = frames,
-        # a stride-0 view like coverage), and as second pairs for MVEx Audio Mask To
-        # Latent's time_ranges. Both lanes with sound count; the mask lane has none.
-        mrows = muted_rows([clips, auclips], start_frame, count)
+        # Where the rendered soundtrack is SILENT, exported: white per frame for our own
+        # AV nodes (batch = frames, a stride-0 view like coverage), and as second pairs
+        # for MVEx Audio Mask To Latent's time_ranges. Silence = no clip contributed
+        # sound there (`heard`) OR a muted clip covers it — the union keeps the mute
+        # gesture white even when an unmuted clip still sounds underneath. A stretch with
+        # no material has no sound either, so it is white here for the same reason it is
+        # white in `coverage` (Neko, 2026-08-19: black gaps in the audio mask read as
+        # "keep this silence").
+        mrows = torch.maximum(muted_rows([clips, auclips], start_frame, count),
+                              1.0 - heard)
         audio_mask = mrows.view(count, 1, 1).expand(count, height, width)
         audio_ranges = rows_to_ranges(mrows, fps)
 

@@ -884,13 +884,16 @@ def test_muted_zones_export_as_mask_and_ranges():
     assert rows_to_ranges(two, 10.0) == "0.400,0.800"                  # first clip fell out
     assert rows_to_ranges(muted_rows([[]], 0, 5), 10.0) == ""          # nothing muted
 
-    # Through the node: an even count of parseable seconds, and a mask that costs nothing.
+    # Through the node. White = the rendered soundtrack is SILENT there: a muted clip OR
+    # no clip giving sound at all — a gap has no sound either, so it is white for the
+    # same reason it is white in `coverage`.
     seq = torch.full((10, 4, 4, 3), 0.5)
     voice = {"waveform": torch.ones((1, 1, 44100)), "sample_rate": 44100}
     tl = _dumps({
         "clips": [{"src": "media_0", "track": 0, "start": 0, "trimIn": 0, "length": 10}],
         "masks": [],
-        "audio": [{"src": "media_1", "start": 2, "trimIn": 0, "length": 3, "muted": True}],
+        "audio": [{"src": "media_1", "start": 2, "trimIn": 0, "length": 3, "muted": True},
+                  {"src": "media_1", "start": 5, "trimIn": 0, "length": 5}],
         "ui": {"playhead": 0}})
     r = NKDTimeline.execute(
         media={"media_0": seq, "media_1": voice}, timeline=tl, import_mode="stack", fps=24.0,
@@ -900,11 +903,12 @@ def test_muted_zones_export_as_mask_and_ranges():
     o = outs(r)
     am, ranges = o["audio_mask"], o["audio_ranges"]
     assert am.shape == (10, 4, 4) and am.stride() == (1, 0, 0)         # view, not a buffer
-    assert [float(am[f].max()) for f in (0, 1, 2, 4, 5)] == [0, 0, 1, 1, 0]
+    # 0..2 silent gap, 2..5 muted, 5..10 sounding: one white run, then black.
+    assert [float(am[f].max()) for f in (0, 2, 4, 5, 9)] == [1, 1, 1, 0, 0]
     vals = [float(v) for v in ranges.split(",")]
     assert len(vals) % 2 == 0                                          # MVEx-parseable
-    assert vals == [round(2 / 24, 3), round(5 / 24, 3)], vals
-    # An unmuted timeline exports silence about it: black mask, empty string.
+    assert vals == [0.0, round(5 / 24, 3)], vals
+    # No sound anywhere (image only, clip_audio off): everything is silence to regenerate.
     r2 = NKDTimeline.execute(
         media={"media_0": seq}, timeline=_dumps({
             "clips": [{"src": "media_0", "track": 0, "start": 0, "trimIn": 0,
@@ -913,7 +917,8 @@ def test_muted_zones_export_as_mask_and_ranges():
         fit="stretch", aspect_ratio="Custom", megapixels=1.0, size_multiple=16,
         model="free", quantize_n=8, clip_audio=False)
     o2 = outs(r2)
-    assert float(o2["audio_mask"].max()) == 0.0 and o2["audio_ranges"] == ""
+    assert float(o2["audio_mask"].min()) == 1.0
+    assert o2["audio_ranges"] == f"0.000,{10 / 24:.3f}"
 
 
 if __name__ == "__main__":

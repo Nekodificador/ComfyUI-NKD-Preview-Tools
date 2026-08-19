@@ -241,11 +241,12 @@ class NKDAudioTimeline(io.ComfyNode):
                 # Slotted next to `audio` on 2026-08-19 (Neko's call, BREAKING: sockets
                 # wire by index, duration/frame_count/fps shifted by 1).
                 io.String.Output(display_name="audio_ranges",
-                                 tooltip="The MUTED stretches as in,out second pairs "
-                                         "(e.g. 0.292,0.833), relative to the rendered "
-                                         "range — the exact syntax MVEx Audio Mask To "
-                                         "Latent's time_ranges input parses. Mute a clip "
-                                         "to mark its sound for regeneration."),
+                                 tooltip="The SILENT stretches — muted clips and gaps no "
+                                         "clip covers — as in,out second pairs (e.g. "
+                                         "0.292,0.833), relative to the rendered range: "
+                                         "the exact syntax MVEx Audio Mask To Latent's "
+                                         "time_ranges input parses. Mute a clip to mark "
+                                         "its sound for regeneration."),
                 io.Float.Output(display_name="duration"),
                 io.Int.Output(display_name="frame_count"),
                 io.Float.Output(display_name="fps"),
@@ -276,9 +277,19 @@ class NKDAudioTimeline(io.ComfyNode):
 
         audio, count = render_audio(tl, sources, fps, max(0, int(start_frame)),
                                     max(0, int(frame_count)))
-        ranges = rows_to_ranges(muted_rows([tl["audio"]], max(0, int(start_frame)),
-                                           count), fps)
-        return io.NodeOutput(audio, ranges, count / fps, count, fps)
+        # Silence = muted spans UNION the frames no unmuted clip covers, same rule as the
+        # video Timeline's audio_mask: a gap has no sound either, so it is white too.
+        sf = max(0, int(start_frame))
+        heard = torch.zeros(count)
+        for ac in tl["audio"]:
+            if ac.get("muted") or ac["src"] not in sources:
+                continue
+            a = max(ac["start"], sf) - sf
+            b = min(ac["start"] + ac["length"], sf + count) - sf
+            if b > a:
+                heard[a:b] = 1.0
+        rows = torch.maximum(muted_rows([tl["audio"]], sf, count), 1.0 - heard)
+        return io.NodeOutput(audio, rows_to_ranges(rows, fps), count / fps, count, fps)
 
 
 def demo() -> None:
