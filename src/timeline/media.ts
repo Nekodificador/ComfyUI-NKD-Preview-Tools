@@ -191,6 +191,12 @@ type Pooled = {
   good: HTMLCanvasElement;
   hasGood: boolean;
   wantTime: number;
+  /** The target the in-flight seek was SENT with. The `seeked` retry compares against
+   *  this, never against `currentTime`: on a PLAYING element currentTime has always
+   *  advanced past the target by the time the event handler runs, so comparing against
+   *  it re-seeks backwards forever — a self-sustaining loop that pinned playback to
+   *  ~3 fps (one real step per drift correction) and survived renderer switches. */
+  sentTime: number;
   seeking: boolean;
   /** Watchdog for a seek that never reports back. Without it one lost `seeked` wedges the
    *  element for the rest of the session. */
@@ -230,7 +236,7 @@ export class VideoPool {
     el.crossOrigin = "anonymous";
     const entry: Pooled = {
       el, good: document.createElement("canvas"), hasGood: false, wantTime: -1,
-      seeking: false, guard: 0,
+      sentTime: -1, seeking: false, guard: 0,
     };
     // Metadata is what makes the element seekable. Any time requested before this point was
     // parked rather than applied, so apply it now.
@@ -239,8 +245,12 @@ export class VideoPool {
       window.clearTimeout(entry.guard);
       entry.seeking = false;
       captureGood(entry);
-      // Mientras buscábamos pudo pedirse otro instante: atenderlo ahora.
-      if (entry.wantTime >= 0 && Math.abs(entry.wantTime - el.currentTime) > 1e-3) {
+      // Mientras buscábamos pudo pedirse OTRO instante: atenderlo ahora. Comparado
+      // contra el objetivo ENVIADO, jamás contra currentTime — en un elemento
+      // reproduciéndose currentTime ya pasó el objetivo cuando este handler corre, y
+      // comparar contra él re-seekea hacia atrás en bucle infinito (medido: 158 seeks
+      // en 3 s desde esta línea, imagen a ~3 fps).
+      if (entry.wantTime >= 0 && Math.abs(entry.wantTime - entry.sentTime) > 1e-3) {
         this.applySeek(entry);
       }
     });
@@ -280,6 +290,7 @@ export class VideoPool {
     p.seeking = true;
     try {
       p.el.currentTime = p.wantTime;
+      p.sentTime = p.wantTime;
     } catch {
       p.seeking = false;
       return;

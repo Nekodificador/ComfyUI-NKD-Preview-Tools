@@ -953,6 +953,7 @@ class VideoPool {
       good: document.createElement("canvas"),
       hasGood: false,
       wantTime: -1,
+      sentTime: -1,
       seeking: false,
       guard: 0
     };
@@ -961,7 +962,7 @@ class VideoPool {
       window.clearTimeout(entry.guard);
       entry.seeking = false;
       captureGood(entry);
-      if (entry.wantTime >= 0 && Math.abs(entry.wantTime - el2.currentTime) > 1e-3) {
+      if (entry.wantTime >= 0 && Math.abs(entry.wantTime - entry.sentTime) > 1e-3) {
         this.applySeek(entry);
       }
     });
@@ -1000,6 +1001,7 @@ class VideoPool {
     p.seeking = true;
     try {
       p.el.currentTime = p.wantTime;
+      p.sentTime = p.wantTime;
     } catch {
       p.seeking = false;
       return;
