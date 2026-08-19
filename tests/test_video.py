@@ -457,7 +457,7 @@ def test_execute_names_the_file_the_way_the_widgets_say():
             off, meta4 = go(versioning="off", numbering="counter")
             assert meta4["version"] is None
             assert "%" not in off["filename"] and "#" not in off["filename"], off
-            assert off["filename"].endswith("_00001_.mp4"), off
+            assert off["filename"].endswith("_0001_.mp4"), off
         finally:
             folder_paths.get_output_directory = orig
     print("  ok  test_execute_names_the_file_the_way_the_widgets_say")
@@ -727,6 +727,257 @@ def test_a_wired_reference_is_encoded_once_and_pointed_at():
             folder_paths.get_temp_directory = orig_tmp
             nkd_video._ENCODED.clear()
     print("  ok  test_a_wired_reference_is_encoded_once_and_pointed_at")
+
+
+def test_label_lines_read_the_prompt_and_skip_what_is_gone():
+    """The tracked list carries only (node_id, widget); the VALUES come from the prompt of
+    the run being executed, so they can never go stale. A deleted node's leftover mark is
+    skipped, and a linked value resolves one hop when the source is a primitive."""
+    import json as J
+
+    from nkd_video import label_lines
+
+    prompt = {
+        "5": {"class_type": "KSampler", "_meta": {"title": "Hero sampler"},
+              "inputs": {"steps": 30, "cfg": 6.5, "model": ["4", 0]}},
+        "7": {"class_type": "PrimitiveNode", "inputs": {"value": 42}},
+        "8": {"class_type": "CLIPTextEncode",
+              "inputs": {"seed": ["7", 0], "text": ["5", 0]}},
+    }
+    lines = label_lines(J.dumps(
+        [["5", "steps"], ["5", "cfg"], ["8", "seed"], ["8", "text"],
+         ["9", "gone"], ["5", "never_a_widget"]]), prompt)
+    assert lines == [
+        "Hero sampler · steps: 30",
+        "Hero sampler · cfg: 6.5",
+        "CLIPTextEncode · seed: 42",          # one hop into the primitive
+        # Several literals at the source: no guessing, but say WHO drives it.
+        "CLIPTextEncode · text: (linked → KSampler)",
+    ], lines
+    assert label_lines("not json", prompt) == []
+    assert label_lines(J.dumps([["5", "steps"]]), None) == []
+
+    # A SUBGRAPH surface id: the prompt only carries the expanded interior under
+    # composite ids. An unambiguous interior match resolves; an ambiguous one (two
+    # interior nodes with the widget) is skipped rather than guessed.
+    sub = {
+        "9:3": {"class_type": "LoraLoaderModelOnly", "inputs": {"strength_model": 0.8}},
+        "9:4": {"class_type": "UNETLoader", "inputs": {"unet_name": "x.sft"}},
+        "12:1": {"class_type": "A", "inputs": {"seed": 1}},
+        "12:2": {"class_type": "B", "inputs": {"seed": 2}},
+    }
+    lines = label_lines(J.dumps(
+        [["9", "strength_model"], ["12", "seed"]]), sub)
+    assert lines == ["LoraLoaderModelOnly · strength_model: 0.8"], lines
+
+    # A linked source that CANNOT be evaluated (not registered here) and has several
+    # literals: name who drives it, never guess.
+    sweep = {
+        "204": {"class_type": "NumberOutputList",
+                "inputs": {"start": 0.4, "stop": 1.0, "num": 6}},
+        "192:199": {"class_type": "LoraLoaderModelOnly",
+                    "inputs": {"strength_model": ["204", 1]}},
+    }
+    marks = J.dumps([["192:199", "strength_model"]])
+    assert label_lines(marks, sweep) == \
+        ["LoraLoaderModelOnly · strength_model: (linked → NumberOutputList)"]
+    print("  ok  test_label_lines_read_the_prompt_and_skip_what_is_gone")
+
+
+def test_labeled_only_runs_continue_the_output_folders_versioning():
+    """save_output off + labels on: the clean render goes to temp (which empties every
+    session) but the labeled copy persists in output/. The version must be claimed
+    against OUTPUT — scanning temp restarted at v001 and named the labeled copy over
+    versions that already existed — and a `_labeled` file must OCCUPY its version even
+    when no clean sibling exists (a labeled-only test session is exactly that case)."""
+    import json as J
+
+    import folder_paths
+    import nkd_video
+
+    # Unit half: the suffixed file claims its version.
+    with tempfile.TemporaryDirectory() as out:
+        os.makedirs(os.path.join(out, "lab"))
+        open(os.path.join(out, "lab", "NKD_v021_labeled.mp4"), "wb").close()
+        assert next_version(out, "lab/NKD_v%v###%", 3) == 22
+
+    class FakeHidden:
+        unique_id = "9"
+        extra_pnginfo = None
+        prompt = {"5": {"class_type": "KSampler", "inputs": {"steps": 30}}}
+
+    node = nkd_video.NKDVideoViewer
+    with tempfile.TemporaryDirectory() as out, tempfile.TemporaryDirectory() as tmp:
+        orig_out = folder_paths.get_output_directory
+        orig_tmp = folder_paths.get_temp_directory
+        folder_paths.get_output_directory = lambda: out
+        folder_paths.get_temp_directory = lambda: tmp
+        node.hidden = FakeHidden()
+        try:
+            os.makedirs(os.path.join(out, "lab"))
+            open(os.path.join(out, "lab", "NKD_v021_labeled.mp4"), "wb").close()
+            r = node.execute(
+                images=ramp(4), fps=24.0,
+                format={"format": "mp4 / h264", "crf": 30.0, "preset": "veryfast"},
+                filename_prefix="lab/NKD", save_output=False, pingpong=False,
+                versioning="auto (next free)", version=1, numbering="none",
+                labels=J.dumps([["5", "steps"]]))
+            meta = r.ui.as_dict()["nkd_meta"][0]
+            assert meta["version"] == 22, meta["version"]
+            assert meta["labeled"]["filename"] == "NKD_v022_labeled.mp4", meta["labeled"]
+            assert os.path.isfile(os.path.join(out, "lab", "NKD_v022_labeled.mp4"))
+            # The clean temp preview carries the SAME version: the pair stays a pair.
+            assert os.path.isfile(os.path.join(tmp, "lab", "NKD_v022.mp4"))
+        finally:
+            node.hidden = None
+            folder_paths.get_output_directory = orig_out
+            folder_paths.get_temp_directory = orig_tmp
+            nkd_video._ENCODED.clear()
+    print("  ok  test_labeled_only_runs_continue_the_output_folders_versioning")
+
+
+def test_swept_values_burn_per_pass_numbers_without_a_cable():
+    """A pure generator driving a tracked widget: the per-pass value is recovered by
+    executing the generator out of band and indexing it with this run's position in the
+    list execution. No cable — the system's hard rule. Out-of-range or a non-primitive
+    source must NEVER burn a neighbouring value: honesty degrades to (linked → X)."""
+    import json as J
+
+    import nodes as comfy_nodes
+    from nkd_video import label_lines
+
+    class FakeSweep:
+        RETURN_TYPES = ("INT", "FLOAT")
+        FUNCTION = "go"
+
+        def go(self, start, stop, num):
+            step = (stop - start) / (num - 1)
+            vals = [start + step * i for i in range(num)]
+            return ([int(v) for v in vals], vals)
+
+    class FakeModelSource:
+        RETURN_TYPES = ("MODEL",)
+        FUNCTION = "go"
+
+        def go(self):
+            raise AssertionError("a non-primitive source must never be executed")
+
+    comfy_nodes.NODE_CLASS_MAPPINGS["_NKDTestSweep"] = FakeSweep
+    comfy_nodes.NODE_CLASS_MAPPINGS["_NKDTestModel"] = FakeModelSource
+    try:
+        prompt = {
+            "204": {"class_type": "_NKDTestSweep",
+                    "inputs": {"start": 0.4, "stop": 1.0, "num": 4}},
+            "9": {"class_type": "LoraLoaderModelOnly",
+                  "inputs": {"strength_model": ["204", 1], "model": ["7", 0]}},
+            "7": {"class_type": "_NKDTestModel", "inputs": {}},
+        }
+        marks = J.dumps([["9", "strength_model"]])
+        assert label_lines(marks, prompt, 0) == \
+            ["LoraLoaderModelOnly · strength_model: 0.4"]
+        assert label_lines(marks, prompt, 2) == \
+            ["LoraLoaderModelOnly · strength_model: 0.8"]
+        assert label_lines(marks, prompt, 9) == \
+            ["LoraLoaderModelOnly · strength_model: (linked → _NKDTestSweep)"]
+        # Tracking the model input itself: source has non-primitive outputs → linked.
+        assert label_lines(J.dumps([["9", "model"]]), prompt, 0) == \
+            ["LoraLoaderModelOnly · model: (linked → _NKDTestModel)"]
+    finally:
+        del comfy_nodes.NODE_CLASS_MAPPINGS["_NKDTestSweep"]
+        del comfy_nodes.NODE_CLASS_MAPPINGS["_NKDTestModel"]
+    print("  ok  test_swept_values_burn_per_pass_numbers_without_a_cable")
+
+
+def test_burn_labels_touches_only_the_bar_and_never_the_source():
+    from nkd_video import burn_labels
+
+    frames = ramp(4)
+    burned = burn_labels(frames, ["KSampler · steps: 30"])
+    assert burned.shape == frames.shape
+    assert not torch.equal(burned, frames), "nothing was burned"
+    assert torch.equal(burned[:, -8:], frames[:, -8:]), "the bar leaked past its region"
+    assert torch.equal(frames, ramp(4)), "the source frames were written in place"
+    # The bar is TRANSLUCENT, so the source still shows through: two frames that differ
+    # under the bar must still differ after the burn (a solid bar would hide a wrong take).
+    assert not torch.equal(burned[0, :4], burned[3, :4])
+    # An absurd list never eats more than half the picture.
+    tall = burn_labels(frames, [f"line {i}" for i in range(50)])
+    h = frames.shape[1]
+    assert torch.equal(tall[:, h // 2 + 1:], frames[:, h // 2 + 1:])
+    print("  ok  test_burn_labels_touches_only_the_bar_and_never_the_source")
+
+
+def test_execute_writes_a_labeled_review_copy_alongside():
+    """Tracked widgets produce `<stem>_labeled.mp4` NEXT TO the clean render — always
+    h264/mp4 whatever the main format — and the clean render itself is untouched."""
+    import json as J
+
+    import folder_paths
+    import nkd_video
+
+    class FakeHidden:
+        unique_id = "9"
+        extra_pnginfo = None
+        prompt = {"5": {"class_type": "KSampler", "inputs": {"steps": 30}}}
+
+    node = nkd_video.NKDVideoViewer
+    with tempfile.TemporaryDirectory() as out:
+        orig = folder_paths.get_output_directory
+        folder_paths.get_output_directory = lambda: out
+        node.hidden = FakeHidden()
+        try:
+            def go(**kw):
+                params = dict(
+                    images=ramp(4), fps=24.0,
+                    format={"format": "webm / vp9", "crf": 40.0},
+                    filename_prefix="lab/take", save_output=True, pingpong=False,
+                    versioning="off", version=1, numbering="none",
+                    labels=J.dumps([["5", "steps"]]))
+                params.update(kw)
+                r = node.execute(**params)
+                return r.ui.as_dict()["nkd_video"][0], r.ui.as_dict()["nkd_meta"][0]
+
+            clean, meta = go()
+            assert clean["filename"] == "take.webm", clean
+            item = meta["labeled"]
+            assert item and item["filename"] == "take_labeled.mp4", item
+            labeled = os.path.join(out, "lab", item["filename"])
+            assert os.path.isfile(labeled)
+            assert probe(labeled)["frames"] == 4
+            # The clean render has no bar: it differs from the labeled copy.
+            assert os.path.getsize(os.path.join(out, "lab", clean["filename"])) \
+                != os.path.getsize(labeled)
+
+            # No tracked widgets -> no labeled copy, and nothing in the payload.
+            _, bare = go(labels="", filename_prefix="lab/bare")
+            assert bare["labeled"] is None
+            assert not os.path.exists(os.path.join(out, "lab", "bare_labeled.mp4"))
+
+            # labeled_copy off: marks stay in the graph but no file is written.
+            _, off = go(labeled_copy=False, filename_prefix="lab/off")
+            assert off["labeled"] is None
+            assert not os.path.exists(os.path.join(out, "lab", "off_labeled.mp4"))
+
+            # save_output OFF with marks on: the clean render is a discardable temp
+            # preview, but the labeled copy is the point of a test run — it must land in
+            # output/ anyway, and say so in the payload.
+            with tempfile.TemporaryDirectory() as tmp:
+                orig_tmp = folder_paths.get_temp_directory
+                folder_paths.get_temp_directory = lambda: tmp
+                try:
+                    clean_t, meta_t = go(save_output=False, filename_prefix="lab/tst")
+                finally:
+                    folder_paths.get_temp_directory = orig_tmp
+                assert clean_t["type"] == "temp"
+                assert os.path.isfile(os.path.join(tmp, "lab", clean_t["filename"]))
+                item_t = meta_t["labeled"]
+                assert item_t and item_t["type"] == "output", item_t
+                assert os.path.isfile(os.path.join(out, "lab", item_t["filename"]))
+        finally:
+            node.hidden = None
+            folder_paths.get_output_directory = orig
+            nkd_video._ENCODED.clear()
+    print("  ok  test_execute_writes_a_labeled_review_copy_alongside")
 
 
 if __name__ == "__main__":

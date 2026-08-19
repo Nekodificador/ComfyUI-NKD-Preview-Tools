@@ -12,6 +12,7 @@
  */
 import { app as comfyApp } from "./comfyRuntime";
 import { clipBoundFrames, effectiveCount, markerFrames, parseTimeline } from "./timeline/model";
+import { guardWidgetOrder } from "./schemaGuard";
 
 export const FREEZE_NODE = "NKDFreezeFrames";
 /** `images` and `count`. Never trimmed, never reordered. */
@@ -151,6 +152,8 @@ export function registerFreezeFrames(): void {
       if (nodeData?.name !== FREEZE_NODE) return;
       if (nodeType.prototype.__nkdFreezeWrapped) return;   // "Refresh node definitions"
       nodeType.prototype.__nkdFreezeWrapped = true;
+      // v1: restore-by-name only, never toasts. See schemaGuard.ts.
+      guardWidgetOrder(nodeType, FREEZE_NODE, 1);
 
       const origCreated = nodeType.prototype.onNodeCreated;
       nodeType.prototype.onNodeCreated = function (this: any) {

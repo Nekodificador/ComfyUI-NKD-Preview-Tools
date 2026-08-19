@@ -15,6 +15,7 @@ import { api } from "../comfyRuntime";
 import { type MediaRef, ensureThumbnails, thumbnailAt, viewUrl } from "../timeline/media";
 import { type Popout, openPopout } from "./popout";
 import { projectChip, revealButton } from "../projects";
+import { trackedChip } from "../labels";
 
 export type CompareMode = "off" | "wipe" | "difference";
 const COMPARE_ORDER: CompareMode[] = ["off", "wipe", "difference"];
@@ -53,6 +54,8 @@ export interface VideoInfo {
   /** The reference WIRED into the node, already encoded to something seekable. Absent
    *  when nothing is connected, in which case the global slot stands in. */
   reference?: MediaRef | null;
+  /** The `_labeled` review copy (always h264/mp4), when any widgets are tracked. */
+  labeled?: MediaRef | null;
 }
 
 /** Tallest the picture is allowed to get, in logical px. Widening the node must NOT grow
@@ -97,8 +100,12 @@ export class VideoViewer {
   private readonly link: HTMLAnchorElement;
   private readonly pathLine: HTMLElement;
   private readonly chip: { el: HTMLElement; destroy: () => void };
+  private readonly labelsChip: { el: HTMLElement; destroy: () => void };
 
   private ref: MediaRef | null = null;
+  /** What the stage is actually showing: the render, or the `_labeled` review copy. The
+   *  download link and the path line stay on `ref` — the labeled copy is display only. */
+  private shown: MediaRef | null = null;
   private info: VideoInfo | null = null;
   private raf = 0;
   private dragging = false;
@@ -125,14 +132,18 @@ export class VideoViewer {
    *  answering the api's events. */
   private readonly onPromptDone = () => { if (!this.wired) void this.loadReference(); };
   private popout: Popout | null = null;
+  /** Showing the `_labeled` review copy instead of the clean render. Display only: the
+   *  download button and the path line keep pointing at the render. */
+  private showLabels = false;
+  private labelsBtn: HTMLButtonElement;
   /** Persisted on the node, not in a widget: what the viewer is doing does not change what
    *  the graph produces, and an input would re-encode the video on every toggle. */
   onState: ((s: { loop: boolean; muted: boolean; compare: CompareMode;
-                  wipe: number }) => void) | null = null;
+                  wipe: number; labels?: boolean }) => void) | null = null;
   onHeightChange: (() => void) | null = null;
 
   constructor(state?: { loop?: boolean; muted?: boolean; compare?: CompareMode;
-                        wipe?: number }) {
+                        wipe?: number; labels?: boolean }) {
     this.root = el("div", "nkd-tl nkd-vid");
     this.root.tabIndex = 0;                    // keys only while the viewer has focus
 
@@ -181,6 +192,14 @@ export class VideoViewer {
     button(bar, "pi pi-bookmark", "Use this render as the reference", () => {
       void this.setAsReference();
     });
+    this.showLabels = !!state?.labels;
+    this.labelsBtn = button(bar, "pi pi-tag",
+      "Show the labeled review copy (tracked widget values burned in)", () => {
+        this.showLabels = !this.showLabels;
+        this.pushState();
+        if (this.ref && this.info) this.setSource(this.ref, this.info);
+      });
+    this.labelsBtn.style.display = "none";   // only drawn once a labeled copy exists
     // A real <a download>: no fetch, no blob, and the browser's own save dialog.
     this.link = el("a", "nkd-tl-btn", bar);
     this.link.title = "Save a copy";
@@ -188,6 +207,8 @@ export class VideoViewer {
     // Only drawn when the server is this machine - see `revealAvailable`.
     revealButton(bar, () => this.ref);
     this.chip = projectChip(bar);
+    // Every mark in the graph, listed here so untracking never means hunting the node.
+    this.labelsChip = trackedChip(bar);
 
     this.status = el("div", "nkd-tl-status", bar);
     this.status.textContent = "no video yet";
@@ -221,8 +242,12 @@ export class VideoViewer {
     this.want = -1;
     this.seeking = false;
     window.clearTimeout(this.guard);
-    const url = viewUrl(ref);
-    this.link.href = url;
+    const labeled = info.labeled ?? null;
+    this.labelsBtn.style.display = labeled ? "" : "none";
+    this.labelsBtn.classList.toggle("on", this.showLabels && !!labeled);
+    this.shown = this.showLabels && labeled ? labeled : ref;
+    const url = viewUrl(this.shown);
+    this.link.href = viewUrl(ref);
     this.link.setAttribute("download", ref.filename);
 
     const aspect = info.width / Math.max(1, info.height);
@@ -235,7 +260,7 @@ export class VideoViewer {
       this.still.style.display = "none";
       this.video.style.display = "";
       if (this.video.src !== url) this.video.src = url;
-      ensureThumbnails(ref, {
+      ensureThumbnails(this.shown, {
         fps: info.fps, frame_count: info.frame_count,
         duration: info.frame_count / Math.max(1e-6, info.fps),
         width: info.width, height: info.height,
@@ -523,6 +548,11 @@ export class VideoViewer {
    * backend states the codec and this decides.
    */
   private get playable(): boolean {
+    // The labeled review copy is always h264/mp4, whatever the main format is — so a
+    // ProRes or GIF render still gets a scrubbable viewer while the labels are up.
+    if (this.showLabels && this.info?.labeled) {
+      return this.video.canPlayType('video/mp4; codecs="avc1.42E01E"') !== "";
+    }
     if (this.info?.preview !== "video") return false;
     const mime = this.info.mime;
     if (!mime) return true;
@@ -534,7 +564,7 @@ export class VideoViewer {
   private pushState(): void {
     this.onState?.({
       loop: this.video.loop, muted: this.video.muted,
-      compare: this.compare, wipe: this.wipe,
+      compare: this.compare, wipe: this.wipe, labels: this.showLabels,
     });
   }
 
@@ -691,9 +721,9 @@ export class VideoViewer {
     // Cheap proxy for "how many stills exist now": sample the columns we are about to draw.
     let have = 0;
     for (let i = 0; i < columns; i++) {
-      if (thumbnailAt(this.ref!, ((i + 0.5) / columns) * duration)) have++;
+      if (thumbnailAt(this.shown!, ((i + 0.5) / columns) * duration)) have++;
     }
-    const key = `${this.ref!.filename}|${Math.round(w)}|${dpr}|${have}`;
+    const key = `${this.shown!.filename}|${Math.round(w)}|${dpr}|${have}`;
     if (key === this.stripKey) return this.strip;
     this.stripKey = key;
 
@@ -704,7 +734,7 @@ export class VideoViewer {
     sctx.fillStyle = "#111318";
     sctx.fillRect(0, 0, w, SCRUB_H);
     for (let x = 0; x < w; x += step) {
-      const thumb = thumbnailAt(this.ref!, ((x + step / 2) / w) * duration);
+      const thumb = thumbnailAt(this.shown!, ((x + step / 2) / w) * duration);
       if (!thumb) continue;
       const tw = Math.min(step, w - x);
       sctx.drawImage(thumb, 0, 0, thumb.width * (tw / step), thumb.height,
@@ -734,7 +764,7 @@ export class VideoViewer {
     const info = this.info;
     if (!info) { this.status.textContent = "no video yet"; return; }
 
-    if (this.ref && this.playable) {
+    if (this.shown && this.playable) {
       ctx.drawImage(this.buildStrip(w, dpr), 0, 0, w, SCRUB_H);
 
       const px = (this.frame / Math.max(1, info.frame_count - 1)) * w;
@@ -766,6 +796,7 @@ export class VideoViewer {
   destroy(): void {
     api.removeEventListener("execution_success", this.onPromptDone);
     this.chip.destroy();
+    this.labelsChip.destroy();
     if (this.raf) cancelAnimationFrame(this.raf);
     this.video.removeAttribute("src");
     this.video.load();

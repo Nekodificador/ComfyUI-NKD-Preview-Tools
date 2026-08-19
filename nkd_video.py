@@ -72,12 +72,18 @@ def resolve_tokens(prefix: str, ctx: dict) -> str:
 
 
 def _version_pattern(part: str, pad: int) -> re.Pattern | None:
-    """Turn one path segment containing `%v###%` into a regex with the number captured."""
+    """Turn one path segment containing `%v###%` into a regex with the number captured.
+
+    The tail accepts `.` OR `_` after the number: anything that STARTS with the
+    versioned stem occupies that version — `NKD_v001_labeled.mp4` claims v001 just as
+    much as `NKD_v001.mp4` does. Extension-only matching let a run that wrote ONLY the
+    labeled copy hand out v001 again next to it (reported by Neko, 2026-08-18).
+    """
     if not VERSION_RE.search(part):
         return None
     escaped = VERSION_RE.sub("\x00", part)
     escaped = re.escape(escaped).replace("\x00", rf"(\d{{{pad},}})")
-    return re.compile(rf"^{escaped}(?:\..*)?$", re.IGNORECASE)
+    return re.compile(rf"^{escaped}(?:[._].*)?$", re.IGNORECASE)
 
 
 def next_version(root: str, prefix: str, pad: int) -> int:
@@ -486,6 +492,217 @@ def write_poster(images: torch.Tensor, path: str) -> None:
     PILImage.fromarray(_to_u8(images[0], 3), "RGB").save(path, compress_level=4)
 
 
+# ── Tracked-widget labels ─────────────────────────────────────────────────────
+# The right-click "Track widget" mark (frontend, `src/labels.ts`) writes ONLY the list of
+# `[node_id, widget]` pairs into the `labels` input. The VALUES never travel:
+# `hidden.prompt` already carries every widget of every node for THIS run, so they are
+# looked up at execute time and cannot go stale. Same principle as the core's
+# `%NodeTitle.widget%` tokens, but resolved by id — titles are not unique.
+
+LABEL_VALUE_MAX = 58
+
+# ── Per-pass index, for swept values ──────────────────────────────────────────
+# A Number OutputList driving a tracked widget turns the whole chain into a LIST: the
+# executor runs this node once per item, SEQUENTIALLY AND IN ORDER (`execution.py:316`,
+# `for i in range(max_len_input)`), so counting our own executions within a prompt IS the
+# list index. The count lives on `PromptServer.instance` — the hot-reload rule: two module
+# copies must share one dict — and resets when a new prompt is submitted, so an
+# interrupted run can never bleed a stale index into the next one.
+
+_LOCAL_COUNTS: dict[str, int] = {}    # tests / no server
+
+
+def _pass_counts() -> dict:
+    try:
+        from server import PromptServer
+        srv = PromptServer.instance
+        if srv is None:
+            return _LOCAL_COUNTS
+        d = getattr(srv, "_nkd_pass_counts", None)
+        if d is None:
+            d = {}
+            srv._nkd_pass_counts = d
+        return d
+    except Exception:
+        return _LOCAL_COUNTS
+
+
+def _reset_pass_counts(json_data):
+    _pass_counts().clear()
+    return json_data
+
+
+try:
+    from server import PromptServer as _PS
+    # The marker guards hot reload: the OLD module's handler stays registered, but it
+    # clears the same instance-anchored dict, so one registration is enough forever.
+    if _PS.instance is not None and not getattr(_PS.instance, "_nkd_pass_reset", False):
+        _PS.instance.add_on_prompt_handler(_reset_pass_counts)
+        _PS.instance._nkd_pass_reset = True
+except Exception:   # tests import this flat, with no server
+    pass
+
+
+def _source_list(prompt, node_id, slot):
+    """The output at `slot` of a PURE generator node, executed out of band.
+
+    This is what lets a swept value be labelled WITHOUT a cable: the per-pass number
+    never exists in the prompt, but the node that generates the sweep is right there
+    with all its literals, so run it and read the list. Only a node this simple
+    qualifies — every input literal, every output a primitive — and None on anything
+    else (or any error): a wrong label is worse than a `(linked)` one.
+    """
+    node = prompt.get(str(node_id))
+    if not isinstance(node, dict):
+        return None
+    inputs = node.get("inputs", {})
+    if any(_is_link(v) for v in inputs.values()):
+        return None
+    try:
+        import nodes as comfy_nodes
+        cls = comfy_nodes.NODE_CLASS_MAPPINGS.get(node.get("class_type"))
+    except Exception:
+        return None
+    if cls is None:
+        return None
+    prim = {"INT", "FLOAT", "STRING", "BOOLEAN"}
+    returns = getattr(cls, "RETURN_TYPES", None)
+    if returns is None and hasattr(cls, "define_schema"):     # V3 without V1 shim
+        try:
+            returns = tuple(o.io_type for o in cls.define_schema().outputs)
+        except Exception:
+            return None
+    if not returns or int(slot) >= len(returns) or any(t not in prim for t in returns):
+        return None
+    try:
+        if isinstance(cls.__dict__.get("execute"), classmethod):   # V3
+            out = cls.execute(**inputs).result
+        else:                                                      # V1
+            out = getattr(cls(), cls.FUNCTION)(**inputs)
+        return out[int(slot)]
+    except Exception:
+        return None
+
+
+def _is_link(v) -> bool:
+    """A linked input in a prompt is `[node_id, output_slot]`."""
+    return isinstance(v, list) and len(v) == 2
+
+
+def _fmt_label_value(v) -> str:
+    if isinstance(v, float):
+        v = f"{v:g}"
+    s = " ".join(str(v).split())     # a multiline prompt text would break the bar
+    return s if len(s) <= LABEL_VALUE_MAX else s[: LABEL_VALUE_MAX - 1] + "…"
+
+
+def label_lines(labels: str, prompt, pass_index: int = 0) -> list[str]:
+    """One `Title · widget: value` line per tracked entry, skipping what no longer exists.
+
+    A deleted node leaves its mark behind in a saved list, and skipping beats failing a
+    render over a label. A linked value arrives as `[node_id, slot]`, resolved cable-less
+    (the system's hard rule — a `value_N` socket was built and vetoed by Neko), in order:
+
+    1. The source is a PURE generator (a Number OutputList): execute it out of band and
+       take item `pass_index` — this run's own position in the list execution. That is
+       the real per-pass value of a sweep.
+    2. The source has exactly ONE literal input (a primitive): that value stands in.
+    3. `(linked → Source)` — name who drives it rather than guess.
+    """
+    try:
+        entries = json.loads(labels) if labels else []
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(entries, list) or not isinstance(prompt, dict):
+        return []
+    out = []
+    for entry in entries:
+        try:
+            node_id, widget = str(entry[0]), str(entry[1])
+        except (TypeError, IndexError, KeyError):
+            continue
+        node = prompt.get(node_id)
+        if not isinstance(node, dict):
+            # A SUBGRAPH's surface id: the prompt only contains its expanded interior,
+            # under composite ids ("192:199"). The frontend resolves marks to those ids
+            # before sending (resolveMark in src/labels.ts); this is the net for a
+            # labels list written by an older bundle. Only an UNAMBIGUOUS match counts:
+            # with two interior nodes carrying the widget, guessing would label the
+            # wrong one in silence.
+            matches = [n for nid, n in prompt.items()
+                       if nid.startswith(node_id + ":") and isinstance(n, dict)
+                       and widget in n.get("inputs", {})
+                       and not _is_link(n["inputs"][widget])]
+            node = matches[0] if len(matches) == 1 else None
+        if not isinstance(node, dict) or widget not in node.get("inputs", {}):
+            continue
+        value = node["inputs"][widget]
+        if _is_link(value):
+            lst = _source_list(prompt, value[0], value[1])
+            src = prompt.get(str(value[0]), {})
+            literals = [v for v in src.get("inputs", {}).values() if not _is_link(v)]
+            if isinstance(lst, (list, tuple, range)):
+                # Out of range would mean our pass count and the list disagree — say
+                # linked rather than burn a neighbouring item's value.
+                value = (lst[pass_index] if pass_index < len(lst)
+                         else f"(linked → {src.get('class_type', '?')})")
+            elif lst is not None:
+                value = lst                       # a scalar output (a `count`)
+            elif len(literals) == 1:
+                value = literals[0]
+            else:
+                # Naming the source is the most that can be said here.
+                value = f"(linked → {src.get('class_type', '?')})"
+        title = str((node.get("_meta") or {}).get("title")
+                    or node.get("class_type") or node_id)
+        out.append(f"{title} · {widget}: {_fmt_label_value(value)}")
+    return out
+
+
+LABEL_BAR_ALPHA = 0.72
+
+
+def burn_labels(images: torch.Tensor, lines: list[str]) -> torch.Tensor:
+    """A COPY of the frames with a semi-transparent parameter bar burned in.
+
+    The bar is identical on every frame, so it is rendered ONCE with PIL and composited
+    over the batch as a tensor op — a per-frame PIL round-trip is the thing
+    `comfy.utils.lanczos` already taught us to avoid. Overlaid, never concatenated: the
+    review copy stays geometrically identical to the clean render, so it drops into the
+    same comparisons. Same idiom (and the same green) as `_badge_previews` in the timeline.
+    """
+    from PIL import ImageDraw, ImageFont
+
+    h, w = int(images.shape[1]), int(images.shape[2])
+    size = max(11, h // 36)
+    try:
+        font = ImageFont.load_default(size=size)
+    except TypeError:                       # Pillow < 10.1: no sized default font
+        font = ImageFont.load_default()
+    pad = max(3, size // 3)
+    line_h = size + pad
+    # Never eat more than half the picture: drop the tail and say so.
+    fit = max(1, (h // 2 - pad) // line_h)
+    if len(lines) > fit:
+        lines = lines[: fit - 1] + [f"… {len(lines) - fit + 1} more"]
+    bar_h = min(h, pad + line_h * len(lines))
+
+    img = PILImage.new("RGBA", (w, bar_h), (10, 12, 16, int(255 * LABEL_BAR_ALPHA)))
+    draw = ImageDraw.Draw(img)
+    for i, line in enumerate(lines):
+        draw.text((pad + 2, pad // 2 + i * line_h), line, font=font,
+                  fill=(123, 216, 143, 255))          # the marker green
+    overlay = torch.from_numpy(
+        np.asarray(img).astype("float32") / 255.0).to(images.device)
+    rgb, a = overlay[..., :3], overlay[..., 3:]
+
+    out = images.clone()
+    # Only the first 3 channels: an RGBA clip keeps its alpha plane untouched.
+    top = out[:, :bar_h, :, :3]
+    out[:, :bar_h, :, :3] = top * (1 - a) + rgb * a
+    return out
+
+
 # ── Node ──────────────────────────────────────────────────────────────────────
 
 class NKDVideoViewer(io.ComfyNode):
@@ -564,13 +781,17 @@ class NKDVideoViewer(io.ComfyNode):
                         ]),
                     ],
                 ),
-                io.Boolean.Input("save_output", default=True,
-                                 tooltip="Off writes to temp/ — a preview you can discard."),
+                # REORDENADO ROMPEDOR 2026-08-17 (decisión de Neko, junto con la release de
+                # tracked widgets): `save_output` se movió de aquí AL FINAL, junto a
+                # `labeled_copy`, para que los dos "saves" cierren la lista. Un workflow
+                # guardado antes de esto carga sus `widgets_values` desplazados una
+                # posición: hay que volver a añadir el nodo. A partir de aquí rige otra
+                # vez la regla de siempre: lo nuevo va AL FINAL.
                 io.String.Input(
                     # Project-aware out of the box: a node you just dropped should already
                     # land where the chip says. Only affects NEW nodes - a saved workflow
                     # carries its own value in `widgets_values`.
-                    "filename_prefix", default="%project%/%category%/%node%",
+                    "filename_prefix", default="%project%/%category%/",
                     tooltip=(
                         "Relative to output/. Tokens: %project% and %category% (the active "
                         "ones, picked in the chip on this node — one click moves every NKD "
@@ -583,12 +804,12 @@ class NKDVideoViewer(io.ComfyNode):
                 ),
                 io.Combo.Input(
                     "versioning", options=["off", "auto (next free)", "manual"],
-                    default="off",
+                    default="auto (next free)",
                     tooltip=(
                         "Adds _v001 to the name — no need to type %v###% yourself; spell "
                         "the token out only to place it elsewhere (a folder) or pad it "
                         "differently. `auto` takes the next unused version in the target "
-                        "folder. Turning this on also drops ComfyUI's _00001_ counter, "
+                        "folder. Turning this on also drops ComfyUI's _0001_ counter, "
                         "which would number the same thing twice. Note that a cached graph "
                         "does not re-run, so it makes no new version — the render would be "
                         "identical; use `manual` to force one (and it overwrites, like "
@@ -600,14 +821,10 @@ class NKDVideoViewer(io.ComfyNode):
                 io.Combo.Input(
                     "numbering", options=["counter", "none"], default="counter",
                     tooltip=(
-                        "`counter` is ComfyUI's _00001_ suffix. `none` gives a clean name - "
+                        "`counter` is ComfyUI's _0001_ suffix. `none` gives a clean name - "
                         "what you want once the version is carrying the uniqueness."
                     ),
                 ),
-                # At the END, where anything new has to go now that the node has shipped:
-                # sockets are wired by INDEX, so inserting one silently re-wires every saved
-                # workflow.
-                #
                 # NOT an Autogrow list like the timeline's `media_N`, deliberately. Autogrow
                 # grows without limit and this viewer has exactly two roles - the render and
                 # the thing you wipe against - so slots three and up would be dead sockets
@@ -621,18 +838,13 @@ class NKDVideoViewer(io.ComfyNode):
                         "is a statement, the slot is whatever ran last."
                     ),
                 ),
-                # AT THE END because `widgets_values` is a positional array - a widget
-                # inserted anywhere else re-points every value in every saved workflow. It
-                # reads better next to `filename_prefix`, but "reads better" is not worth
-                # silently renaming everyone's files.
                 io.String.Input(
-                    # MUST stay empty, and this is not cosmetic. A saved workflow's
-                    # `widgets_values` is SHORTER than the widget list now, so this one gets
-                    # the DEFAULT rather than a stored value - a non-empty default would
-                    # split every existing node's path behind its back. That is also why
-                    # the nice-looking pair (prefix=folder, filename=%node%) cannot be the
-                    # default: it is one context-menu click away instead.
-                    "filename", default="",
+                    # "NKD" and not "" since the 2026-08-17 reorder: the old "must stay
+                    # empty" rule protected pre-split workflows whose widgets_values was
+                    # shorter than the widget list — the reorder already obsoleted those,
+                    # so the default can finally be the split pair Neko wanted. Empty
+                    # still works: the prefix carries both halves again.
+                    "filename", default="NKD",
                     tooltip=(
                         "Split the name from the folder: leave this EMPTY and "
                         "filename_prefix keeps carrying both, exactly as before. Fill it in "
@@ -642,6 +854,27 @@ class NKDVideoViewer(io.ComfyNode):
                         "work in both."
                     ),
                 ),
+                # Hidden in the UI (src/video/register.ts) and written by the right-click
+                # "Track widget" mark: the JSON list of [node_id, widget] pairs whose
+                # values get burned into the `_labeled` review copy. An INPUT on purpose —
+                # changing what is tracked must re-run the node to re-burn.
+                io.String.Input("labels", default=""),
+                # The two saves CLOSE the list (petición de Neko, reorden 2026-08-17):
+                # se lee como "qué, cómo se llama, y al final si se guarda".
+                io.Boolean.Input("save_output", default=True,
+                                 display_name="save output",
+                                 tooltip="Off writes the render to temp/ — a preview you "
+                                         "can discard."),
+                # Only VISIBLE while something is tracked (src/labels.ts): with no marks
+                # there is nothing to burn and a dead knob would just raise the question.
+                # An INPUT, not viewer state: it decides which files get written.
+                io.Boolean.Input(
+                    "labeled_copy", default=True,
+                    display_name="save with labels",
+                    tooltip="Also write <name>_labeled.mp4 with the tracked widget "
+                            "values burned in. Off keeps the marks but skips the file. "
+                            "With save output off, the labeled copy still goes to "
+                            "output/ — in a test run it is the file worth keeping."),
             ],
             outputs=[io.Video.Output("video"), io.String.Output("filepath")],
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo, io.Hidden.unique_id],
@@ -791,7 +1024,7 @@ class NKDVideoViewer(io.ComfyNode):
     def execute(cls, images=None, video=None, audio=None, fps=24.0, format=None,
                 filename_prefix="video/NKD", save_output=True, pingpong=False,
                 versioning="off", version=1, numbering="counter", reference=None,
-                filename=""):
+                filename="", labels="", labeled_copy=True):
         key = (format or {}).get("format", "mp4 / h264")
         spec = FORMATS[key]
 
@@ -830,8 +1063,30 @@ class NKDVideoViewer(io.ComfyNode):
 
         folder = (folder_paths.get_output_directory() if save_output
                   else folder_paths.get_temp_directory())
+
+        # Labels resolved EARLY because they steer the versioning below. The pass index
+        # is counted even when labels are off, so a mid-queue toggle cannot desync it —
+        # the executor maps list items sequentially and in order, so our own call count
+        # IS this run's position in the list.
+        node_key = str(cls.hidden.unique_id) if cls.hidden is not None else "-"
+        counts = _pass_counts()
+        pass_index = counts.get(node_key, 0)
+        counts[node_key] = pass_index + 1
+        lines = (label_lines(labels, cls.hidden.prompt if cls.hidden else None,
+                             pass_index)
+                 if labeled_copy else [])
+
+        # Where the VERSION is claimed. With save_output off the clean render goes to
+        # temp — which ComfyUI empties — but the labeled copy still lands in output/,
+        # next to the history. Scanning temp there restarts at v001 every session and
+        # names the labeled copy over versions that already exist (reported by Neko,
+        # 2026-08-18): the version must be claimed where a file of this run actually
+        # PERSISTS.
+        version_root = folder
+        if not save_output and lines:
+            version_root = folder_paths.get_output_directory()
         prefix, used_version = cls._resolve_prefix(
-            filename_prefix, folder, versioning, version, key, spec, fps, images,
+            filename_prefix, version_root, versioning, version, key, spec, fps, images,
             filename)
 
         # Still through the core helper: it is the authority on containment (it refuses any
@@ -841,16 +1096,16 @@ class NKDVideoViewer(io.ComfyNode):
         full_folder, base, counter, subfolder, _ = folder_paths.get_save_image_path(
             prefix, folder, images.shape[2], images.shape[1])
         os.makedirs(full_folder, exist_ok=True)
-        # `none` drops ComfyUI's _00001_: once a version carries the uniqueness the counter
+        # `none` drops ComfyUI's _0001_ (4 digits since 2026-08-17, Neko's ask): once a version carries the uniqueness the counter
         # is just noise on a name you are about to drag into an edit.
         #
         # Versioning forces it, because the two together number the same thing twice
-        # (`NKD_v001_00001_.mp4`). With `auto` the counter would never even leave 00001,
+        # (`NKD_v001_0001_.mp4`). With `auto` the counter would never even leave 0001,
         # since every run lands in a fresh version. The consequence to know: re-running a
         # `manual` version OVERWRITES it - which is exactly what re-rendering v003 does in
         # Nuke, and is the point of pinning a version by hand.
         versioned = used_version is not None
-        stem = base if (numbering == "none" or versioned) else f"{base}_{counter:05}_"
+        stem = base if (numbering == "none" or versioned) else f"{base}_{counter:04}_"
         # A PNG sequence is a FOLDER of files, so it gets one of its own rather than
         # scattering a few hundred frames next to whatever else lives there.
         seq_dir = os.path.join(full_folder, stem) if spec["ext"] == "png" else None
@@ -865,7 +1120,6 @@ class NKDVideoViewer(io.ComfyNode):
             metadata = meta or None
 
         # Same bytes as last time? Copy them. Bumping a version must not cost a re-encode.
-        node_key = str(cls.hidden.unique_id) if cls.hidden is not None else "-"
         # A sequence is a directory, so `copy2` cannot stand in for the encode; copytree can,
         # but only onto a path that does not exist yet.
         reuse = reusable_render(node_key, src_images, src_audio, settings, spec["ext"])
@@ -892,6 +1146,43 @@ class NKDVideoViewer(io.ComfyNode):
                 encode_gif(images, path, fps, int(opts.get("colors", 256)),
                            bool(opts.get("dither", True)), pbar)
         remember_render(node_key, src_images, src_audio, settings, spec["ext"], path)
+
+        # The `_labeled` review copy: the same frames with the tracked widget values
+        # burned in, written NEXT TO the clean render so a folder of takes says what each
+        # one was. Always h264/mp4 whatever the main format is — its one job is being
+        # skimmable in a file browser and playable in the viewer, and a ProRes review copy
+        # would double gigabytes to say a number. The clean render, `filepath` and the
+        # download button never change.
+        labeled_file = None
+        if lines:
+            l_folder, l_sub, l_stem = full_folder, subfolder, stem
+            if not save_output:
+                # Tests mode (Neko's ask): save_output off makes the clean render a
+                # discardable temp preview, but a labeled copy you asked for IS the thing
+                # worth keeping — so it goes to output/ anyway. Its own
+                # get_save_image_path call: the temp folder's counter would collide with
+                # whatever already accumulated in output/ across sessions.
+                out_root = folder_paths.get_output_directory()
+                f2, base2, counter2, sub2, _ = folder_paths.get_save_image_path(
+                    prefix, out_root, images.shape[2], images.shape[1])
+                os.makedirs(f2, exist_ok=True)
+                l_folder, l_sub = f2, sub2
+                l_stem = (base2 if (numbering == "none" or versioned)
+                          else f"{base2}_{counter2:04}_")
+            labeled_file = f"{l_stem}_labeled.mp4"
+            labeled_path = os.path.join(l_folder, labeled_file)
+            lkey = f"{node_key}:labeled"
+            # The label TEXT is part of the identity: same frames with different values
+            # tracked is a different burn.
+            lsettings = settings + ("\n".join(lines),)
+            reuse_l = reusable_render(lkey, src_images, src_audio, lsettings, "mp4")
+            if reuse_l and os.path.abspath(reuse_l) != os.path.abspath(labeled_path):
+                shutil.copy2(reuse_l, labeled_path)
+            elif not reuse_l:
+                encode_video(burn_labels(images, lines), labeled_path,
+                             FORMATS["mp4 / h264"], fps, 19.0, "veryfast", audio,
+                             metadata, comfy.utils.ProgressBar(len(images)))
+            remember_render(lkey, src_images, src_audio, lsettings, "mp4", labeled_path)
 
         # A fallback still, for anything the browser cannot open.
         preview = spec["preview"]
@@ -924,6 +1215,12 @@ class NKDVideoViewer(io.ComfyNode):
             "version": used_version,
             # None when nothing is wired, and the viewer falls back to the global slot.
             "reference": cls._reference_view(reference, node_key, fps),
+            # The review copy with the tracked values burned in, when any are tracked.
+            # ALWAYS type "output": with save_output off it is deliberately redirected
+            # there — the labeled copy is the artefact a test run exists to keep.
+            "labeled": ({"filename": labeled_file, "subfolder": l_sub,
+                         "type": "output"}
+                        if labeled_file else None),
         }
         out = InputImpl.VideoFromComponents(
             Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps)))

@@ -6,12 +6,19 @@
  * player as well, so the node would carry two.
  */
 import { app as comfyApp } from "../comfyRuntime";
-import { findW, mountDomWidget, setWidgetVisible } from "../domHost";
+import { findW, hideWidget, mountDomWidget, setWidgetVisible } from "../domHost";
+import { syncLabelWidgets } from "../labels";
+import { guardWidgetOrder } from "../schemaGuard";
 import { ensureStyles } from "../timeline/styles";
 import { VideoViewer, type VideoInfo } from "./viewer";
 
 const NODE_NAME = "NKDVideoViewer";
 const MIN_W = 320;
+
+/** Widget-order schema version for `guardWidgetOrder` (repair by widgets_values_named,
+ *  or toast on an old positional save). v2: 2026-08-17 — the two saves moved to the end,
+ *  defaults went production. Bump ONLY on a deliberate breaking reorder. */
+const SCHEMA_VERSION = 2;
 /** Viewer state lives HERE, never in a widget: an input is part of the cache signature
  *  (`CacheKeySetInputSignature`), so toggling loop would re-encode the whole video. */
 const STATE_PROP = "nkdVideoView";
@@ -110,6 +117,8 @@ export function registerVideoViewer(): void {
       if (nodeType.prototype.__nkdVideoWrapped) return;
       nodeType.prototype.__nkdVideoWrapped = true;
 
+      guardWidgetOrder(nodeType, "NKD Video Viewer", SCHEMA_VERSION);
+
       const origCreated = nodeType.prototype.onNodeCreated;
       nodeType.prototype.onNodeCreated = function (this: any) {
         const result = origCreated?.apply(this, arguments as any);
@@ -117,6 +126,11 @@ export function registerVideoViewer(): void {
         const node = this;
 
         wireNaming(node);
+        // The tracked-widgets list rides in here (src/labels.ts). Data channel, not UI —
+        // and `hidden = true`, never `type = "hidden"`, so the value still serialises.
+        hideWidget(findW(node, "labels"));
+        // A viewer dropped into a graph that already has marks must pick them up.
+        requestAnimationFrame(syncLabelWidgets);
         const viewer = new VideoViewer(node.properties?.[STATE_PROP]);
         viewer.onState = (s) => {
           node.properties = node.properties || {};

@@ -144,9 +144,11 @@ const closeMenuOnce = (e: Event): void => {
   closeMenu();
 };
 
-type MenuItem = { label: string; on?: () => void; active?: boolean; header?: boolean };
+export type MenuItem = { label: string; on?: () => void; active?: boolean; header?: boolean };
 
-function openMenu(x: number, y: number, items: MenuItem[]): void {
+/** Exported for the tracked-widgets chip (src/labels.ts): one dropdown idiom, one place
+ *  where the close-on-pointerdown-outside trap stays paid. */
+export function openMenu(x: number, y: number, items: MenuItem[]): void {
   // Here, not at the call sites: from the topbar nothing has mounted a node yet, so the
   // stylesheet may not exist. An unstyled `.nkd-tl-menu` is not "slightly off" - it has no
   // `position: fixed`, so it lands in the page flow at full window width.
