@@ -1373,6 +1373,7 @@ class Transport {
   }
   // ── Audio ───────────────────────────────────────────────────────────────────
   stopAudio() {
+    var _a;
     for (const n of this.nodes) {
       try {
         n.stop();
@@ -1380,6 +1381,8 @@ class Transport {
       }
     }
     this.nodes = [];
+    (_a = this.gain) == null ? void 0 : _a.disconnect();
+    this.gain = null;
   }
   /** Re-schedule from the current position: a mute toggled mid-playback. */
   refreshAudio() {
@@ -1405,7 +1408,7 @@ class Transport {
     const tl = this.host.getTimeline();
     const fps = this.host.getFps();
     const end = this.host.getEndFrame();
-    const now = tl.ui.playhead;
+    const now = Math.round(this.pos);
     this.gain = ctx.createGain();
     this.gain.connect(ctx.destination);
     const lanes = [
@@ -1526,6 +1529,11 @@ class TimelineEditor {
     __publicField(this, "bar");
     __publicField(this, "drag", null);
     __publicField(this, "hover", { kind: "none" });
+    /** Transient status-bar message. A button whose conditions are not met must SAY so
+     *  there — silently doing nothing reads as a dead button (reported by Neko). */
+    __publicField(this, "notice", null);
+    /** Last play/pause state painted on the button — see updateStatus for why it matters. */
+    __publicField(this, "playBtnPlaying", null);
     __publicField(this, "snapping", true);
     /**
      * Does the cut grid have to respect the SOUNDTRACK's grid as well?
@@ -1558,7 +1566,8 @@ class TimelineEditor {
     /** Draw the wave on a logarithmic scale. UI-only, like the mask overlay: it changes
      *  nothing the backend renders, so it stays out of the widget and its cache signature. */
     __publicField(this, "waveDb", false);
-    __publicField(this, "showClipWave", false);
+    /** Default ON (Neko, 2026-08-19): the band is why the toggle exists; session-only. */
+    __publicField(this, "showClipWave", true);
     /** Scratch canvas for tinting the mask; reused so playback does not allocate. */
     __publicField(this, "tintCanvas", document.createElement("canvas"));
     /** Last quantise/fps pair we warned about, so the toast fires on CHANGE only. */
@@ -1666,6 +1675,7 @@ class TimelineEditor {
       this.canvas.setPointerCapture(e.pointerId);
       this.canvas.addEventListener("pointermove", this.onMove);
       this.canvas.addEventListener("pointerup", this.onUp);
+      this.canvas.addEventListener("pointercancel", this.onUp);
       this.requestRender();
     });
     __publicField(this, "onMove", (e) => {
@@ -1808,6 +1818,7 @@ class TimelineEditor {
     __publicField(this, "onUp", (e) => {
       this.canvas.removeEventListener("pointermove", this.onMove);
       this.canvas.removeEventListener("pointerup", this.onUp);
+      this.canvas.removeEventListener("pointercancel", this.onUp);
       try {
         this.canvas.releasePointerCapture(e.pointerId);
       } catch {
@@ -2162,6 +2173,7 @@ class TimelineEditor {
         this.requestRender();
       }
     );
+    waveBtn.classList.toggle("on", this.showClipWave);
     const group = (...els) => {
       const g = document.createElement("div");
       g.className = "nkd-tl-grp";
@@ -2620,7 +2632,10 @@ class TimelineEditor {
    */
   trimToMaterial() {
     const r = materialRange(this.tl);
-    if (!r) return;
+    if (!r) {
+      this.say("No material on the timeline — nothing to fit the range to");
+      return;
+    }
     this.pushUndo();
     this.host.setStartFrame(r.start);
     this.host.setFrameCount(Math.max(1, r.end - r.start));
@@ -2681,9 +2696,25 @@ class TimelineEditor {
     const fps = this.host.getFps();
     this.pushUndo();
     const changed = cropToRange(this.tl, start, end, fps, (c) => this.rateOf(c));
-    if (!changed) {
+    const rebase = start > 0 && !this.host.isStartFrameLinked();
+    if (!changed && !rebase) {
       this.undoStack.pop();
+      this.say("Nothing outside the in/out range — nothing to crop");
       return;
+    }
+    if (rebase) {
+      for (const lane2 of [
+        this.tl.clips,
+        this.tl.masks,
+        this.tl.audio
+      ]) {
+        for (const c of lane2) c.start -= start;
+      }
+      this.tl.ui.playhead = Math.max(0, this.tl.ui.playhead - start);
+      this.tl.ui.scroll = Math.max(0, this.tl.ui.scroll - start);
+      this.host.setStartFrame(0);
+    } else if (changed && start > 0) {
+      this.say("Cropped — start_frame is linked, so the numbering was kept");
     }
     this.selection.clear();
     sortClips(this.tl);
@@ -2762,6 +2793,7 @@ class TimelineEditor {
     );
     if (!changed) {
       this.undoStack.pop();
+      this.say(ids ? "Nothing to expand in the selection — already at full length (deselect to expand everything)" : "Nothing to expand — every clip already shows its full source (a computed source reports its length after the first run)");
       return;
     }
     this.host.commit();
@@ -3024,14 +3056,17 @@ class TimelineEditor {
     const w = cv.clientWidth;
     if (w < 1 || logicalH < 1) return false;
     const graphScale = ((_c = (_b = (_a = window.app) == null ? void 0 : _a.canvas) == null ? void 0 : _b.ds) == null ? void 0 : _c.scale) ?? 1;
-    const s = Math.max(1, window.devicePixelRatio || 1) * Math.max(1, graphScale);
+    const s = Math.min(
+      3,
+      Math.max(1, window.devicePixelRatio || 1) * Math.max(1, graphScale)
+    );
     const bw = Math.round(w * s);
     const bh = Math.round(logicalH * s);
-    if (cv.width !== bw || cv.height !== bh) {
+    if (Math.abs(cv.width - bw) > 2 || Math.abs(cv.height - bh) > 2) {
       cv.width = bw;
       cv.height = bh;
     }
-    ctx.setTransform(bw / w, 0, 0, bh / logicalH, 0, 0);
+    ctx.setTransform(cv.width / w, 0, 0, cv.height / logicalH, 0, 0);
     return true;
   }
   render() {
@@ -3275,7 +3310,7 @@ class TimelineEditor {
       } else if (src.info) {
         this.drawFilmstrip(ctx, c, src.ref, src.info, x, body, w, bodyH);
         if (this.showClipWave && lane2 === "video" && bodyH > 24) {
-          const wh = Math.max(12, Math.round(bodyH * 0.35));
+          const wh = Math.max(18, Math.round(bodyH * 0.5));
           const wy = body + bodyH - wh;
           ctx.fillStyle = "rgba(6,12,18,0.55)";
           ctx.fillRect(x, wy, w, wh);
@@ -3714,11 +3749,28 @@ class TimelineEditor {
     ctx.drawImage(tc, 0, 0, w, h);
     ctx.globalAlpha = 1;
   }
+  /** Show `text` in the status bar for a few seconds, then fall back to the readout. */
+  say(text) {
+    this.notice = { text, until: performance.now() + 4e3 };
+    window.setTimeout(() => this.requestRender(), 4100);
+    this.requestRender();
+  }
   updateStatus(fps, count) {
     var _a, _b;
+    if (this.notice) {
+      if (performance.now() < this.notice.until) {
+        this.status.textContent = this.notice.text;
+        return;
+      }
+      this.notice = null;
+    }
     const rate = this.transport.rate;
-    this.playBtn.innerHTML = `<i class="pi ${rate === 0 ? "pi-play" : "pi-pause"}"></i>`;
-    this.playBtn.classList.toggle("on", rate !== 0);
+    const playing2 = rate !== 0;
+    if (this.playBtnPlaying !== playing2) {
+      this.playBtnPlaying = playing2;
+      this.playBtn.innerHTML = `<i class="pi ${playing2 ? "pi-pause" : "pi-play"}"></i>`;
+      this.playBtn.classList.toggle("on", playing2);
+    }
     const secs = count / (fps || 1);
     const mode = this.host.getQuantize();
     const raw = this.host.getFrameCount() > 0 ? this.host.getFrameCount() : Math.max(0, timelineSpan(this.tl) - this.host.getStartFrame());
@@ -3752,6 +3804,7 @@ class TimelineEditor {
     this.canvas.removeEventListener("pointermove", this.onHover);
     this.canvas.removeEventListener("pointermove", this.onMove);
     this.canvas.removeEventListener("pointerup", this.onUp);
+    this.canvas.removeEventListener("pointercancel", this.onUp);
     this.canvas.removeEventListener("pointerleave", this.onLeave);
     this.canvas.removeEventListener("contextmenu", this.onContextMenu);
     this.canvas.removeEventListener("wheel", this.onWheel);
@@ -3947,145 +4000,6 @@ function ensureStyles() {
   el2.textContent = CSS;
   document.head.appendChild(el2);
 }
-const FREEZE_NODE = "NKDFreezeFrames";
-const FIXED_OUTPUTS = 2;
-const MAX_FRAME_OUTPUTS = 16;
-const widgetValue = (node, name) => {
-  var _a, _b;
-  return (_b = (_a = node == null ? void 0 : node.widgets) == null ? void 0 : _a.find((w) => w.name === name)) == null ? void 0 : _b.value;
-};
-const num = (v, d) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : d;
-};
-function markerPlanOf(timelineNode) {
-  const tl = parseTimeline(widgetValue(timelineNode, "timeline"));
-  const start = Math.max(0, num(widgetValue(timelineNode, "start_frame"), 0));
-  const count = effectiveCount(
-    tl,
-    start,
-    Math.max(0, num(widgetValue(timelineNode, "frame_count"), 0)),
-    // The widget is named `model` since 2026-08-09: what you pick IS the model, and the
-    // frame grid follows from it.
-    String(widgetValue(timelineNode, "model") ?? ""),
-    num(widgetValue(timelineNode, "quantize_n"), 8)
-  );
-  const inRange = (f) => f >= start && f < start + count;
-  const labels = [];
-  if (widgetValue(timelineNode, "clip_markers") === true) {
-    clipBoundFrames(tl).forEach((f, i) => {
-      if (inRange(f)) labels.push(`clip ${Math.floor(i / 2) + 1} ${i % 2 ? "out" : "in"}`);
-    });
-  }
-  markerFrames(tl).filter(inRange).forEach((_, i) => labels.push(`ref ${i + 1}`));
-  return { count: labels.length, labels };
-}
-const TIMELINE_NODE = "NKDTimeline";
-function findMarkerSource(node, slotName, depth = 0) {
-  var _a, _b, _c, _d, _e, _f;
-  if (!node || depth > 4) return null;
-  const slot = (_a = node.inputs) == null ? void 0 : _a.find((i) => i.name === slotName);
-  if (!slot || slot.link == null) return null;
-  const link = (_c = (_b = node.graph) == null ? void 0 : _b.links) == null ? void 0 : _c[slot.link];
-  const origin = link && ((_d = node.graph) == null ? void 0 : _d.getNodeById(link.origin_id));
-  if (!origin) return null;
-  if (origin.type === TIMELINE_NODE && ((_f = (_e = origin.outputs) == null ? void 0 : _e[link.origin_slot]) == null ? void 0 : _f.name) === "markers") {
-    return origin;
-  }
-  for (const inp of origin.inputs ?? []) {
-    if (inp.link == null) continue;
-    const up = findMarkerSource(origin, inp.name, depth + 1);
-    if (up) return up;
-  }
-  return null;
-}
-function wantedFrames(node) {
-  var _a;
-  const slot = (_a = node.inputs) == null ? void 0 : _a.find((i) => i.name === "frames");
-  if ((slot == null ? void 0 : slot.link) != null) {
-    const timeline = findMarkerSource(node, "frames");
-    return timeline ? markerPlanOf(timeline) : null;
-  }
-  const text = widgetValue(node, "frames");
-  if (typeof text !== "string") return null;
-  return { count: (text.match(/-?\d+/g) ?? []).length, labels: null };
-}
-function linkedDepth(node) {
-  var _a;
-  let depth = 0;
-  (_a = node.outputs) == null ? void 0 : _a.forEach((o, i) => {
-    var _a2;
-    if (i >= FIXED_OUTPUTS && ((_a2 = o == null ? void 0 : o.links) == null ? void 0 : _a2.length)) depth = Math.max(depth, i + 1);
-  });
-  return depth;
-}
-function syncFreezeOutputs(node) {
-  var _a;
-  if (!(node == null ? void 0 : node.outputs)) return;
-  const plan = wantedFrames(node);
-  if (plan === null) return;
-  const want = FIXED_OUTPUTS + Math.min(MAX_FRAME_OUTPUTS, Math.max(1, plan.count));
-  const target = Math.max(want, linkedDepth(node));
-  let dirty = node.outputs.length !== target;
-  while (node.outputs.length > target) node.removeOutput(node.outputs.length - 1);
-  while (node.outputs.length < target) {
-    node.addOutput(`frame_${node.outputs.length - FIXED_OUTPUTS + 1}`, "IMAGE");
-  }
-  node.outputs.forEach((o, i) => {
-    var _a2;
-    if (i < FIXED_OUTPUTS || !o) return;
-    const label = (_a2 = plan.labels) == null ? void 0 : _a2[i - FIXED_OUTPUTS];
-    if ((o.label ?? void 0) !== label) {
-      o.label = label;
-      dirty = true;
-    }
-  });
-  if (dirty) (_a = node.setDirtyCanvas) == null ? void 0 : _a.call(node, true, true);
-}
-function syncAllFreezeNodes() {
-  var _a;
-  for (const n of ((_a = app.graph) == null ? void 0 : _a._nodes) ?? []) {
-    if (n.type === FREEZE_NODE) syncFreezeOutputs(n);
-  }
-}
-function registerFreezeFrames() {
-  app.registerExtension({
-    name: "NKD.FreezeFrames",
-    async beforeRegisterNodeDef(nodeType, nodeData) {
-      if ((nodeData == null ? void 0 : nodeData.name) !== FREEZE_NODE) return;
-      if (nodeType.prototype.__nkdFreezeWrapped) return;
-      nodeType.prototype.__nkdFreezeWrapped = true;
-      const origCreated = nodeType.prototype.onNodeCreated;
-      nodeType.prototype.onNodeCreated = function() {
-        var _a;
-        const r = origCreated == null ? void 0 : origCreated.apply(this, arguments);
-        const w = (_a = this.widgets) == null ? void 0 : _a.find((x) => x.name === "frames");
-        if (w) {
-          const origCb = w.callback;
-          w.callback = (...args) => {
-            const out = origCb == null ? void 0 : origCb.apply(w, args);
-            syncFreezeOutputs(this);
-            return out;
-          };
-        }
-        setTimeout(() => syncFreezeOutputs(this), 0);
-        return r;
-      };
-      const origConn = nodeType.prototype.onConnectionsChange;
-      nodeType.prototype.onConnectionsChange = function() {
-        const r = origConn == null ? void 0 : origConn.apply(this, arguments);
-        syncFreezeOutputs(this);
-        return r;
-      };
-      const origConfigure = nodeType.prototype.onConfigure;
-      nodeType.prototype.onConfigure = function() {
-        const r = origConfigure == null ? void 0 : origConfigure.apply(this, arguments);
-        setTimeout(() => syncFreezeOutputs(this), 0);
-        return r;
-      };
-    }
-  });
-}
 const ROW_SAFETY = 2;
 const MAX_INSET = 48;
 const findW = (node, name) => {
@@ -4256,75 +4170,178 @@ function mountDomWidget(node, opts) {
     }
   };
 }
-function adoptStyles(target) {
-  const baseTag = target.createElement("base");
-  baseTag.href = document.baseURI;
-  target.head.appendChild(baseTag);
-  for (const node of document.querySelectorAll('link[rel="stylesheet"], style')) {
-    target.head.appendChild(node.cloneNode(true));
-  }
-  const base = target.createElement("style");
-  base.textContent = "html,body{margin:0;padding:0;height:100%;background:#16181d;overflow:hidden}.nkd-vid{height:100%;box-sizing:border-box;padding:6px;display:flex;flex-direction:column;gap:6px}.nkd-vid .nkd-vid-stage{flex:1 1 auto;min-height:0;max-width:none!important;aspect-ratio:auto!important}";
-  target.head.appendChild(base);
-}
-async function openPopout(root, title, onMoved) {
-  const home = root.parentElement;
-  if (!home) return null;
-  const placeholder = document.createElement("div");
-  placeholder.className = "nkd-vid-away";
-  placeholder.textContent = "playing in a floating window";
-  const width = Math.max(480, Math.round(root.clientWidth) || 640);
-  const height = Math.max(360, Math.round(root.offsetHeight) || 480);
-  let win = null;
-  const pip = window.documentPictureInPicture;
-  try {
-    win = pip ? await pip.requestWindow({ width, height }) : null;
-  } catch {
-    win = null;
-  }
-  if (!win) {
-    win = window.open(
-      "",
-      "nkd-video-viewer",
-      `popup=yes,width=${width},height=${height}`
-    );
-  }
-  if (!win) return null;
-  const doc = win.document;
-  adoptStyles(doc);
-  doc.title = title;
-  home.appendChild(placeholder);
-  doc.body.appendChild(root);
-  root.focus();
-  onMoved();
-  let open = true;
-  const closeOnExit = () => {
-    try {
-      win == null ? void 0 : win.close();
-    } catch {
-    }
+const PROP = "nkdSchema";
+function guardWidgetOrder(nodeType, nodeName, version) {
+  const origCreated = nodeType.prototype.onNodeCreated;
+  nodeType.prototype.onNodeCreated = function() {
+    const r = origCreated == null ? void 0 : origCreated.apply(this, arguments);
+    this.properties = this.properties || {};
+    this.properties[PROP] = version;
+    return r;
   };
-  const goHome = () => {
-    if (!open) return;
-    open = false;
-    window.removeEventListener("beforeunload", closeOnExit);
-    home.appendChild(root);
-    placeholder.remove();
-    onMoved();
-  };
-  win.addEventListener("pagehide", goHome);
-  win.addEventListener("beforeunload", goHome);
-  window.addEventListener("beforeunload", closeOnExit);
-  return {
-    close: () => {
-      try {
-        win == null ? void 0 : win.close();
-      } catch {
+  const origConfigure = nodeType.prototype.onConfigure;
+  nodeType.prototype.onConfigure = function(info) {
+    var _a, _b, _c, _d, _e;
+    const r = origConfigure == null ? void 0 : origConfigure.apply(this, arguments);
+    const named = info == null ? void 0 : info.widgets_values_named;
+    if (named && typeof named === "object" && !Array.isArray(named)) {
+      for (const [name, val] of Object.entries(named)) {
+        const w = findW(this, name);
+        if (w && w.value !== val) {
+          w.value = val;
+          (_a = w.callback) == null ? void 0 : _a.call(w, val);
+        }
       }
-      goHome();
-    },
-    isOpen: () => open
+    } else if (version > 1 && ((_b = info == null ? void 0 : info.properties) == null ? void 0 : _b[PROP]) !== version && Array.isArray(info == null ? void 0 : info.widgets_values) && info.widgets_values.length) {
+      (_e = (_d = (_c = app.extensionManager) == null ? void 0 : _c.toast) == null ? void 0 : _d.add) == null ? void 0 : _e.call(_d, {
+        severity: "warn",
+        summary: `😺${nodeName}`,
+        detail: `"${this.title ?? nodeName}" was saved before a widget reorder: its values may have loaded into the wrong widgets. Delete and re-add the node, then re-check its settings.`,
+        life: 12e3
+      });
+    }
+    return r;
   };
+}
+const FREEZE_NODE = "NKDFreezeFrames";
+const FIXED_OUTPUTS = 2;
+const MAX_FRAME_OUTPUTS = 16;
+const widgetValue = (node, name) => {
+  var _a, _b;
+  return (_b = (_a = node == null ? void 0 : node.widgets) == null ? void 0 : _a.find((w) => w.name === name)) == null ? void 0 : _b.value;
+};
+const num = (v, d) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};
+function markerPlanOf(timelineNode) {
+  const tl = parseTimeline(widgetValue(timelineNode, "timeline"));
+  const start = Math.max(0, num(widgetValue(timelineNode, "start_frame"), 0));
+  const count = effectiveCount(
+    tl,
+    start,
+    Math.max(0, num(widgetValue(timelineNode, "frame_count"), 0)),
+    // The widget is named `model` since 2026-08-09: what you pick IS the model, and the
+    // frame grid follows from it.
+    String(widgetValue(timelineNode, "model") ?? ""),
+    num(widgetValue(timelineNode, "quantize_n"), 8)
+  );
+  const inRange = (f) => f >= start && f < start + count;
+  const labels = [];
+  if (widgetValue(timelineNode, "clip_markers") === true) {
+    clipBoundFrames(tl).forEach((f, i) => {
+      if (inRange(f)) labels.push(`clip ${Math.floor(i / 2) + 1} ${i % 2 ? "out" : "in"}`);
+    });
+  }
+  markerFrames(tl).filter(inRange).forEach((_, i) => labels.push(`ref ${i + 1}`));
+  return { count: labels.length, labels };
+}
+const TIMELINE_NODE = "NKDTimeline";
+function findMarkerSource(node, slotName, depth = 0) {
+  var _a, _b, _c, _d, _e, _f;
+  if (!node || depth > 4) return null;
+  const slot = (_a = node.inputs) == null ? void 0 : _a.find((i) => i.name === slotName);
+  if (!slot || slot.link == null) return null;
+  const link = (_c = (_b = node.graph) == null ? void 0 : _b.links) == null ? void 0 : _c[slot.link];
+  const origin = link && ((_d = node.graph) == null ? void 0 : _d.getNodeById(link.origin_id));
+  if (!origin) return null;
+  if (origin.type === TIMELINE_NODE && ((_f = (_e = origin.outputs) == null ? void 0 : _e[link.origin_slot]) == null ? void 0 : _f.name) === "markers") {
+    return origin;
+  }
+  for (const inp of origin.inputs ?? []) {
+    if (inp.link == null) continue;
+    const up = findMarkerSource(origin, inp.name, depth + 1);
+    if (up) return up;
+  }
+  return null;
+}
+function wantedFrames(node) {
+  var _a;
+  const slot = (_a = node.inputs) == null ? void 0 : _a.find((i) => i.name === "frames");
+  if ((slot == null ? void 0 : slot.link) != null) {
+    const timeline = findMarkerSource(node, "frames");
+    return timeline ? markerPlanOf(timeline) : null;
+  }
+  const text = widgetValue(node, "frames");
+  if (typeof text !== "string") return null;
+  return { count: (text.match(/-?\d+/g) ?? []).length, labels: null };
+}
+function linkedDepth(node) {
+  var _a;
+  let depth = 0;
+  (_a = node.outputs) == null ? void 0 : _a.forEach((o, i) => {
+    var _a2;
+    if (i >= FIXED_OUTPUTS && ((_a2 = o == null ? void 0 : o.links) == null ? void 0 : _a2.length)) depth = Math.max(depth, i + 1);
+  });
+  return depth;
+}
+function syncFreezeOutputs(node) {
+  var _a;
+  if (!(node == null ? void 0 : node.outputs)) return;
+  const plan = wantedFrames(node);
+  if (plan === null) return;
+  const want = FIXED_OUTPUTS + Math.min(MAX_FRAME_OUTPUTS, Math.max(1, plan.count));
+  const target = Math.max(want, linkedDepth(node));
+  let dirty = node.outputs.length !== target;
+  while (node.outputs.length > target) node.removeOutput(node.outputs.length - 1);
+  while (node.outputs.length < target) {
+    node.addOutput(`frame_${node.outputs.length - FIXED_OUTPUTS + 1}`, "IMAGE");
+  }
+  node.outputs.forEach((o, i) => {
+    var _a2;
+    if (i < FIXED_OUTPUTS || !o) return;
+    const label = (_a2 = plan.labels) == null ? void 0 : _a2[i - FIXED_OUTPUTS];
+    if ((o.label ?? void 0) !== label) {
+      o.label = label;
+      dirty = true;
+    }
+  });
+  if (dirty) (_a = node.setDirtyCanvas) == null ? void 0 : _a.call(node, true, true);
+}
+function syncAllFreezeNodes() {
+  var _a;
+  for (const n of ((_a = app.graph) == null ? void 0 : _a._nodes) ?? []) {
+    if (n.type === FREEZE_NODE) syncFreezeOutputs(n);
+  }
+}
+function registerFreezeFrames() {
+  app.registerExtension({
+    name: "NKD.FreezeFrames",
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+      if ((nodeData == null ? void 0 : nodeData.name) !== FREEZE_NODE) return;
+      if (nodeType.prototype.__nkdFreezeWrapped) return;
+      nodeType.prototype.__nkdFreezeWrapped = true;
+      guardWidgetOrder(nodeType, FREEZE_NODE, 1);
+      const origCreated = nodeType.prototype.onNodeCreated;
+      nodeType.prototype.onNodeCreated = function() {
+        var _a;
+        const r = origCreated == null ? void 0 : origCreated.apply(this, arguments);
+        const w = (_a = this.widgets) == null ? void 0 : _a.find((x) => x.name === "frames");
+        if (w) {
+          const origCb = w.callback;
+          w.callback = (...args) => {
+            const out = origCb == null ? void 0 : origCb.apply(w, args);
+            syncFreezeOutputs(this);
+            return out;
+          };
+        }
+        setTimeout(() => syncFreezeOutputs(this), 0);
+        return r;
+      };
+      const origConn = nodeType.prototype.onConnectionsChange;
+      nodeType.prototype.onConnectionsChange = function() {
+        const r = origConn == null ? void 0 : origConn.apply(this, arguments);
+        syncFreezeOutputs(this);
+        return r;
+      };
+      const origConfigure = nodeType.prototype.onConfigure;
+      nodeType.prototype.onConfigure = function() {
+        const r = origConfigure == null ? void 0 : origConfigure.apply(this, arguments);
+        setTimeout(() => syncFreezeOutputs(this), 0);
+        return r;
+      };
+    }
+  });
 }
 const el$1 = (tag, cls, parent) => {
   const node = document.createElement(tag);
@@ -4576,6 +4593,248 @@ function revealButton(parent, getRef) {
     });
   });
 }
+const TRACKED_PROP = "nkdTracked";
+const VIEWER = "NKDVideoViewer";
+const tracked = (node) => {
+  var _a;
+  return Array.isArray((_a = node == null ? void 0 : node.properties) == null ? void 0 : _a[TRACKED_PROP]) ? node.properties[TRACKED_PROP] : [];
+};
+function entries() {
+  var _a;
+  const out = [];
+  for (const n of ((_a = app.graph) == null ? void 0 : _a._nodes) ?? []) {
+    for (const name of tracked(n)) out.push({ node: n, name });
+  }
+  return out;
+}
+const chips = /* @__PURE__ */ new Set();
+const repaintChips = () => chips.forEach((p) => p());
+function resolveMark(node, widget, depth = 0) {
+  var _a, _b, _c, _d, _e, _f, _g, _h;
+  if (depth > 4 || typeof node.isSubgraphNode !== "function" || !node.isSubgraphNode()) {
+    return [String(node.id), widget];
+  }
+  const sg = node.subgraph;
+  const inp = (_a = sg == null ? void 0 : sg.inputs) == null ? void 0 : _a.find((i) => i.name === widget);
+  const linkId = (_b = inp == null ? void 0 : inp.linkIds) == null ? void 0 : _b[0];
+  const link = linkId != null ? ((_c = sg.getLink) == null ? void 0 : _c.call(sg, linkId)) ?? ((_e = (_d = sg.links) == null ? void 0 : _d.get) == null ? void 0 : _e.call(_d, linkId)) ?? ((_f = sg.links) == null ? void 0 : _f[linkId]) : null;
+  const tgt = link ? sg.getNodeById(link.target_id) : null;
+  if (!tgt) return [String(node.id), widget];
+  const name = ((_h = (_g = tgt.inputs) == null ? void 0 : _g[link.target_slot]) == null ? void 0 : _h.name) ?? widget;
+  const inner = resolveMark(tgt, name, depth + 1);
+  return [`${node.id}:${inner[0]}`, inner[1]];
+}
+function syncLabelWidgets() {
+  var _a, _b, _c, _d;
+  const nodes = ((_a = app.graph) == null ? void 0 : _a._nodes) ?? [];
+  const list = [];
+  for (const n of nodes) {
+    for (const name of tracked(n)) list.push(resolveMark(n, name));
+  }
+  const json = list.length ? JSON.stringify(list) : "";
+  for (const n of nodes) {
+    if (n.comfyClass !== VIEWER) continue;
+    const w = (_b = n.widgets) == null ? void 0 : _b.find((x) => x.name === "labels");
+    if (w && w.value !== json) {
+      w.value = json;
+      (_c = w.callback) == null ? void 0 : _c.call(w, json);
+    }
+    setWidgetVisible(n, "labeled_copy", list.length > 0);
+    (_d = n.setDirtyCanvas) == null ? void 0 : _d.call(n, true, true);
+  }
+  repaintChips();
+}
+function toggleTrack(node, name) {
+  var _a;
+  const cur = tracked(node);
+  node.properties = node.properties || {};
+  node.properties[TRACKED_PROP] = cur.includes(name) ? cur.filter((n) => n !== name) : [...cur, name];
+  syncLabelWidgets();
+  (_a = node.setDirtyCanvas) == null ? void 0 : _a.call(node, true, true);
+}
+const listable = (w) => !!(w == null ? void 0 : w.name) && !w.hidden && ["string", "number", "boolean"].includes(typeof w.value);
+function registerTrackedWidgets() {
+  app.registerExtension({
+    name: "NKD.TrackedWidgets",
+    getNodeMenuItems(node) {
+      var _a, _b;
+      const widgets = (node.widgets ?? []).filter(listable);
+      if (!widgets.length || node.comfyClass === VIEWER) return [];
+      const cur = tracked(node);
+      const items = [];
+      const under = (_b = (_a = app.canvas) == null ? void 0 : _a.getWidgetAtCursor) == null ? void 0 : _b.call(_a);
+      if (under && widgets.includes(under)) {
+        const on = cur.includes(under.name);
+        items.push({
+          content: `🏷 ${on ? "Untrack" : "Track"} '${under.name}' in labels`,
+          callback: () => toggleTrack(node, under.name)
+        });
+      }
+      items.push({
+        content: "🏷 Track widgets…",
+        submenu: {
+          options: widgets.map((w) => ({
+            content: `${cur.includes(w.name) ? "✓ " : " "}${w.name}`,
+            callback: () => toggleTrack(node, w.name)
+          }))
+        }
+      });
+      if (cur.length) {
+        items.push({
+          content: `🏷 Untrack all (${cur.length})`,
+          callback: () => {
+            var _a2;
+            node.properties[TRACKED_PROP] = [];
+            syncLabelWidgets();
+            (_a2 = node.setDirtyCanvas) == null ? void 0 : _a2.call(node, true, true);
+          }
+        });
+      }
+      return items;
+    },
+    nodeCreated(node) {
+      const orig = node.onDrawForeground;
+      node.onDrawForeground = function(ctx) {
+        var _a;
+        const r = orig == null ? void 0 : orig.apply(this, arguments);
+        if (!((_a = this.flags) == null ? void 0 : _a.collapsed) && tracked(this).length) {
+          ctx.save();
+          ctx.font = "12px sans-serif";
+          ctx.textAlign = "right";
+          ctx.fillText("🏷", this.size[0] - 6, -9);
+          ctx.restore();
+        }
+        return r;
+      };
+    },
+    // A saved workflow can carry a stale list (a tracked node deleted since, marks made
+    // while no viewer existed): recompute once the graph is fully restored.
+    afterConfigureGraph() {
+      syncLabelWidgets();
+    }
+  });
+}
+function liveValue(node, name) {
+  var _a, _b;
+  const v = (_b = (_a = node.widgets) == null ? void 0 : _a.find((w) => w.name === name)) == null ? void 0 : _b.value;
+  const s = v === void 0 ? "(linked)" : String(v).replace(/\s+/g, " ").trim();
+  return s.length > 40 ? s.slice(0, 39) + "…" : s;
+}
+function trackedChip(parent) {
+  const btn = document.createElement("button");
+  btn.className = "nkd-tl-btn";
+  btn.title = "Tracked widgets — burned into the _labeled review copy. Click to manage.";
+  parent.appendChild(btn);
+  const icon = document.createElement("i");
+  icon.className = "pi pi-tags";
+  btn.appendChild(icon);
+  const count = document.createElement("span");
+  count.className = "nkd-proj-label";
+  btn.appendChild(count);
+  const paint = () => {
+    const n = entries().length;
+    count.textContent = String(n);
+    btn.style.display = n ? "" : "none";
+  };
+  paint();
+  chips.add(paint);
+  btn.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const items = [{ label: "Tracked widgets — click to untrack", header: true }];
+    for (const { node, name } of entries()) {
+      items.push({
+        label: `${node.title ?? node.type} · ${name}: ${liveValue(node, name)}`,
+        active: true,
+        on: () => toggleTrack(node, name)
+      });
+    }
+    items.push({
+      label: "✕ Clear all",
+      on: () => {
+        var _a, _b;
+        for (const { node } of entries()) node.properties[TRACKED_PROP] = [];
+        syncLabelWidgets();
+        (_b = (_a = app.graph) == null ? void 0 : _a.setDirtyCanvas) == null ? void 0 : _b.call(_a, true, true);
+      }
+    });
+    const r = btn.getBoundingClientRect();
+    openMenu(r.left, r.bottom + 4, items);
+  });
+  return { el: btn, destroy: () => {
+    chips.delete(paint);
+  } };
+}
+function adoptStyles(target) {
+  const baseTag = target.createElement("base");
+  baseTag.href = document.baseURI;
+  target.head.appendChild(baseTag);
+  for (const node of document.querySelectorAll('link[rel="stylesheet"], style')) {
+    target.head.appendChild(node.cloneNode(true));
+  }
+  const base = target.createElement("style");
+  base.textContent = "html,body{margin:0;padding:0;height:100%;background:#16181d;overflow:hidden}.nkd-vid{height:100%;box-sizing:border-box;padding:6px;display:flex;flex-direction:column;gap:6px}.nkd-vid .nkd-vid-stage{flex:1 1 auto;min-height:0;max-width:none!important;aspect-ratio:auto!important}";
+  target.head.appendChild(base);
+}
+async function openPopout(root, title, onMoved) {
+  const home = root.parentElement;
+  if (!home) return null;
+  const placeholder = document.createElement("div");
+  placeholder.className = "nkd-vid-away";
+  placeholder.textContent = "playing in a floating window";
+  const width = Math.max(480, Math.round(root.clientWidth) || 640);
+  const height = Math.max(360, Math.round(root.offsetHeight) || 480);
+  let win = null;
+  const pip = window.documentPictureInPicture;
+  try {
+    win = pip ? await pip.requestWindow({ width, height }) : null;
+  } catch {
+    win = null;
+  }
+  if (!win) {
+    win = window.open(
+      "",
+      "nkd-video-viewer",
+      `popup=yes,width=${width},height=${height}`
+    );
+  }
+  if (!win) return null;
+  const doc = win.document;
+  adoptStyles(doc);
+  doc.title = title;
+  home.appendChild(placeholder);
+  doc.body.appendChild(root);
+  root.focus();
+  onMoved();
+  let open = true;
+  const closeOnExit = () => {
+    try {
+      win == null ? void 0 : win.close();
+    } catch {
+    }
+  };
+  const goHome = () => {
+    if (!open) return;
+    open = false;
+    window.removeEventListener("beforeunload", closeOnExit);
+    home.appendChild(root);
+    placeholder.remove();
+    onMoved();
+  };
+  win.addEventListener("pagehide", goHome);
+  win.addEventListener("beforeunload", goHome);
+  window.addEventListener("beforeunload", closeOnExit);
+  return {
+    close: () => {
+      try {
+        win == null ? void 0 : win.close();
+      } catch {
+      }
+      goHome();
+    },
+    isOpen: () => open
+  };
+}
 const COMPARE_ORDER = ["off", "wipe", "difference"];
 const REF_DRIFT_S = 0.25;
 const PREVIEW_MAX_H = 260;
@@ -4613,7 +4872,11 @@ class VideoViewer {
     __publicField(this, "link");
     __publicField(this, "pathLine");
     __publicField(this, "chip");
+    __publicField(this, "labelsChip");
     __publicField(this, "ref", null);
+    /** What the stage is actually showing: the render, or the `_labeled` review copy. The
+     *  download link and the path line stay on `ref` — the labeled copy is display only. */
+    __publicField(this, "shown", null);
     __publicField(this, "info", null);
     __publicField(this, "raf", 0);
     __publicField(this, "dragging", false);
@@ -4644,6 +4907,10 @@ class VideoViewer {
       if (!this.wired) void this.loadReference();
     });
     __publicField(this, "popout", null);
+    /** Showing the `_labeled` review copy instead of the clean render. Display only: the
+     *  download button and the path line keep pointing at the render. */
+    __publicField(this, "showLabels", false);
+    __publicField(this, "labelsBtn");
     /** Persisted on the node, not in a widget: what the viewer is doing does not change what
      *  the graph produces, and an input would re-encode the video on every toggle. */
     __publicField(this, "onState", null);
@@ -4696,11 +4963,24 @@ class VideoViewer {
     button(bar, "pi pi-bookmark", "Use this render as the reference", () => {
       void this.setAsReference();
     });
+    this.showLabels = !!(state == null ? void 0 : state.labels);
+    this.labelsBtn = button(
+      bar,
+      "pi pi-tag",
+      "Show the labeled review copy (tracked widget values burned in)",
+      () => {
+        this.showLabels = !this.showLabels;
+        this.pushState();
+        if (this.ref && this.info) this.setSource(this.ref, this.info);
+      }
+    );
+    this.labelsBtn.style.display = "none";
     this.link = el("a", "nkd-tl-btn", bar);
     this.link.title = "Save a copy";
     this.link.appendChild(el("i", "pi pi-download"));
     revealButton(bar, () => this.ref);
     this.chip = projectChip(bar);
+    this.labelsChip = trackedChip(bar);
     this.status = el("div", "nkd-tl-status", bar);
     this.status.textContent = "no video yet";
     this.pathLine = el("div", "nkd-vid-path", this.root);
@@ -4728,8 +5008,12 @@ class VideoViewer {
     this.want = -1;
     this.seeking = false;
     window.clearTimeout(this.guard);
-    const url = viewUrl(ref);
-    this.link.href = url;
+    const labeled = info.labeled ?? null;
+    this.labelsBtn.style.display = labeled ? "" : "none";
+    this.labelsBtn.classList.toggle("on", this.showLabels && !!labeled);
+    this.shown = this.showLabels && labeled ? labeled : ref;
+    const url = viewUrl(this.shown);
+    this.link.href = viewUrl(ref);
     this.link.setAttribute("download", ref.filename);
     const aspect = info.width / Math.max(1, info.height);
     this.stage.style.aspectRatio = `${info.width} / ${info.height}`;
@@ -4738,7 +5022,7 @@ class VideoViewer {
       this.still.style.display = "none";
       this.video.style.display = "";
       if (this.video.src !== url) this.video.src = url;
-      ensureThumbnails(ref, {
+      ensureThumbnails(this.shown, {
         fps: info.fps,
         frame_count: info.frame_count,
         duration: info.frame_count / Math.max(1e-6, info.fps),
@@ -5005,8 +5289,11 @@ class VideoViewer {
    * backend states the codec and this decides.
    */
   get playable() {
-    var _a;
-    if (((_a = this.info) == null ? void 0 : _a.preview) !== "video") return false;
+    var _a, _b;
+    if (this.showLabels && ((_a = this.info) == null ? void 0 : _a.labeled)) {
+      return this.video.canPlayType('video/mp4; codecs="avc1.42E01E"') !== "";
+    }
+    if (((_b = this.info) == null ? void 0 : _b.preview) !== "video") return false;
     const mime = this.info.mime;
     if (!mime) return true;
     return this.video.canPlayType(mime) !== "";
@@ -5018,7 +5305,8 @@ class VideoViewer {
       loop: this.video.loop,
       muted: this.video.muted,
       compare: this.compare,
-      wipe: this.wipe
+      wipe: this.wipe,
+      labels: this.showLabels
     });
   }
   wire() {
@@ -5186,9 +5474,9 @@ class VideoViewer {
     const columns = Math.ceil(w / step);
     let have = 0;
     for (let i = 0; i < columns; i++) {
-      if (thumbnailAt(this.ref, (i + 0.5) / columns * duration)) have++;
+      if (thumbnailAt(this.shown, (i + 0.5) / columns * duration)) have++;
     }
-    const key = `${this.ref.filename}|${Math.round(w)}|${dpr}|${have}`;
+    const key = `${this.shown.filename}|${Math.round(w)}|${dpr}|${have}`;
     if (key === this.stripKey) return this.strip;
     this.stripKey = key;
     this.strip.width = Math.max(1, Math.round(w * dpr));
@@ -5198,7 +5486,7 @@ class VideoViewer {
     sctx.fillStyle = "#111318";
     sctx.fillRect(0, 0, w, SCRUB_H);
     for (let x = 0; x < w; x += step) {
-      const thumb = thumbnailAt(this.ref, (x + step / 2) / w * duration);
+      const thumb = thumbnailAt(this.shown, (x + step / 2) / w * duration);
       if (!thumb) continue;
       const tw = Math.min(step, w - x);
       sctx.drawImage(
@@ -5234,7 +5522,7 @@ class VideoViewer {
       this.status.textContent = "no video yet";
       return;
     }
-    if (this.ref && this.playable) {
+    if (this.shown && this.playable) {
       ctx.drawImage(this.buildStrip(w, dpr), 0, 0, w, SCRUB_H);
       const px = this.frame / Math.max(1, info.frame_count - 1) * w;
       ctx.fillStyle = "rgba(74,180,255,0.20)";
@@ -5258,6 +5546,7 @@ class VideoViewer {
   destroy() {
     api.removeEventListener("execution_success", this.onPromptDone);
     this.chip.destroy();
+    this.labelsChip.destroy();
     if (this.raf) cancelAnimationFrame(this.raf);
     this.video.removeAttribute("src");
     this.video.load();
@@ -5265,6 +5554,7 @@ class VideoViewer {
 }
 const NODE_NAME$1 = "NKDVideoViewer";
 const MIN_W$1 = 320;
+const SCHEMA_VERSION = 2;
 const STATE_PROP = "nkdVideoView";
 const NAMING_TEMPLATES = [
   ["Project (versioned)", "%project%/%category%", "%node%_v%v###%"],
@@ -5325,6 +5615,7 @@ function registerVideoViewer() {
       if ((nodeData == null ? void 0 : nodeData.name) !== NODE_NAME$1) return;
       if (nodeType.prototype.__nkdVideoWrapped) return;
       nodeType.prototype.__nkdVideoWrapped = true;
+      guardWidgetOrder(nodeType, "NKD Video Viewer", SCHEMA_VERSION);
       const origCreated = nodeType.prototype.onNodeCreated;
       nodeType.prototype.onNodeCreated = function() {
         var _a;
@@ -5332,6 +5623,8 @@ function registerVideoViewer() {
         ensureStyles();
         const node = this;
         wireNaming(node);
+        hideWidget(findW(node, "labels"));
+        requestAnimationFrame(syncLabelWidgets);
         const viewer = new VideoViewer((_a = node.properties) == null ? void 0 : _a[STATE_PROP]);
         viewer.onState = (s) => {
           node.properties = node.properties || {};
@@ -5462,6 +5755,10 @@ function makeHost(node, state, pool, audioOnly = false) {
     getFps: () => numW("fps", 24),
     getStartFrame: () => Math.max(0, Math.round(numW("start_frame", 0))),
     setStartFrame: (v) => setW("start_frame", Math.max(0, Math.round(v))),
+    isStartFrameLinked: () => {
+      var _a;
+      return ((_a = node.inputs) == null ? void 0 : _a.some((i) => i.name === "start_frame" && i.link != null)) ?? false;
+    },
     getFrameCount: () => Math.max(0, Math.round(numW("frame_count", 0))),
     setFrameCount: (v) => setW("frame_count", Math.max(0, Math.round(v))),
     getQuantize: () => {
@@ -5668,6 +5965,7 @@ function registerTimelineNode(v) {
       if ((nodeData == null ? void 0 : nodeData.name) !== v.node) return;
       if (nodeType.prototype[v.flag]) return;
       nodeType.prototype[v.flag] = true;
+      guardWidgetOrder(nodeType, v.node, 1);
       const origCreated = nodeType.prototype.onNodeCreated;
       nodeType.prototype.onNodeCreated = function() {
         var _a;
@@ -5980,6 +6278,7 @@ registerTimelineNode({
 });
 registerFreezeFrames();
 registerVideoViewer();
+registerTrackedWidgets();
 registerProjectTopbar();
 export {
   config,

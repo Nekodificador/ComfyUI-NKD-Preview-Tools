@@ -23,6 +23,8 @@ import {
 import { ensureStyles } from "./timeline/styles";
 import { registerFreezeFrames, syncAllFreezeNodes } from "./freezeFrames";
 import { registerVideoViewer } from "./video/register";
+import { registerTrackedWidgets } from "./labels";
+import { guardWidgetOrder } from "./schemaGuard";
 import { registerProjectTopbar } from "./projects";
 import {
   MAX_INSET, ROW_SAFETY, findW, hideWidget, keepDomWidgetSized, setWidgetVisible,
@@ -150,6 +152,8 @@ function makeHost(node: any, state: { tl: Timeline }, pool: () => VideoPool,
     getFps: () => numW("fps", 24),
     getStartFrame: () => Math.max(0, Math.round(numW("start_frame", 0))),
     setStartFrame: (v) => setW("start_frame", Math.max(0, Math.round(v))),
+    isStartFrameLinked: () =>
+      node.inputs?.some((i: any) => i.name === "start_frame" && i.link != null) ?? false,
     getFrameCount: () => Math.max(0, Math.round(numW("frame_count", 0))),
     setFrameCount: (v) => setW("frame_count", Math.max(0, Math.round(v))),
     getQuantize: () => (findW(node, "model")?.value ?? "free") as QuantizeMode,
@@ -370,6 +374,9 @@ comfyApp.registerExtension({
     // rendering forever as frozen ghosts.
     if (nodeType.prototype[v.flag]) return;
     nodeType.prototype[v.flag] = true;
+    // v1: no reorder has happened under the stamp regime — this only makes saved values
+    // restore BY NAME (immune to future reorders), it never toasts.
+    guardWidgetOrder(nodeType, v.node, 1);
 
     const origCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function (this: any) {
@@ -857,6 +864,8 @@ registerTimelineNode({
 // The Freeze Frames companion: its own extension, registered from the same bundle.
 registerFreezeFrames();
 registerVideoViewer();
+// Right-click "Track widget" on ANY node → burned into the viewer's _labeled review copy.
+registerTrackedWidgets();
 // The project picker in ComfyUI's top bar, so switching project does not require having a
 // node on screen.
 registerProjectTopbar();

@@ -50,6 +50,9 @@ export interface TimelineHost {
   setStartFrame(v: number): void;
   getFrameCount(): number;
   setFrameCount(v: number): void;
+  /** True when start_frame arrives through a LINK: then it cannot be rewritten, and the
+   *  crop keeps the original numbering instead of rebasing to 0. */
+  isStartFrameLinked(): boolean;
   getQuantize(): QuantizeMode;
   getQuantizeN(): number;
   getOutSize(): [number, number];
@@ -244,6 +247,11 @@ export class TimelineEditor {
 
   private drag: Drag | null = null;
   private hover: Hit = { kind: "none" };
+  /** Transient status-bar message. A button whose conditions are not met must SAY so
+   *  there — silently doing nothing reads as a dead button (reported by Neko). */
+  private notice: { text: string; until: number } | null = null;
+  /** Last play/pause state painted on the button — see updateStatus for why it matters. */
+  private playBtnPlaying: boolean | null = null;
   private snapping = true;
   /**
    * Does the cut grid have to respect the SOUNDTRACK's grid as well?
@@ -276,7 +284,8 @@ export class TimelineEditor {
   /** Draw the wave on a logarithmic scale. UI-only, like the mask overlay: it changes
    *  nothing the backend renders, so it stays out of the widget and its cache signature. */
   private waveDb = false;
-  private showClipWave = false;
+  /** Default ON (Neko, 2026-08-19): the band is why the toggle exists; session-only. */
+  private showClipWave = true;
   /** Scratch canvas for tinting the mask; reused so playback does not allocate. */
   private readonly tintCanvas = document.createElement("canvas");
   /** Last quantise/fps pair we warned about, so the toast fires on CHANGE only. */
@@ -446,6 +455,7 @@ export class TimelineEditor {
         waveBtn.classList.toggle("on", this.showClipWave);
         this.requestRender();
       });
+    waveBtn.classList.toggle("on", this.showClipWave);   // reflect the default
 
     /**
      * One flex box per family of buttons, with a rule drawn between them by CSS.
@@ -911,6 +921,9 @@ export class TimelineEditor {
     this.canvas.setPointerCapture(e.pointerId);
     this.canvas.addEventListener("pointermove", this.onMove);
     this.canvas.addEventListener("pointerup", this.onUp);
+    // A cancelled gesture (focus loss, the widget reparented by a renderer switch) fires
+    // pointercancel INSTEAD of pointerup; without this the drag state never clears.
+    this.canvas.addEventListener("pointercancel", this.onUp);
     this.requestRender();
   };
 
@@ -1062,6 +1075,7 @@ export class TimelineEditor {
   private onUp = (e: PointerEvent): void => {
     this.canvas.removeEventListener("pointermove", this.onMove);
     this.canvas.removeEventListener("pointerup", this.onUp);
+    this.canvas.removeEventListener("pointercancel", this.onUp);
     try { this.canvas.releasePointerCapture(e.pointerId); } catch { /* already released */ }
     const d = this.drag;
     this.drag = null;
@@ -1428,7 +1442,10 @@ export class TimelineEditor {
    */
   private trimToMaterial(): void {
     const r = materialRange(this.tl);
-    if (!r) return;
+    if (!r) {
+      this.say("No material on the timeline — nothing to fit the range to");
+      return;
+    }
     this.pushUndo();
     this.host.setStartFrame(r.start);
     this.host.setFrameCount(Math.max(1, r.end - r.start));
@@ -1515,9 +1532,26 @@ export class TimelineEditor {
     const fps = this.host.getFps();
     this.pushUndo();
     const changed = cropToRange(this.tl, start, end, fps, (c) => this.rateOf(c));
-    if (!changed) {
+    // Rebase to 0 whenever start_frame is OURS to write. The old rule kept the numbering
+    // unconditionally because start_frame can arrive through a link — but with a plain
+    // widget the un-rebased result reads as the button not working (reported by Neko):
+    // you crop to the range and the render still starts at frame 173.
+    const rebase = start > 0 && !this.host.isStartFrameLinked();
+    if (!changed && !rebase) {
       this.undoStack.pop();          // nothing to do: do not leave a no-op undo behind
+      this.say("Nothing outside the in/out range — nothing to crop");
       return;
+    }
+    if (rebase) {
+      for (const lane of [this.tl.clips, this.tl.masks,
+                          this.tl.audio as unknown as Clip[]]) {
+        for (const c of lane) c.start -= start;   // markers are offsets: they ride along
+      }
+      this.tl.ui.playhead = Math.max(0, this.tl.ui.playhead - start);
+      this.tl.ui.scroll = Math.max(0, this.tl.ui.scroll - start);
+      this.host.setStartFrame(0);
+    } else if (changed && start > 0) {
+      this.say("Cropped — start_frame is linked, so the numbering was kept");
     }
     this.selection.clear();          // ids may have gone with the clips
     sortClips(this.tl);
@@ -1589,6 +1623,13 @@ export class TimelineEditor {
       (c) => this.framesOf(c), (c) => this.rateOf(c), ids);
     if (!changed) {
       this.undoStack.pop();       // nothing to expand: leave no empty undo behind
+      // The usual reasons, said out loud: the length of a tensor source is unknown until
+      // the first run, and a selection limits the button to the selected clips.
+      this.say(ids
+        ? "Nothing to expand in the selection — already at full length "
+          + "(deselect to expand everything)"
+        : "Nothing to expand — every clip already shows its full source "
+          + "(a computed source reports its length after the first run)");
       return;
     }
     this.host.commit();
@@ -1878,15 +1919,24 @@ export class TimelineEditor {
     const w = cv.clientWidth;
     if (w < 1 || logicalH < 1) return false;
     // HiDPI plus graph zoom: without ds.scale the canvas is blurry when zoomed in.
+    // CAPPED: the product is pixels PER AXIS, so zoom 4 on a HiDPI screen would raster
+    // 16-64x the pixels of every frame - filmstrips, waveform and monitor included - and
+    // the zoom survives a renderer switch, which reads as "the preview stays at 2 fps
+    // even back on legacy nodes". 3x is sharper than any real inspection needs.
     const graphScale = (window as any).app?.canvas?.ds?.scale ?? 1;
-    const s = Math.max(1, window.devicePixelRatio || 1) * Math.max(1, graphScale);
+    const s = Math.min(3,
+      Math.max(1, window.devicePixelRatio || 1) * Math.max(1, graphScale));
     const bw = Math.round(w * s);
     const bh = Math.round(logicalH * s);
-    if (cv.width !== bw || cv.height !== bh) {
+    // 2 px deadband: reallocating a canvas clears it and costs real time, and a layout
+    // that flaps between two widths (the two renderers disagree by a rounding) would
+    // otherwise realloc EVERY frame. The transform below reads the REAL buffer size, so
+    // a skipped realloc still maps logical -> buffer exactly.
+    if (Math.abs(cv.width - bw) > 2 || Math.abs(cv.height - bh) > 2) {
       cv.width = bw;
       cv.height = bh;
     }
-    ctx.setTransform(bw / w, 0, 0, bh / logicalH, 0, 0);
+    ctx.setTransform(cv.width / w, 0, 0, cv.height / logicalH, 0, 0);
     return true;
   }
 
@@ -2185,7 +2235,10 @@ export class TimelineEditor {
         // Muted clips keep the band: it is a guide to what is IN the material, and the
         // per-clip speaker already says whether it plays.
         if (this.showClipWave && lane === "video" && bodyH > 24) {
-          const wh = Math.max(12, Math.round(bodyH * 0.35));
+          // Half the body, not a third: at 35% telling sound from silence took squinting
+          // (Neko, 2026-08-19). The stills above stay recognisable at half height; the
+          // wave does not.
+          const wh = Math.max(18, Math.round(bodyH * 0.5));
           const wy = body + bodyH - wh;
           ctx.fillStyle = "rgba(6,12,18,0.55)";
           ctx.fillRect(x, wy, w, wh);
@@ -2694,10 +2747,33 @@ export class TimelineEditor {
     ctx.globalAlpha = 1;
   }
 
+  /** Show `text` in the status bar for a few seconds, then fall back to the readout. */
+  private say(text: string): void {
+    this.notice = { text, until: performance.now() + 4000 };
+    window.setTimeout(() => this.requestRender(), 4100);   // clear even with no other renders
+    this.requestRender();
+  }
+
   private updateStatus(fps: number, count: number): void {
+    if (this.notice) {
+      if (performance.now() < this.notice.until) {
+        this.status.textContent = this.notice.text;
+        return;
+      }
+      this.notice = null;
+    }
     const rate = this.transport.rate;
-    this.playBtn.innerHTML = `<i class="pi ${rate === 0 ? "pi-play" : "pi-pause"}"></i>`;
-    this.playBtn.classList.toggle("on", rate !== 0);
+    // Written ONLY on a state change. This runs every render — every frame during
+    // playback — and an innerHTML assignment replaces the <i> even when the string is
+    // identical. With the icon dying under the pointer between pointerdown and pointerup,
+    // the browser never dispatches the click: that was "the play button stops working
+    // while playing, have to use Space" (reported by Neko + a user, 2026-08-19).
+    const playing = rate !== 0;
+    if (this.playBtnPlaying !== playing) {
+      this.playBtnPlaying = playing;
+      this.playBtn.innerHTML = `<i class="pi ${playing ? "pi-pause" : "pi-play"}"></i>`;
+      this.playBtn.classList.toggle("on", playing);
+    }
     const secs = count / (fps || 1);
     const mode = this.host.getQuantize();
     const raw = this.host.getFrameCount() > 0
@@ -2746,6 +2822,7 @@ export class TimelineEditor {
     this.canvas.removeEventListener("pointermove", this.onHover);
     this.canvas.removeEventListener("pointermove", this.onMove);
     this.canvas.removeEventListener("pointerup", this.onUp);
+    this.canvas.removeEventListener("pointercancel", this.onUp);
     this.canvas.removeEventListener("pointerleave", this.onLeave);
     this.canvas.removeEventListener("contextmenu", this.onContextMenu);
     this.canvas.removeEventListener("wheel", this.onWheel);

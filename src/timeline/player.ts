@@ -165,6 +165,10 @@ export class Transport {
       try { n.stop(); } catch { /* already finished */ }
     }
     this.nodes = [];
+    // Every schedule builds a fresh master gain; the old one stayed wired to the
+    // speakers forever (a leak per play press, per loop wrap and per fade tweak).
+    this.gain?.disconnect();
+    this.gain = null;
   }
 
   /** Re-schedule from the current position: a mute toggled mid-playback. */
@@ -193,7 +197,11 @@ export class Transport {
     const tl = this.host.getTimeline();
     const fps = this.host.getFps();
     const end = this.host.getEndFrame();
-    const now = tl.ui.playhead;
+    // The transport's OWN position, never `ui.playhead`: on a loop wrap the tick resets
+    // `pos` and reschedules BEFORE the seek writes the new playhead back, so reading the
+    // widget here scheduled the whole pass from the old end-of-range position - zero
+    // nodes, a silent pass, and pressing play twice "fixed" it. (Reported by Neko.)
+    const now = Math.round(this.pos);
 
     this.gain = ctx.createGain();
     this.gain.connect(ctx.destination);
