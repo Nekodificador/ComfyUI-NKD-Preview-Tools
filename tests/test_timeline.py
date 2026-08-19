@@ -28,6 +28,7 @@ from nkd_timeline import (  # noqa: E402
     build_sources, classify,
     AudioEnv, audio_env, clip_gain_ramp,
     clip_bound_indices, fit_frames, gather_window, marker_indices, mix_audio,
+    muted_rows, rows_to_ranges,
     parse_frame_list,
     parse_timeline, quantize_count, quantize_stops,
     source_frame, source_meta, timeline_span, track_blend,
@@ -865,6 +866,54 @@ def test_fades_are_clamped_into_the_clip():
     neg = parse_timeline(_dumps({"clips": [{"src": "m", "length": 5, "gain": -3}]}))
     assert neg["clips"][0]["gain"] == 0.0
 
+
+
+def test_muted_zones_export_as_mask_and_ranges():
+    """Muting a clip is the fourth gesture: not "drop the picture" (audioOnly), not "make
+    a gap" (delete) — "regenerate THIS sound". It has to come out as a mask for our AV
+    nodes and as in,out second pairs for MVEx Audio Mask To Latent's time_ranges."""
+    # The helpers, on their own grid: window-relative, merged across lanes, clipped.
+    rows = muted_rows([[{"start": 2, "length": 4, "muted": True},
+                        {"start": 4, "length": 4, "muted": True},     # overlaps -> one run
+                        {"start": 20, "length": 5, "muted": False}]], 0, 12)
+    assert rows.tolist() == [0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0]
+    assert rows_to_ranges(rows, 10.0) == "0.200,0.800"
+    # Two runs -> two pairs; a start_frame shifts them into window time.
+    two = muted_rows([[{"start": 0, "length": 2, "muted": True}],
+                      [{"start": 8, "length": 10, "muted": True}]], 4, 8)
+    assert rows_to_ranges(two, 10.0) == "0.400,0.800"                  # first clip fell out
+    assert rows_to_ranges(muted_rows([[]], 0, 5), 10.0) == ""          # nothing muted
+
+    # Through the node: an even count of parseable seconds, and a mask that costs nothing.
+    seq = torch.full((10, 4, 4, 3), 0.5)
+    voice = {"waveform": torch.ones((1, 1, 44100)), "sample_rate": 44100}
+    tl = _dumps({
+        "clips": [{"src": "media_0", "track": 0, "start": 0, "trimIn": 0, "length": 10}],
+        "masks": [],
+        "audio": [{"src": "media_1", "start": 2, "trimIn": 0, "length": 3, "muted": True}],
+        "ui": {"playhead": 0}})
+    r = NKDTimeline.execute(
+        media={"media_0": seq, "media_1": voice}, timeline=tl, import_mode="stack", fps=24.0,
+        start_frame=0, frame_count=10, width=4, height=4, fit="stretch",
+        aspect_ratio="Custom", megapixels=1.0, size_multiple=16,
+        model="free", quantize_n=8, clip_audio=False)
+    o = outs(r)
+    am, ranges = o["audio_mask"], o["audio_ranges"]
+    assert am.shape == (10, 4, 4) and am.stride() == (1, 0, 0)         # view, not a buffer
+    assert [float(am[f].max()) for f in (0, 1, 2, 4, 5)] == [0, 0, 1, 1, 0]
+    vals = [float(v) for v in ranges.split(",")]
+    assert len(vals) % 2 == 0                                          # MVEx-parseable
+    assert vals == [round(2 / 24, 3), round(5 / 24, 3)], vals
+    # An unmuted timeline exports silence about it: black mask, empty string.
+    r2 = NKDTimeline.execute(
+        media={"media_0": seq}, timeline=_dumps({
+            "clips": [{"src": "media_0", "track": 0, "start": 0, "trimIn": 0,
+                       "length": 10}], "masks": [], "audio": [], "ui": {"playhead": 0}}),
+        import_mode="stack", fps=24.0, start_frame=0, frame_count=10, width=4, height=4,
+        fit="stretch", aspect_ratio="Custom", megapixels=1.0, size_multiple=16,
+        model="free", quantize_n=8, clip_audio=False)
+    o2 = outs(r2)
+    assert float(o2["audio_mask"].max()) == 0.0 and o2["audio_ranges"] == ""
 
 
 if __name__ == "__main__":

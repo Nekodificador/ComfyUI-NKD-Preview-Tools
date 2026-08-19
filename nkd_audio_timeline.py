@@ -25,11 +25,13 @@ from comfy_api.latest import io
 # real, and the tests are the only place the mixing arithmetic gets exercised at all.
 try:
     from .nkd_timeline import (
-        audio_env, classify, mix_audio, parse_timeline, timeline_span,
+        audio_env, classify, mix_audio, muted_rows, parse_timeline, rows_to_ranges,
+        timeline_span,
     )
 except ImportError:                                             # pragma: no cover
     from nkd_timeline import (                                  # type: ignore[no-redef]
-        audio_env, classify, mix_audio, parse_timeline, timeline_span,
+        audio_env, classify, mix_audio, muted_rows, parse_timeline, rows_to_ranges,
+        timeline_span,
     )
 
 
@@ -236,6 +238,14 @@ class NKDAudioTimeline(io.ComfyNode):
             ],
             outputs=[
                 io.Audio.Output(display_name="audio"),
+                # Slotted next to `audio` on 2026-08-19 (Neko's call, BREAKING: sockets
+                # wire by index, duration/frame_count/fps shifted by 1).
+                io.String.Output(display_name="audio_ranges",
+                                 tooltip="The MUTED stretches as in,out second pairs "
+                                         "(e.g. 0.292,0.833), relative to the rendered "
+                                         "range — the exact syntax MVEx Audio Mask To "
+                                         "Latent's time_ranges input parses. Mute a clip "
+                                         "to mark its sound for regeneration."),
                 io.Float.Output(display_name="duration"),
                 io.Int.Output(display_name="frame_count"),
                 io.Float.Output(display_name="fps"),
@@ -266,7 +276,9 @@ class NKDAudioTimeline(io.ComfyNode):
 
         audio, count = render_audio(tl, sources, fps, max(0, int(start_frame)),
                                     max(0, int(frame_count)))
-        return io.NodeOutput(audio, count / fps, count, fps)
+        ranges = rows_to_ranges(muted_rows([tl["audio"]], max(0, int(start_frame)),
+                                           count), fps)
+        return io.NodeOutput(audio, ranges, count / fps, count, fps)
 
 
 def demo() -> None:

@@ -381,6 +381,45 @@ def timeline_span(*lanes: list[dict]) -> int:
     return max(ends) if ends else 0
 
 
+def muted_rows(lanes: list[list[dict]], start_frame: int, count: int) -> torch.Tensor:
+    """One value per rendered frame: 1.0 where at least one MUTED clip covers it.
+
+    The mute toggle is the user saying "this stretch of sound goes away" — which for a
+    regeneration workflow is exactly "generate new sound here". Union across clips: an
+    unmuted clip overlapping a muted one still sounds, but silencing was an explicit
+    gesture and the mask reports the gesture, not the resulting mix.
+    """
+    rows = torch.zeros(count, dtype=torch.float32)
+    end = start_frame + count
+    for lane in lanes:
+        for c in lane:
+            if not c.get("muted"):
+                continue
+            a = max(c["start"], start_frame) - start_frame
+            b = min(c["start"] + c["length"], end) - start_frame
+            if b > a:
+                rows[a:b] = 1.0
+    return rows
+
+
+def rows_to_ranges(rows: torch.Tensor, fps: float) -> str:
+    """Per-frame rows -> "in,out" second pairs, e.g. "0.292,0.833,1.500,2.000".
+
+    The exact syntax MVEx Audio Mask To Latent's `time_ranges` input parses (an even
+    count of comma-separated seconds, out strictly after in). Relative to the RENDERED
+    window, like `marker_indices`: the audio output starts at start_frame, so absolute
+    timeline seconds would mask the wrong stretch of it.
+    """
+    pairs, start = [], None
+    for i, v in enumerate(rows.tolist() + [0.0]):
+        if v > 0 and start is None:
+            start = i
+        elif v <= 0 and start is not None:
+            pairs.append(f"{start / fps:.3f},{i / fps:.3f}")
+            start = None
+    return ",".join(pairs)
+
+
 def source_frame(clip: dict, f: int, src_fps: float, fps: float) -> int:
     """Source frame corresponding to timeline frame `f`.
 
@@ -1066,6 +1105,21 @@ class NKDTimeline(io.ComfyNode):
                                        "generated there. This is the socket for temporal "
                                        "inpainting."),
                 io.Audio.Output(display_name="audio"),
+                # Slotted next to `audio` on 2026-08-19 (Neko's call, BREAKING for saved
+                # workflows: sockets wire by index, width…markers shifted by 2). Same-day
+                # outputs, grouped with the sound they describe.
+                io.Mask.Output(display_name="audio_mask",
+                               tooltip="WHITE on the frames covered by a MUTED clip — the "
+                                       "stretches you silenced so a model can regenerate "
+                                       "their sound. One value per frame: feeds the audio "
+                                       "mask of 😺NKD AV Latent / 😺NKD Audio Mask "
+                                       "directly. For MVEx Audio Mask To Latent use "
+                                       "audio_ranges instead."),
+                io.String.Output(display_name="audio_ranges",
+                                 tooltip="The same muted stretches as in,out second pairs "
+                                         "(e.g. 0.292,0.833), relative to the rendered "
+                                         "range — the exact syntax MVEx Audio Mask To "
+                                         "Latent's time_ranges input parses."),
                 # No VIDEO output. It only ever got split back into components downstream,
                 # and core's own Create Video makes one from `images` + `audio` in one node
                 # for the rare case that wants the container.
@@ -1328,9 +1382,17 @@ class NKDTimeline(io.ComfyNode):
         else:
             generate = torch.maximum(mask_out, gap_rows.view(count, 1, 1))
 
+        # The mute gesture, exported: white per frame for our own AV nodes (batch = frames,
+        # a stride-0 view like coverage), and as second pairs for MVEx Audio Mask To
+        # Latent's time_ranges. Both lanes with sound count; the mask lane has none.
+        mrows = muted_rows([clips, auclips], start_frame, count)
+        audio_mask = mrows.view(count, 1, 1).expand(count, height, width)
+        audio_ranges = rows_to_ranges(mrows, fps)
+
         # Must match the schema's output order exactly - the runtime indexes this tuple by
         # slot number, so a mismatch silently hands one socket's value to another.
         return io.NodeOutput(out, mask_out, coverage, generate, audio_out,
+                             audio_mask, audio_ranges,
                              int(width), int(height), float(fps), int(count),
                              float(duration), int(current), current_image, markers)
 
