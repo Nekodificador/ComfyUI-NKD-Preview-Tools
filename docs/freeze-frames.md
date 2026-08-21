@@ -2,9 +2,16 @@
 
 Holds individual frames of a batch as still images, one per socket.
 
-```
-NKD Timeline ──▶ images ──┬──▶ NKD Freeze Frames ──▶ images / count / frame_1, frame_2, …
-             markers ─────┘
+```mermaid
+flowchart LR
+    TL["**NKD Timeline**"]:::nkd -- images --> FF
+    TL -- markers --> FF
+    FF["**NKD Freeze Frames**"]:::nkd --> O1(["images"]):::output
+    FF --> O2(["count"]):::output
+    FF --> O3(["frame_1, frame_2, …"]):::output
+
+    classDef nkd fill:#3b3b6b,stroke:#8ab4ff,stroke-width:2px,color:#fff
+    classDef output fill:#1f4a1f,stroke:#7fd97f,color:#fff
 ```
 
 - Wire Timeline's `markers` output into `frames` and every frame you marked with **M**
