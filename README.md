@@ -8,6 +8,8 @@ Preview tools for [ComfyUI](https://github.com/comfyanonymous/ComfyUI):
 - **NKD Timeline** — lay several videos and audio tracks on a multi-track timeline and get fps, frame count and resolution back as connectable sockets.
 - **NKD Audio Timeline** — the same editor without the picture: cut and arrange sound, set a level and drag fades into the joins.
 - **NKD Video Viewer** — save your video in the format you need and watch it in a player you can actually scrub, loop and compare against a previous take.
+- **NKD Freeze Frames** — pull individual frames out of a batch as stills, one per socket.
+- **NKD Reference** — set the image, mask or video the other nodes compare against.
 
 
 https://github.com/user-attachments/assets/e52f40df-36a2-4027-8f7b-1e987ed2615f
@@ -59,6 +61,34 @@ https://github.com/user-attachments/assets/75a9a3de-9ded-4d41-95f2-3de4421d63ac
 - **Name and version your output**: tokens for the node's own title, resolution, fps and the date, plus automatic `v001`, `v002` versioning that picks the next free number. Naming templates are in the node's right-click menu.
 - **Changing the version does not re-render**: the same render is reused, so it is instant. And if nothing changed upstream, no new version is written at all.
 - **Before and after**: wipe between the render and a reference, look at the difference, or hold B to see the reference whole. One button makes what is on screen the reference for the next run.
+
+### NKD Freeze Frames
+
+Holds individual frames of a batch as still images, one per socket.
+
+```
+NKD Timeline ──▶ images ──┬──▶ NKD Freeze Frames ──▶ images / count / frame_1, frame_2, …
+             markers ─────┘
+```
+
+- Wire Timeline's `markers` output into `frames` and every frame you marked with **M**
+  comes out of its own `frame_N` socket, previewed on the node so you can see which is
+  which.
+- The `frames` field can just be typed instead: `0, 12, 47`. Any separator works,
+  negatives count from the end, and repeats are kept.
+- `images` carries the same frames as one batch, and `count` how many there are.
+
+### NKD Reference
+
+Captures whatever is connected as the workflow's active reference, so the other nodes
+have something to compare against.
+
+- **NKD Popup Preview** can press-and-hold to flash a reference image over the current
+  preview, or lay a reference mask over it, tinted and adjustable.
+- **NKD Video Viewer** wipes between its own render and a reference video.
+- It takes an IMAGE, a MASK or a VIDEO on the same input.
+- Image, mask and video are separate slots, so wire several Reference nodes to have one
+  of each. Within a slot, the last node to execute wins.
 
 ## 🛠️ Installation
 
