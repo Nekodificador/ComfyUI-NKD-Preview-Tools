@@ -6,11 +6,10 @@ import { api } from "../../scripts/api.js";
 // registerExtension calls still run exactly once.
 import {
     config as nkdConfig, ensureStyles, loadConfig, mountDomWidget, projectChip,
-    revealButton, saveToProject,
+    revealButton, saveToProject, reveal, revealAvailable,
 } from "./nkd_timeline.js";
 
 const NODE_TYPE = "NKDPopupPreviewNode";
-const LS_PRIMARY = "nkd_primary_node_id";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -46,13 +45,6 @@ function loadImageDimensions(url) {
     });
 }
 
-function viewerHtmlUrl() {
-    // Build the viewer URL relative to this script file:
-    // import.meta.url = .../extensions/<pack>/js/popup_preview.js
-    // viewer.html sits at  .../extensions/<pack>/js/viewer.html
-    return new URL("viewer.html", import.meta.url).href;
-}
-
 async function getReferenceUrl() {
     try {
         const r = await fetch(api.apiURL("/nkd/ref/get"));
@@ -77,8 +69,10 @@ async function getReferenceMaskUrl() {
 
 // ── Primary node tracking ─────────────────────────────────────────────────────
 
-// nodeId string of the current primary node, or null.
-let primaryNodeId = localStorage.getItem(LS_PRIMARY) ?? null;
+// nodeId string of the current primary node, or null. The mark itself lives in
+// node.properties.nkdPrimary so it travels with the WORKFLOW: a localStorage id would
+// leak onto whichever other workflow happens to have a node with the same number.
+let primaryNodeId = null;
 
 const PRIMARY_OUTLINE_COLOR = "#4cc9f0";
 const PRIMARY_BG_COLOR      = "#1a2a33";
@@ -103,29 +97,42 @@ function setPrimary(nodeId) {
     const prev = primaryNodeId;
     primaryNodeId = nodeId ? String(nodeId) : null;
 
-    if (primaryNodeId) {
-        localStorage.setItem(LS_PRIMARY, primaryNodeId);
-    } else {
-        localStorage.removeItem(LS_PRIMARY);
-    }
-
     // Redraw both affected nodes so their button labels and outline refresh.
     for (const id of new Set([prev, primaryNodeId])) {
         if (!id) continue;
         const node = app.graph?.getNodeById(Number(id));
         if (!node) continue;
         applyPrimaryStyle(node, isPrimary(id));
+        setMark(node, "nkdPrimary", isPrimary(id));
         node.setDirtyCanvas(true, true);
     }
+}
+
+function setMark(node, key, on) {
+    if (on) { node.properties ??= {}; node.properties[key] = true; }
+    else if (node.properties) delete node.properties[key];
+}
+
+/** Adopt the mark a loaded workflow carries; the first marked node wins, copies are cleared. */
+function adoptMark(cls, key) {
+    let found = null;
+    for (const n of app.graph?._nodes ?? []) {
+        if (n.comfyClass !== cls || !n.properties?.[key]) continue;
+        if (found) setMark(n, key, false); else found = n;
+    }
+    return found;
 }
 
 function isPrimary(nodeId) {
     return String(nodeId) === primaryNodeId;
 }
 
-// The popup node the shortcuts act on: the marked primary, or the sole popup
-// node if none is marked. Emits a toast and returns null when it can't decide
-// (none exist, or several exist with none marked).
+// The popup node the shortcuts act on. Explicit beats implicit: the starred primary, then
+// the ONE popup node currently selected, then the one that ran last, then the sole popup
+// node. So with several popups the star is optional - the shortcut follows what you are
+// working on. Emits a toast and returns null when nothing can be inferred.
+let lastActiveId = null;
+
 function resolvePrimaryNode() {
     const nodes = (app.graph?._nodes ?? []).filter(n => n.comfyClass === NODE_TYPE);
     if (primaryNodeId) {
@@ -133,13 +140,17 @@ function resolvePrimaryNode() {
         if (n) return n;
         setPrimary(null); // marked node is gone
     }
+    const sel = Object.values(app.canvas?.selected_nodes ?? {}).filter(n => n.comfyClass === NODE_TYPE);
+    if (sel.length === 1) return sel[0];
+    const last = nodes.find(x => String(x.id) === lastActiveId);
+    if (last) return last;
     if (nodes.length === 1) return nodes[0];
     app.extensionManager?.toast?.add?.({
         severity: "warn",
         summary: nodes.length === 0 ? "No Popup Preview Node" : "Multiple Popup Nodes",
         detail: nodes.length === 0
             ? "Add a Popup Preview node to the graph."
-            : "Several Popup Preview nodes exist — right-click one → Set as primary preview.",
+            : "Several Popup Preview nodes exist — select one, or right-click → Set as primary preview.",
         life: 5000,
     });
     return null;
@@ -147,10 +158,9 @@ function resolvePrimaryNode() {
 
 // ── Send-to-LoadImage target ──────────────────────────────────────────────────
 
-const LS_LOAD_TARGET   = "nkd_load_target_id";
 const LOAD_TARGET_COLOR = "#7a4a1e"; // warm amber outline
 const LOAD_TARGET_BG    = "#2a1c10";
-let loadTargetId = localStorage.getItem(LS_LOAD_TARGET) ?? null;
+let loadTargetId = null;   // mark lives in node.properties.nkdLoadTarget (see primaryNodeId)
 
 function isLoadTarget(nodeId) { return String(nodeId) === loadTargetId; }
 
@@ -163,13 +173,12 @@ function applyLoadTargetStyle(node, on) {
 function setLoadTarget(nodeId) {
     const prev = loadTargetId;
     loadTargetId = nodeId ? String(nodeId) : null;
-    if (loadTargetId) localStorage.setItem(LS_LOAD_TARGET, loadTargetId);
-    else localStorage.removeItem(LS_LOAD_TARGET);
     for (const id of new Set([prev, loadTargetId])) {
         if (!id) continue;
         const node = app.graph?.getNodeById(Number(id));
         if (!node) continue;
         applyLoadTargetStyle(node, isLoadTarget(id));
+        setMark(node, "nkdLoadTarget", isLoadTarget(id));
         node.setDirtyCanvas(true, true);
     }
 }
@@ -281,7 +290,7 @@ function collectUpstreamNodes(startNode) {
 // ── PopupWin ──────────────────────────────────────────────────────────────────
 
 // ── Viewer DOM factory ────────────────────────────────────────────────────────
-// Builds the viewer UI as a DOM element in the host document (never in viewer.html).
+// Builds the viewer UI as a DOM element in the host document (shared by the panel, PiP and OS-window modes).
 // Based on bEpic Viewer's "move live DOM" pattern: the element is appended to the
 // blank window's body — no fetch, no script re-injection needed.
 
@@ -289,7 +298,7 @@ const VIEWER_CSS = `
 .nkd-viewer-root *,.nkd-viewer-root *::before,.nkd-viewer-root *::after{box-sizing:border-box;margin:0;padding:0}
 .nkd-viewer-root{width:100%;height:100%;background:#080808;overflow:hidden;cursor:grab;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;position:relative;container-type:inline-size;}
 .nkd-viewer-root.panning{cursor:grabbing}
-.nkd-help{position:absolute;top:14px;left:14px;z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:help;color:rgba(255,255,255,0.55);background:rgba(28,28,28,0.85);border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(6px);opacity:0;transition:opacity 0.25s,color 0.14s;}
+.nkd-help{position:absolute;top:14px;left:14px;z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:help;color:rgba(255,255,255,0.55);background:rgba(28,28,28,0.85);border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(6px);opacity:0.5;transition:opacity 0.25s,color 0.14s;}
 .nkd-viewer-root:hover .nkd-help{opacity:1}
 .nkd-help:hover{color:#fff}
 .nkd-help svg{width:15px;height:15px;}
@@ -299,9 +308,26 @@ const VIEWER_CSS = `
 .nkd-help-panel hr{border:none;border-top:1px solid rgba(255,255,255,0.1);margin:7px 0;}
 .nkd-vwrap{width:100%;height:100%;position:relative;overflow:hidden;background-color:#050505;background-image:linear-gradient(45deg,#101010 25%,transparent 25%),linear-gradient(-45deg,#101010 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#101010 75%),linear-gradient(-45deg,transparent 75%,#101010 75%);background-size:20px 20px;background-position:0 0,0 10px,10px -10px,-10px 0;}
 .nkd-vimg,.nkd-refimg{position:absolute;top:0;left:0;display:block;transform-origin:0 0;transition:opacity 0.15s;user-select:none;-webkit-user-drag:none;}
-.nkd-refimg{display:none;z-index:1}
+.nkd-refclip{position:absolute;inset:0;display:none;z-index:1;pointer-events:none;overflow:hidden}
 .nkd-viewer-root.holding-ref .nkd-vimg{visibility:hidden}
-.nkd-viewer-root.holding-ref .nkd-refimg{display:block}
+.nkd-viewer-root.holding-ref .nkd-refclip,.nkd-viewer-root.cmp-wipe .nkd-refclip,.nkd-viewer-root.cmp-diff .nkd-refclip{display:block}
+.nkd-viewer-root.cmp-diff .nkd-refclip{mix-blend-mode:difference}
+.nkd-viewer-root.holding-ref .nkd-refclip{clip-path:none !important;mix-blend-mode:normal !important}
+.nkd-wipe{position:absolute;top:0;bottom:0;width:16px;margin-left:-8px;z-index:4;display:none;cursor:ew-resize;touch-action:none}
+.nkd-wipe::before{content:"";position:absolute;left:7px;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.85);box-shadow:0 0 6px rgba(0,0,0,0.6)}
+.nkd-wipe::after{content:"";position:absolute;left:0;top:50%;margin-top:-8px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 0 6px rgba(0,0,0,0.6)}
+.nkd-viewer-root.cmp-wipe .nkd-wipe{display:block}
+.nkd-viewer-root.holding-ref .nkd-wipe{display:none}
+.nkd-viewer-root:focus{outline:none}
+.nkd-live-badge{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:7;display:none;padding:3px 10px;border-radius:10px;font:bold 11px monospace;letter-spacing:1px;color:#fff;background:rgba(180,32,48,0.92);pointer-events:none;}
+.nkd-live-badge.on{display:block}.nkd-live-badge.cancelled{background:rgba(120,120,120,0.92)}
+.nkd-strip{position:absolute;left:50%;bottom:74px;transform:translateX(-50%);z-index:6;display:none;gap:6px;max-width:80%;overflow-x:auto;padding:5px;border-radius:8px;background:rgba(18,18,18,0.85);border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(6px);opacity:0;transition:opacity 0.25s;}
+.nkd-viewer-root:hover .nkd-strip{opacity:1}
+.nkd-strip.on{display:flex}
+.nkd-strip img{height:46px;width:auto;border-radius:4px;border:2px solid transparent;cursor:pointer;flex:none;opacity:0.7}
+.nkd-strip img.cur{border-color:#7dc97d;opacity:1}
+.nkd-count{position:absolute;top:18px;left:50%;margin-left:70px;font:11px monospace;color:rgba(255,255,255,0.5);pointer-events:none;z-index:5;display:none}
+.nkd-count.on{display:block}
 .nkd-ref-badge{position:absolute;top:38px;left:14px;background:rgba(180,32,48,0.92);color:#fff;font:bold 11px monospace;padding:4px 9px;border-radius:4px;pointer-events:none;display:none;z-index:5;letter-spacing:1px;backdrop-filter:blur(4px);}
 .nkd-viewer-root.holding-ref .nkd-ref-badge{display:block}
 .nkd-mask-ov{position:absolute;top:0;left:0;transform-origin:0 0;pointer-events:none;display:none;z-index:2;-webkit-mask-size:100% 100%;mask-size:100% 100%;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;-webkit-mask-mode:luminance;mask-mode:luminance;}
@@ -315,7 +341,9 @@ const VIEWER_CSS = `
 .nkd-mask-color::-webkit-color-swatch{border:none;border-radius:5px;}
 .nkd-mask-op{width:80px;height:30px;cursor:pointer;accent-color:#7dc97d;}
 .nkd-bar,.nkd-btn-close{opacity:0;transition:opacity 0.25s;}
-.nkd-viewer-root:hover .nkd-bar,.nkd-viewer-root:hover .nkd-btn-close{opacity:1}
+.nkd-viewer-root:hover .nkd-bar,.nkd-viewer-root:hover .nkd-btn-close,.nkd-viewer-root:focus-within .nkd-bar{opacity:1}
+/* No hover on touch / PiP-without-pointer: hidden controls would be invisible controls. */
+@media (hover:none){.nkd-bar,.nkd-btn-close,.nkd-strip{opacity:1}}
 /* One full-width bottom bar split into left (reference) + right (actions)
    groups; space-between keeps them apart and each wraps on its own so the
    clusters never overlap on narrow windows. */
@@ -335,7 +363,17 @@ const VIEWER_CSS = `
 .nkd-vbtn:active{transform:scale(0.97)}
 .nkd-btn-run{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
 .nkd-btn-run:hover{background:rgba(60,84,60,0.96);color:#fff}
-.nkd-dims{position:absolute;top:18px;left:48px;font:11px monospace;color:rgba(255,255,255,0.22);pointer-events:none;z-index:5;}
+.nkd-info{position:absolute;top:18px;left:48px;display:flex;gap:10px;align-items:center;font:11px monospace;color:rgba(255,255,255,0.3);pointer-events:none;z-index:5;}
+.nkd-zoom{pointer-events:auto;cursor:pointer;font:inherit;color:rgba(255,255,255,0.55);background:rgba(28,28,28,0.7);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:1px 6px}
+.nkd-zoom:hover{color:#fff}
+.nkd-px{color:rgba(255,255,255,0.55)}
+.nkd-more{position:relative;display:inline-flex}
+.nkd-more-menu{position:absolute;bottom:36px;right:0;display:none;flex-direction:column;align-items:stretch;gap:6px;padding:6px;border-radius:8px;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);box-shadow:0 10px 34px rgba(0,0,0,0.55);z-index:9}
+.nkd-more.open .nkd-more-menu{display:flex}
+.nkd-more-menu .nkd-vbtn{justify-content:flex-start}
+.nkd-more-menu .nkd-lbl{display:inline !important}
+.nkd-btn-save.saved{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
+.nkd-btn-cmp{background:rgba(28,34,44,0.92)}
 .nkd-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:rgba(255,255,255,0.18);pointer-events:none;}
 .nkd-empty svg{width:64px;height:64px;}
 .nkd-empty p{font:14px/1.4 monospace;margin:0;letter-spacing:0.02em;}
@@ -355,12 +393,14 @@ const ICON = {
     swap:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 4l4 4-4 4M21 8H8M7 20l-4-4 4-4M3 16h13"/></svg>',
     mask:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>',
     pixel: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="1"/><path d="M9 9h1v6M14 9h1v6"/></svg>',
+    more:  '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>',
+    cmp:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>',
     folder:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
 };
 
 function createViewerDOM(opts = {}) {
-    const { refUrl = null, maskUrl = null, apiBase = null, onQueue = null, onSendToLoad = null,
-            onSave = null } = opts;
+    const { refUrl = null, refLabel = null, maskUrl = null, apiBase = null, onQueue = null, onSendToLoad = null,
+            onSave = null, onReveal = null } = opts;
     // imgMeta is mutable — caller can update via root._nkdSetMeta(meta)
     let imgMeta = opts.imgMeta || null;
     // Reference/mask availability is dynamic — refreshed via root._nkdSetRefs()
@@ -379,12 +419,15 @@ function createViewerDOM(opts = {}) {
 
     const root = document.createElement("div");
     root.className = "nkd-viewer-root";
+    // Focusable so the shortcuts live on the root (not on `document`): they act only while
+    // the pointer is over this viewer, work in any window it is moved to, and leak nothing.
+    root.tabIndex = -1;
     root.style.cssText = "width:100%;height:100%;";
 
     root.innerHTML = `
         <div class="nkd-vwrap">
             <img class="nkd-vimg" alt="" draggable="false">
-            <img class="nkd-refimg" alt="" draggable="false">
+            <div class="nkd-refclip"><img class="nkd-refimg" alt="" draggable="false"></div>
             <div class="nkd-mask-ov"></div>
             <div class="nkd-empty">
                 <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -396,6 +439,10 @@ function createViewerDOM(opts = {}) {
             </div>
         </div>
         <div class="nkd-ref-badge">REF</div>
+        <div class="nkd-live-badge"></div>
+        <div class="nkd-count"></div>
+        <div class="nkd-wipe"></div>
+        <div class="nkd-strip"></div>
         <div class="nkd-help" title="Gestures & shortcuts">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.1 9.2a3 3 0 0 1 5.8 1c0 2-3 2.3-3 4"/><path d="M12 17h.01"/></svg>
             <div class="nkd-help-panel">
@@ -406,16 +453,20 @@ function createViewerDOM(opts = {}) {
                 <div><span class="k">Shift+Q</span> run / queue</div>
                 <div><span class="k">Space</span> hold reference</div>
                 <div><span class="k">M</span> mask overlay (peek)</div>
+                <div><span class="k">V</span> compare: flash / wipe / diff</div>
                 <div><span class="k">S</span> save &middot; <span class="k">C</span> copy image</div>
                 <div><span class="k">To Load</span> send to Load Image node</div>
-                <div><span class="k">0 / R</span> fit &middot; <span class="k">1</span> 1:1 &middot; <span class="k">Esc</span> close</div>
+                <div><span class="k">&larr; / &rarr;</span> previous / next in batch</div>
+                <div><span class="k">Shift+arrows</span> pan &middot; <span class="k">pinch</span> zoom</div>
+                <div><span class="k">0 / F</span> fit &middot; <span class="k">1</span> 1:1 &middot; <span class="k">Esc</span> close</div>
             </div>
         </div>
         <button class="nkd-btn-close nkd-vbtn" title="Close">${ICON.close}<span class="nkd-lbl">Close</span></button>
-        <div class="nkd-dims"></div>
+        <div class="nkd-info"><span class="nkd-dims"></span><button class="nkd-zoom" title="Zoom - click for 100%"></button><span class="nkd-px"></span></div>
         <div class="nkd-bar">
             <div class="nkd-bar-group nkd-bar-left">
                 <button class="nkd-btn-hold nkd-vbtn" title="Hold to show reference image (Space)" style="display:${refUrl ? '' : 'none'}">${ICON.swap}<span class="nkd-lbl">Hold for Ref</span></button>
+                <button class="nkd-btn-cmp nkd-vbtn" title="Compare mode (V): Flash / Wipe / Diff" style="display:none">${ICON.cmp}<span class="nkd-lbl">Flash</span></button>
                 <span class="nkd-mask-ctl" style="display:${maskUrl ? '' : 'none'}">
                     <button class="nkd-btn-mask nkd-vbtn" title="Toggle the reference mask overlay — hold M to peek">${ICON.mask}<span class="nkd-lbl">Mask</span></button>
                     <input type="color" class="nkd-mask-color" title="Overlay colour">
@@ -426,14 +477,12 @@ function createViewerDOM(opts = {}) {
                 <div class="nkd-bar-row">
                     <button class="nkd-btn-fit nkd-vbtn" title="Fit image to window (0)">${ICON.fit}<span class="nkd-lbl">Fit Image</span></button>
                     <button class="nkd-btn-100 nkd-vbtn" title="Actual size (1)">${ICON.pixel}<span class="nkd-lbl">1:1 Pixel</span></button>
-                    <button class="nkd-btn-adj nkd-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-lbl">Fit Window</span></button>
                 </div>
                 <div class="nkd-bar-row">
                     <button class="nkd-btn-run nkd-vbtn" title="Queue this node (Shift+Q)" style="display:${onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-lbl">Run</span></button>
                     <button class="nkd-btn-copy nkd-vbtn" title="Copy image to clipboard (C)">${ICON.copy}<span class="nkd-lbl">Copy</span></button>
                     <button class="nkd-btn-save nkd-vbtn" title="Save into the active project's folder (S)">${ICON.folder}<span class="nkd-lbl">Save</span></button>
-                    <button class="nkd-btn-dl nkd-vbtn" title="Download a copy through the browser">${ICON.save}<span class="nkd-lbl">Download</span></button>
-                    <button class="nkd-btn-load nkd-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-lbl">To Load</span></button>
+                    <span class="nkd-more"><button class="nkd-btn-more nkd-vbtn" title="More">${ICON.more}</button><div class="nkd-more-menu"><button class="nkd-btn-adj nkd-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-lbl">Fit Window</span></button><button class="nkd-btn-dl nkd-vbtn" title="Download a copy through the browser">${ICON.save}<span class="nkd-lbl">Download</span></button><button class="nkd-btn-load nkd-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-lbl">To Load</span></button><button class="nkd-btn-reveal nkd-vbtn" title="Show in the file manager" style="display:none">${ICON.folder}<span class="nkd-lbl">Show in folder</span></button></div></span>
                 </div>
             </div>
         </div>`;
@@ -445,9 +494,15 @@ function createViewerDOM(opts = {}) {
     const dims    = root.querySelector(".nkd-dims");
     const btnHold = root.querySelector(".nkd-btn-hold");
     const maskOv  = root.querySelector(".nkd-mask-ov");
+    const zoomBtn = root.querySelector(".nkd-zoom");
+    const pxEl    = root.querySelector(".nkd-px");
+    let pxCtx = null, pxSrc = "", pxLast = 0;   // cached 2D copy of the image for the pixel readout
 
     let scale = 1, tx = 0, ty = 0, fitScale = 1;
     let panning = false, sx = 0, sy = 0, stx = 0, sty = 0;
+    // userView: the user has zoomed/panned, so a new image (live frame, re-render) keeps the
+    // framing instead of snapping back to fit. lastNW: natural width the view was set for.
+    let userView = false, lastNW = 0;
 
     function apply() {
         const rendering = scale > 1.0 ? "pixelated" : "auto";
@@ -455,6 +510,7 @@ function createViewerDOM(opts = {}) {
         img.style.imageRendering = rendering;
         if (curRef) applyRefTransform(rendering);
         if (curMask) applyMaskTransform();
+        zoomBtn.textContent = Math.round(scale * 100) + "%";
     }
 
     // Overlay the mask 1:1 over the current image's box (it's expected to match
@@ -494,6 +550,7 @@ function createViewerDOM(opts = {}) {
         const ww = wrap.clientWidth, wh = wrap.clientHeight;
         const nw = img.naturalWidth, nh = img.naturalHeight;
         if (!nw || !nh) return;
+        userView = false; lastNW = nw;
         fitScale = Math.min(ww / nw, wh / nh);
         scale = fitScale;
         tx = (ww - nw * fitScale) / 2;
@@ -503,10 +560,47 @@ function createViewerDOM(opts = {}) {
     }
 
     root._nkdFit = fit;
-    root._nkdSetMeta = (meta) => { imgMeta = meta; };
+    root._nkdSetMeta = (meta) => { imgMeta = meta; setSaved(null); };
+    // Batch navigator: thumbnails + counter, driven by the host (which owns the items).
+    const strip = root.querySelector(".nkd-strip"), counter = root.querySelector(".nkd-count");
+    let batch = { n: 0, i: 0, go: null };
+    root._nkdSetBatch = (urls, index, go) => {
+        batch = { n: urls.length, i: index, go };
+        const multi = urls.length > 1;
+        strip.classList.toggle("on", multi); counter.classList.toggle("on", multi);
+        counter.textContent = `${index + 1} / ${urls.length}`;
+        if (!multi) { strip.textContent = ""; return; }
+        if (strip.children.length !== urls.length) {
+            strip.textContent = "";
+            urls.forEach((u, k) => {
+                const t = document.createElement("img");
+                t.src = u; t.draggable = false;
+                t.addEventListener("click", () => batch.go?.(k));
+                strip.appendChild(t);
+            });
+        }
+        [...strip.children].forEach((t, k) => t.classList.toggle("cur", k === index));
+    };
+    const stepBatch = (d) => { if (batch.n > 1) batch.go?.((batch.i + d + batch.n) % batch.n); };
+    // state: "live" | "cancelled" | null. Sampling frames are low-res; without this a cancelled
+    // run leaves a blurry frame that reads as the final image.
+    const liveBadge = root.querySelector(".nkd-live-badge");
+    root._nkdLive = (state, text) => {
+        liveBadge.classList.toggle("on", !!state);
+        liveBadge.classList.toggle("cancelled", state === "cancelled");
+        liveBadge.textContent = text || (state === "cancelled" ? "CANCELLED" : "LIVE");
+    };
 
     img.addEventListener("load", () => {
-        fit();
+        pxCtx = null;
+        const nw = img.naturalWidth, nh = img.naturalHeight;
+        if (userView && lastNW && nw && nh) {
+            // Same on-screen size whatever the new resolution (TAESD frames are small).
+            scale *= lastNW / nw; lastNW = nw;
+            fitScale = Math.min(wrap.clientWidth / nw, wrap.clientHeight / nh);
+            dims.textContent = `${nw} × ${nh} px`;
+            apply();
+        } else fit();
         img.style.opacity = "1";
         empty.classList.add("hidden");
     });
@@ -514,18 +608,68 @@ function createViewerDOM(opts = {}) {
     // ── Reference compare (Hold) — always wired, gated on curRef at runtime ──
     refImg.addEventListener("load", apply);
     let holding = false;
+    // Latch: a quick click on the button pins the reference (trackpads / touch cannot hold);
+    // click again to release. Holding still works as before.
+    let latched = false, pressT = 0;
     const showRef = () => { if (!curRef || holding) return; holding = true; root.classList.add("holding-ref"); btnHold.classList.add("active"); };
-    const showCur = () => { if (!holding) return; holding = false; root.classList.remove("holding-ref"); btnHold.classList.remove("active"); };
-    btnHold.addEventListener("mousedown", e => { e.preventDefault(); showRef(); });
+    const showCur = (force) => { if (!holding || (latched && force !== true)) return; holding = false; latched = false; root.classList.remove("holding-ref"); btnHold.classList.remove("active"); };
+    btnHold.addEventListener("mousedown", e => {
+        e.preventDefault();
+        if (latched) { showCur(true); return; }
+        pressT = Date.now(); showRef();
+    });
+    btnHold.addEventListener("mouseup", () => { if (holding && Date.now() - pressT < 250) latched = true; });
     root.addEventListener("mouseup", showCur);
     root.addEventListener("blur", showCur);
-    document.addEventListener("keydown", e => {
-        if (e.code !== "Space" || e.repeat || !curRef) return;
-        const tag = document.activeElement?.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA") return;
+    root.addEventListener("mouseleave", () => {
+        showCur();
+        // Give the keyboard back to ComfyUI the moment the pointer leaves.
+        if (root.ownerDocument.activeElement === root) root.blur();
+    });
+    root.addEventListener("mouseenter", () => {
+        const a = root.ownerDocument.activeElement;
+        if (a && a !== root.ownerDocument.body && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)) return;
+        root.focus({ preventScroll: true });
+    });
+    const typing = (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName || "");
+    root.addEventListener("keydown", e => {
+        if (e.code !== "Space" || e.repeat || !curRef || typing(e)) return;
         e.preventDefault(); showRef();
     });
-    document.addEventListener("keyup", e => { if (e.code === "Space") { e.preventDefault(); showCur(); } });
+    root.addEventListener("keyup", e => { if (e.code === "Space") { e.preventDefault(); showCur(); } });
+
+    // ── Compare modes: flash (hold) / wipe (divider) / diff ─────────────────────
+    const cmpBtn = root.querySelector(".nkd-btn-cmp"), wipeEl = root.querySelector(".nkd-wipe"),
+          refClip = root.querySelector(".nkd-refclip");
+    const MODES = ["flash", "wipe", "diff"];
+    let cmpMode = localStorage.getItem("nkd_cmp_mode");
+    if (!MODES.includes(cmpMode)) cmpMode = "flash";
+    let wipeX = 0.5;
+    const syncCmp = () => {
+        root.classList.toggle("cmp-wipe", !!curRef && cmpMode === "wipe");
+        root.classList.toggle("cmp-diff", !!curRef && cmpMode === "diff");
+        cmpBtn.style.display = curRef ? "" : "none";
+        cmpBtn.querySelector(".nkd-lbl").textContent = cmpMode[0].toUpperCase() + cmpMode.slice(1);
+        wipeEl.style.left = (wipeX * 100) + "%";
+        // Reference layer sits on top and reads left = before, right = after.
+        refClip.style.clipPath = curRef && cmpMode === "wipe" ? `inset(0 ${(1 - wipeX) * 100}% 0 0)` : "";
+    };
+    const cycleCmp = () => {
+        cmpMode = MODES[(MODES.indexOf(cmpMode) + 1) % MODES.length];
+        try { localStorage.setItem("nkd_cmp_mode", cmpMode); } catch { /* ignore */ }
+        syncCmp();
+    };
+    cmpBtn.addEventListener("click", cycleCmp);
+    let wipeDrag = false;
+    wipeEl.addEventListener("pointerdown", e => { e.preventDefault(); e.stopPropagation(); wipeEl.setPointerCapture(e.pointerId); wipeDrag = true; });
+    wipeEl.addEventListener("pointermove", e => {
+        if (!wipeDrag) return;
+        const r = root.getBoundingClientRect();
+        wipeX = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+        syncCmp();
+    });
+    const endWipe = () => { wipeDrag = false; };
+    wipeEl.addEventListener("pointerup", endWipe); wipeEl.addEventListener("pointercancel", endWipe);
 
     // ── Mask overlay (toggle button + M peek) — always wired, gated on curMask ──
     const btnMask = root.querySelector(".nkd-btn-mask");
@@ -545,27 +689,36 @@ function createViewerDOM(opts = {}) {
     const peekOn  = () => { if (peeking || !curMask) return; peeking = true; applyMaskTransform(); root.classList.add("holding-mask"); };
     const peekOff = () => { if (!peeking) return; peeking = false; root.classList.remove("holding-mask"); };
     root.addEventListener("blur", peekOff);
-    document.addEventListener("keydown", e => {
-        if ((e.key !== "m" && e.key !== "M") || e.repeat || !curMask) return;
-        const tag = document.activeElement?.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA") return;
+    root.addEventListener("keydown", e => {
+        if ((e.key !== "m" && e.key !== "M") || e.repeat || !curMask || typing(e)) return;
         e.preventDefault(); peekOn();
     });
-    document.addEventListener("keyup", e => { if (e.key === "m" || e.key === "M") { e.preventDefault(); peekOff(); } });
+    root.addEventListener("keyup", e => { if (e.key === "m" || e.key === "M") { e.preventDefault(); peekOff(); } });
 
     // Update reference/mask availability live (called on every workflow run).
-    root._nkdSetRefs = (rUrl, mUrl) => {
+    const refBadge = root.querySelector(".nkd-ref-badge");
+    const holdLbl  = btnHold.querySelector(".nkd-lbl");
+    const setRefLabel = (label) => {
+        // "PREV" = the implicit reference (the render before this one); "REF" = a wired/global one.
+        refBadge.textContent = label || "REF";
+        holdLbl.textContent  = label === "PREV" ? "Hold for Prev" : "Hold for Ref";
+    };
+    setRefLabel(refLabel);
+    root._nkdSetRefs = (rUrl, mUrl, label) => {
+        setRefLabel(label);
         curRef  = rUrl  || null;
         curMask = mUrl  || null;
         btnHold.style.display = curRef ? "" : "none";
         if (curRef) { if (refImg.src !== curRef) refImg.src = curRef; }
-        else { holding = false; root.classList.remove("holding-ref"); btnHold.classList.remove("active"); }
+        else { holding = false; latched = false; root.classList.remove("holding-ref"); btnHold.classList.remove("active"); }
         root.querySelector(".nkd-mask-ctl").style.display = curMask ? "" : "none";
         if (curMask) { maskOv.style.webkitMaskImage = `url("${curMask}")`; maskOv.style.maskImage = `url("${curMask}")`; }
         else { maskOn = peeking = false; root.classList.remove("holding-mask", "mask-on"); btnMask.classList.remove("active"); }
+        syncCmp();
         apply();
     };
     if (curRef) refImg.src = curRef;
+    syncCmp();
     if (curMask) { maskOv.style.webkitMaskImage = `url("${curMask}")`; maskOv.style.maskImage = `url("${curMask}")`; }
 
     // Fit Window button — resizes the panel (floating mode) or the OS window (popup mode)
@@ -612,7 +765,7 @@ function createViewerDOM(opts = {}) {
         const rect = wrap.getBoundingClientRect();
         const cx = rect.width / 2, cy = rect.height / 2;
         const r = 1.0 / scale;
-        tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = 1.0; apply();
+        tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = 1.0; userView = true; apply();
     });
 
     // Download — a browser download of the file that already exists. Uses api.apiURL,
@@ -635,33 +788,91 @@ function createViewerDOM(opts = {}) {
 
     // Save — into the active project's folder. Falls back to the download when the host
     // could not hand us a saver, so the button is never a no-op.
-    root.querySelector(".nkd-btn-save").addEventListener("click", () => {
-        if (onSave) void onSave(); else download();
+    const saveBtn = root.querySelector(".nkd-btn-save"), saveLbl = saveBtn.querySelector(".nkd-lbl");
+    const saveTitle = saveBtn.title;
+    function setSaved(saved) {
+        saveBtn.classList.toggle("saved", !!saved);
+        saveLbl.textContent = saved ? "Saved \u2713" : "Save";
+        saveBtn.title = saved ? `Saved: ${saved.path || saved.filename}` : saveTitle;
+    }
+    saveBtn.addEventListener("click", async () => {
+        if (!onSave) { download(); return; }
+        const saved = await onSave();
+        if (saved) setSaved(saved);
     });
+
+    // "..." menu: the rarely-used actions, so the bar keeps to what is used every run.
+    const more = root.querySelector(".nkd-more");
+    root.querySelector(".nkd-btn-more").addEventListener("click", e => { e.stopPropagation(); more.classList.toggle("open"); });
+    root.querySelector(".nkd-more-menu").addEventListener("click", () => more.classList.remove("open"));
+    root.addEventListener("pointerdown", e => { if (!more.contains(e.target)) more.classList.remove("open"); });
+    root.addEventListener("mouseleave", () => more.classList.remove("open"));
+    const btnReveal = root.querySelector(".nkd-btn-reveal");
+    if (onReveal) {
+        void revealAvailable().then(ok => { if (ok) btnReveal.style.display = ""; });
+        btnReveal.addEventListener("click", () => onReveal());
+    }
 
     // Pan & zoom
     wrap.addEventListener("wheel", e => {
         e.preventDefault();
         const rect = wrap.getBoundingClientRect();
         const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
-        const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+        // Proportional to the delta: a mouse notch (~100) is ~10%, a trackpad trickle is smooth,
+        // and a pinch (ctrl+wheel, tiny deltas) gets a stronger gain.
+        const dy = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+        const factor = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.001));
         const ns = Math.max(fitScale * 0.1, Math.min(scale * factor, fitScale * 32));
         const r = ns / scale;
-        tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = ns; apply();
+        tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = ns; userView = true; apply();
     }, { passive: false });
 
     // Left or middle drag pans the image (consistent with the PiP viewer).
-    wrap.addEventListener("mousedown", e => {
+    // Pointer capture instead of document listeners: nothing to remove, and it keeps working
+    // when the viewer is moved into another window.
+    wrap.addEventListener("pointerdown", e => {
         if (e.button !== 0 && e.button !== 1) return;
         e.preventDefault();
         panning = true; sx = e.clientX; sy = e.clientY; stx = tx; sty = ty;
+        wrap.setPointerCapture(e.pointerId);
         root.classList.add("panning");
     });
-    document.addEventListener("mousemove", e => {
+    const readPixel = (mx, my) => {
+        const nw = img.naturalWidth, nh = img.naturalHeight;
+        const ix = Math.floor((mx - tx) / scale), iy = Math.floor((my - ty) / scale);
+        if (!nw || ix < 0 || iy < 0 || ix >= nw || iy >= nh) { pxEl.textContent = ""; return; }
+        let rgb = "";
+        try {
+            if (!pxCtx || pxSrc !== img.src) {
+                const cv = root.ownerDocument.createElement("canvas");
+                cv.width = nw; cv.height = nh;
+                pxCtx = cv.getContext("2d", { willReadFrequently: true });
+                pxCtx.drawImage(img, 0, 0);
+                pxSrc = img.src;
+            }
+            const [r, g, b] = pxCtx.getImageData(ix, iy, 1, 1).data;
+            rgb = `  ${r} ${g} ${b}  #${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+        } catch { /* tainted canvas: coordinates only */ }
+        pxEl.textContent = `${ix}, ${iy}${rgb}`;
+    };
+    wrap.addEventListener("pointermove", e => {
+        const now = performance.now();
+        if (now - pxLast > 40) {
+            pxLast = now;
+            const rc = wrap.getBoundingClientRect();
+            readPixel(e.clientX - rc.left, e.clientY - rc.top);
+        }
         if (!panning) return;
-        tx = stx + (e.clientX - sx); ty = sty + (e.clientY - sy); apply();
+        tx = stx + (e.clientX - sx); ty = sty + (e.clientY - sy); userView = true; apply();
     });
-    document.addEventListener("mouseup", () => { panning = false; root.classList.remove("panning"); });
+    wrap.addEventListener("pointerleave", () => { pxEl.textContent = ""; });
+    zoomBtn.addEventListener("click", () => {
+        const rc = wrap.getBoundingClientRect(), cx = rc.width / 2, cy = rc.height / 2, r = 1 / scale;
+        tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = 1; userView = true; apply();
+    });
+    const endPan = () => { panning = false; root.classList.remove("panning"); };
+    wrap.addEventListener("pointerup", endPan);
+    wrap.addEventListener("pointercancel", endPan);
     wrap.addEventListener("dblclick", e => {
         const rect = wrap.getBoundingClientRect();
         if (Math.abs(scale - 1.0) < 0.001) fit();
@@ -669,18 +880,44 @@ function createViewerDOM(opts = {}) {
             const ns = 1.0, r = ns / scale;
             tx = (e.clientX - rect.left) - (e.clientX - rect.left - tx) * r;
             ty = (e.clientY - rect.top)  - (e.clientY - rect.top  - ty) * r;
-            scale = ns; apply();
+            scale = ns; userView = true; apply();
         }
     });
 
-    window.addEventListener("resize", fit);
+    // Follows the element, not the window: right for the panel, PiP and OS window alike.
+    const onSize = () => {
+        if (!img.naturalWidth) return;
+        if (!userView) fit();
+        else { fitScale = Math.min(wrap.clientWidth / img.naturalWidth, wrap.clientHeight / img.naturalHeight); apply(); }
+    };
+    let ro = new ResizeObserver(onSize);
+    ro.observe(wrap);
+    // An observer belongs to the window that made it; once the viewer moves into a PiP / OS
+    // window it must be re-created from THAT window or its rendering loop never notifies us.
+    root._nkdRebind = (w) => {
+        ro.disconnect();
+        ro = new (w.ResizeObserver || ResizeObserver)(onSize);
+        ro.observe(wrap);
+    };
+    root._nkdDispose = () => ro.disconnect();
 
     // Keyboard
-    document.addEventListener("keydown", e => {
-        const tag = document.activeElement?.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA") return;
+    root.addEventListener("keydown", e => {
+        if (typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
         if (e.key === "Escape") root.querySelector(".nkd-btn-close").click();
-        if (e.key === "0" || e.key === "r") fit();
+        if ((e.key === "v" || e.key === "V") && curRef) cycleCmp();
+        if (e.shiftKey && e.key.startsWith("Arrow")) {
+            e.preventDefault();
+            const step = 60;
+            if (e.key === "ArrowRight") tx -= step;
+            if (e.key === "ArrowLeft")  tx += step;
+            if (e.key === "ArrowDown")  ty -= step;
+            if (e.key === "ArrowUp")    ty += step;
+            userView = true; apply();
+        } else if (e.key === "ArrowRight") { e.preventDefault(); stepBatch(1); }
+        else if (e.key === "ArrowLeft")    { e.preventDefault(); stepBatch(-1); }
+        // F, not R: plain R is ComfyUI's "refresh node definitions".
+        if (e.key === "0" || e.key === "f" || e.key === "F") fit();
         if (e.key === "1") root.querySelector(".nkd-btn-100").click();
         if (e.key === "s" || e.key === "S") root.querySelector(".nkd-btn-save").click();
         if (e.key === "c" || e.key === "C") root.querySelector(".nkd-btn-copy").click();
@@ -707,6 +944,10 @@ class PopupWin {
         this._container         = null;  // live DOM element (bEpic pattern)
         this._livePreviewHandler = null; // b_preview_with_metadata listener
         this.savedRef           = null;  // where "save to project" last put it
+        this.items              = [];    // every image of the latest run (a batch)
+        this.index              = 0;     // which of them the viewer shows
+        this.prevItems          = [];    // the run before: the implicit A/B reference
+        this._refLabel          = null;
         this._imageListeners    = new Set();
     }
 
@@ -750,8 +991,42 @@ class PopupWin {
 
     /** Save into the active project. Bridged into the separate realms the same way the
      *  Run button is: those documents cannot reach `app`/`api` on their own. */
+    _revealOwn() {
+        const ref = this.savedRef || this.currentMeta;
+        if (ref) void reveal(ref);
+    }
+
     _saveOwn() {
         return saveImage(this, app.graph?.getNodeById(Number(this.nodeId)));
+    }
+
+    /** A whole run's images. The previous run becomes the implicit A/B reference. */
+    showBatch(images) {
+        const same = this.items.length === images.length
+            && this.items.every((it, i) => it.filename === images[i].filename);
+        if (!same && this.items.length) this.prevItems = this.items;
+        this.items = images;
+        this.index = 0;
+        this.showImage(images[0]);
+        this._syncBatch();
+    }
+
+    _selectIndex(i) {
+        if (i < 0 || i >= this.items.length) return;
+        this.index = i;
+        const it = this.items[i];
+        this.currentUrl  = buildViewUrl(it);
+        this.currentMeta = { filename: it.filename, type: it.type, subfolder: it.subfolder ?? "" };
+        this.savedRef = null;
+        this._notifyImage();
+        this._container?._nkdSetMeta?.(this.currentMeta);
+        this._updateImage(this.currentUrl);
+        this.refreshRefs();
+        this._syncBatch();
+    }
+
+    _syncBatch() {
+        this._container?._nkdSetBatch?.(this.items.map(buildViewUrl), this.index, (i) => this._selectIndex(i));
     }
 
     /** Called on node execution: update existing window or open a new one. */
@@ -766,10 +1041,8 @@ class PopupWin {
         this._notifyImage();
         // Only update if already open; never auto-open on execution.
         if (this.win && !this.win.closed) {
-            // Update meta in the live DOM container (blank-window mode).
             if (this._container?._nkdSetMeta) this._container._nkdSetMeta(this.currentMeta);
             this._updateImage(this.currentUrl);
-            this._pushMeta();
             this.refreshRefs();  // a run may have (re)set the reference/mask
         }
     }
@@ -778,10 +1051,16 @@ class PopupWin {
      *  Reference slot, mirroring the video viewer's wired `reference`. Nothing wired falls
      *  back to the global slot, so an unwired popup behaves exactly as before. */
     async _resolveRefUrls() {
-        return Promise.all([
+        const [ref, mask] = await Promise.all([
             this.wiredRef  ? buildViewUrl(this.wiredRef)  : getReferenceUrl(),
             this.wiredMask ? buildViewUrl(this.wiredMask) : getReferenceMaskUrl(),
         ]);
+        if (ref) { this._refLabel = null; return [ref, mask]; }
+        // No explicit reference anywhere: A/B against the render before this one, so
+        // "Hold" answers "did that change help?" with nothing to wire up.
+        const prev = this.prevItems[Math.min(this.index, this.prevItems.length - 1)];
+        this._refLabel = prev ? "PREV" : null;
+        return [prev ? buildViewUrl(prev) : null, mask];
     }
 
     /** Re-fetch the active reference image/mask and push to the open viewer so
@@ -790,17 +1069,28 @@ class PopupWin {
         if (!this.win || this.win.closed) return;
         const [refUrl, maskUrl] = await this._resolveRefUrls();
         this._refUrl = refUrl; this._maskUrl = maskUrl;
-        // Floating panel: live DOM container. PiP / OS window: bridged function.
-        if (this._container?._nkdSetRefs) {
-            this._container._nkdSetRefs(refUrl, maskUrl);
-        } else {
-            try { this.win.__nkd_apply_refs?.(refUrl, maskUrl); } catch { /* cross-origin */ }
-        }
+        this._container?._nkdSetRefs?.(refUrl, maskUrl, this._refLabel);
+    }
+
+    /** `executed` does not fire for a cached node, nor after a reload, but the node still shows
+     *  its picture from `app.nodeOutputs`. Adopt that so the viewer, Copy and Download work
+     *  exactly when the node visibly has an image. No-op once a real run has filled it. */
+    ensureCurrent() {
+        if (this.currentUrl) return;
+        const out = app.nodeOutputs?.[this.nodeId];
+        const item = out?.images?.[0];
+        if (!item) return;
+        this.currentUrl  = buildViewUrl(item);
+        this.currentMeta = { filename: item.filename, type: item.type, subfolder: item.subfolder ?? "" };
+        if (!this.items.length) { this.items = out.images; this.index = 0; }
+        this.wiredRef  = out.nkd_ref?.[0]  || this.wiredRef;
+        this.wiredMask = out.nkd_mask?.[0] || this.wiredMask;
     }
 
     /** Called from node button / context menu. Picks up any active reference
      * image automatically so press-and-hold compare is available in the viewer. */
     async open() {
+        this.ensureCurrent();
         if (this.win && !this.win.closed) {
             // PiP windows are always on top; regular windows need a focus call.
             if (!this._pipMode) this.win.focus();
@@ -838,7 +1128,7 @@ class PopupWin {
             return;
         }
 
-        const { winW, winH } = await this._calcWindowSize();
+        const { winW, winH, x, y } = await this._calcWindowSize("nkd_panel_bounds");
 
         // ── Panel shell ────────────────────────────────────────────────────────
         const panel = document.createElement("div");
@@ -849,8 +1139,8 @@ class PopupWin {
             position: "fixed",
             width: winW + "px",
             height: (winH + TITLEBAR_H) + "px",
-            left: Math.round((window.innerWidth  - winW) / 2) + "px",
-            top:  Math.round((window.innerHeight - winH - TITLEBAR_H) / 2) + "px",
+            left: (Number.isFinite(x) ? Math.min(Math.max(0, x), window.innerWidth - 80) : Math.round((window.innerWidth  - winW) / 2)) + "px",
+            top:  (Number.isFinite(y) ? Math.min(Math.max(0, y), window.innerHeight - 40) : Math.round((window.innerHeight - winH - TITLEBAR_H) / 2)) + "px",
             zIndex: "9999",
             display: "flex",
             flexDirection: "column",
@@ -913,6 +1203,12 @@ class PopupWin {
         panel.appendChild(titlebar);
         panel.appendChild(content);
         document.body.appendChild(panel);
+        const saveBounds = () => {
+            try {
+                localStorage.setItem("nkd_panel_bounds", JSON.stringify({
+                    w: panel.offsetWidth, h: panel.offsetHeight - TITLEBAR_H, x: panel.offsetLeft, y: panel.offsetTop }));
+            } catch { /* ignore */ }
+        };
 
         // ── Resize handles ─────────────────────────────────────────────────────
         const EDGE = 5, CORNER = 14;
@@ -956,6 +1252,7 @@ class PopupWin {
                 const onUp = () => {
                     r.removeEventListener("pointermove", onMove);
                     r.removeEventListener("pointerup",   onUp);
+                    saveBounds();
                     container._nkdFit?.();
                 };
                 r.addEventListener("pointermove", onMove);
@@ -966,12 +1263,14 @@ class PopupWin {
         // ── Viewer DOM (pan/zoom/save/etc.) ───────────────────────────────────
         const container = createViewerDOM({
             refUrl:  this._refUrl,
+            refLabel: this._refLabel,
             maskUrl: this._maskUrl,
             imgMeta: this.currentMeta,
             apiBase: location.origin,
             onQueue: () => this._queueOwnNode(),
             onSendToLoad: () => this._sendOwnToLoad(),
             onSave: () => this._saveOwn(),
+            onReveal: () => this._revealOwn(),
         });
         container.style.cssText = "width:100%;height:100%;";
         // Hide the viewer's own close button — the panel titlebar has one.
@@ -1004,11 +1303,13 @@ class PopupWin {
         if (imgEl && this.currentUrl) { imgEl.style.opacity = "0.4"; imgEl.src = this.currentUrl; }
 
         this._container = container;
+        this._syncBatch();
         this._startLivePreview();
 
         // ── Close ──────────────────────────────────────────────────────────────
         const closePanel = () => {
             this._stopLivePreview();
+            container._nkdDispose?.();
             panel.remove();
             this._panel     = null;
             this._container = null;
@@ -1018,21 +1319,25 @@ class PopupWin {
         container.querySelector(".nkd-btn-close").addEventListener("click", closePanel);
 
         // ── Drag ───────────────────────────────────────────────────────────────
+        // Pointer capture on the titlebar: no window listeners to pile up per open.
         let dragging = false, dragX = 0, dragY = 0;
-        titlebar.addEventListener("mousedown", e => {
-            if (e.target === closeBtn) return;
+        titlebar.addEventListener("pointerdown", e => {
+            if (e.target.closest("button")) return;
             dragging = true;
             dragX = e.clientX - panel.offsetLeft;
             dragY = e.clientY - panel.offsetTop;
             titlebar.style.cursor = "grabbing";
+            titlebar.setPointerCapture(e.pointerId);
             e.preventDefault();
         });
-        window.addEventListener("mousemove", e => {
+        titlebar.addEventListener("pointermove", e => {
             if (!dragging) return;
             panel.style.left = (e.clientX - dragX) + "px";
             panel.style.top  = (e.clientY - dragY) + "px";
         });
-        window.addEventListener("mouseup", () => { dragging = false; titlebar.style.cursor = "grab"; });
+        const endDrag = () => { if (dragging) saveBounds(); dragging = false; titlebar.style.cursor = "grab"; };
+        titlebar.addEventListener("pointerup", endDrag);
+        titlebar.addEventListener("pointercancel", endDrag);
 
         // ── Undock: move container to a real OS window ─────────────────────────
         let popoutWin = null;
@@ -1117,11 +1422,15 @@ class PopupWin {
             closed: false,
             close: closePanel,
             focus: () => { if (popoutWin && !popoutWin.closed) popoutWin.focus(); else panel.style.zIndex = "9999"; },
-            document: { getElementById: (id) => id === "img" ? imgEl : null },
         };
     }
 
-    async _calcWindowSize() {
+    async _calcWindowSize(boundsKey) {
+        // A size the user set by hand beats the image-derived default.
+        try {
+            const b = JSON.parse(localStorage.getItem(boundsKey || ""));
+            if (b && b.w >= 200 && b.h >= 150) return { winW: Math.max(320, b.w), winH: Math.max(200, b.h), x: b.x, y: b.y };
+        } catch { /* nothing saved */ }
         let winW = 800, winH = 680;
         if (this.currentUrl) {
             try {
@@ -1136,73 +1445,76 @@ class PopupWin {
         return { winW, winH };
     }
 
-    /** Primary path (Chrome 116+): open viewer.html directly inside a PiP window. */
-    async _openDirectPiP() {
-        const { winW, winH } = await this._calcWindowSize();
+    /** One viewer for THIS node. The panel, the PiP window and the OS popup all mount the same
+     *  thing; PiP and popup used to run a second hand-written copy (viewer.html) that drifted
+     *  from this one feature by feature, and needed `window.__nkd_*` bridges to reach the app. */
+    _makeViewer() {
+        return createViewerDOM({
+            refUrl:  this._refUrl,
+            refLabel: this._refLabel,
+            maskUrl: this._maskUrl,
+            imgMeta: this.currentMeta,
+            apiBase: location.origin,
+            onQueue: () => this._queueOwnNode(),
+            onSendToLoad: () => this._sendOwnToLoad(),
+            onSave: () => this._saveOwn(),
+            onReveal: () => this._revealOwn(),
+        });
+    }
 
-        const pipWin = await window.documentPictureInPicture.requestWindow({ width: winW, height: winH });
+    /** Mount the viewer into an already-open browser window (PiP or OS popup). */
+    _mountInWindow(win) {
+        const doc = win.document;
+        doc.head.textContent = "";
+        doc.body.textContent = "";   // a same-named popup may still hold a stale viewer
+        const st = doc.createElement("style");
+        st.textContent = VIEWER_CSS + "html,body{margin:0;height:100%;overflow:hidden;background:#080808}";
+        doc.head.appendChild(st);
+        doc.title = this._title;
 
-        // Register cleanup immediately so the window is tracked from the start.
-        this.win      = pipWin;
-        this._pipMode = true;
-        pipWin.addEventListener("pagehide", () => {
-            this._stopLivePreview();
+        const container = this._makeViewer();
+        container.style.cssText = "width:100vw;height:100vh;";
+        doc.body.appendChild(container);
+        container._nkdRebind?.(win);
+        container.querySelector(".nkd-btn-close")?.addEventListener("click", () => win.close());
+        // Fit Window / 1:1 resize THIS window, not the main one.
+        container._nkdResizeTo = (w, h, { center = false } = {}) => {
+            try {
+                const dx = win.outerWidth - win.innerWidth, dy = win.outerHeight - win.innerHeight;
+                win.resizeTo(w + dx, h + dy);
+                if (center) win.moveTo(Math.round((screen.availWidth - w) / 2), Math.round((screen.availHeight - h) / 2));
+            } catch { /* PiP cannot be moved */ }
+            requestAnimationFrame(() => container._nkdFit?.());
+        };
+        this._container = container;
+
+        const img = container.querySelector(".nkd-vimg");
+        if (img && this.currentUrl) { img.style.opacity = "0.4"; img.src = this.currentUrl; }
+        this._syncBatch();
+
+        win.addEventListener("pagehide", () => {
+            container._nkdDispose?.();
+            if (this._container === container) this._container = null;
             this.win      = null;
             this._pipMode = false;
         });
+    }
 
+    /** Primary path (Chrome 116+): a Document PiP window. */
+    async _openDirectPiP() {
+        const { winW, winH } = await this._calcWindowSize("nkd_pip_size");
+        const pipWin = await window.documentPictureInPicture.requestWindow({ width: winW, height: winH });
+        this.win      = pipWin;
+        this._pipMode = true;
+        let pipSaveT = 0;
+        pipWin.addEventListener("resize", () => {
+            clearTimeout(pipSaveT);
+            pipSaveT = setTimeout(() => {
+                try { localStorage.setItem("nkd_pip_size", JSON.stringify({ w: pipWin.innerWidth, h: pipWin.innerHeight })); } catch { /* ignore */ }
+            }, 300);
+        });
         try {
-            // Fetch viewer.html and inject it into the blank PiP document.
-            const html   = await fetch(viewerHtmlUrl()).then(r => r.text());
-            const parser = new DOMParser();
-            const parsed = parser.parseFromString(html, "text/html");
-
-            // Inject <style> blocks into PiP <head>.
-            parsed.querySelectorAll("style").forEach(s => {
-                const ns = pipWin.document.createElement("style");
-                ns.textContent = s.textContent;
-                pipWin.document.head.appendChild(ns);
-            });
-
-            // Inject body markup without scripts (innerHTML doesn't execute them).
-            const bodyClone = parsed.body.cloneNode(true);
-            bodyClone.querySelectorAll("script").forEach(s => s.remove());
-            pipWin.document.body.innerHTML = bodyClone.innerHTML;
-
-            // Hand off the compare-mode reference URL BEFORE running the
-            // viewer script — it reads window.__nkd_ref_url at IIFE time.
-            if (this._refUrl) {
-                pipWin.__nkd_ref_url = this._refUrl;
-            }
-            if (this._maskUrl) {
-                pipWin.__nkd_mask_url = this._maskUrl;
-            }
-            // Hand off image metadata for the save panel.
-            if (this.currentMeta) {
-                pipWin.__nkd_img_meta = this.currentMeta;
-            }
-            // Bridge Run button / Shift+Q back to the main realm: queue THIS
-            // window's node (the PiP document can't reach app/api on its own).
-            pipWin.__nkd_queue = () => this._queueOwnNode();
-            pipWin.__nkd_send_to_load = () => this._sendOwnToLoad();
-            pipWin.__nkd_save = () => this._saveOwn();
-
-            // Execute scripts in the PiP window's context by appending new elements.
-            parsed.querySelectorAll("script").forEach(s => {
-                const ns = pipWin.document.createElement("script");
-                ns.textContent = s.textContent;
-                pipWin.document.body.appendChild(ns);
-                // Each script runs synchronously when appended; the IIFE in
-                // viewer.html executes here and binds events to pipWin.document.
-            });
-
-            // Set title and seed the initial image (location.search is empty in PiP).
-            pipWin.document.title = this._title;
-            const pipImg = pipWin.document.getElementById("img");
-            if (pipImg && this.currentUrl) {
-                pipImg.style.opacity = "0.4";
-                pipImg.src = this.currentUrl;
-            }
+            this._mountInWindow(pipWin);
             this._startLivePreview();
         } catch (err) {
             console.error("NKD PiP viewer load error:", err);
@@ -1210,7 +1522,7 @@ class PopupWin {
         }
     }
 
-    /** Fallback (no PiP support): open viewer.html in a regular popup window. */
+    /** Fallback (no PiP support): a regular popup window. */
     async _openWindow() {
         let winW, winH, left, top;
         try {
@@ -1232,27 +1544,8 @@ class PopupWin {
         }
 
         const opts = `width=${winW},height=${winH},left=${left},top=${top},toolbar=no,menubar=no,location=no,status=no,scrollbars=no`;
-
-        const qpInit = { img: this.currentUrl ?? "", title: this._title };
-        if (this._refUrl) {
-            qpInit.ref     = this._refUrl;
-            qpInit.compare = "1";
-        }
-        if (this._maskUrl) {
-            qpInit.mask = this._maskUrl;
-        }
-        if (this.currentMeta) {
-            qpInit.meta_filename  = this.currentMeta.filename;
-            qpInit.meta_type      = this.currentMeta.type;
-            qpInit.meta_subfolder = this.currentMeta.subfolder;
-        }
-        const qp  = new URLSearchParams(qpInit);
-        const url = `${viewerHtmlUrl()}?${qp}`;
-
-        this.win      = window.open(url, `nkd_preview_${this.nodeId}`, opts);
-        this._pipMode = false;
-
-        if (!this.win) {
+        const win = window.open("", `nkd_preview_${this.nodeId}`, opts);
+        if (!win) {
             app.extensionManager?.toast?.add?.({
                 severity: "warn",
                 summary: "Popup Blocked",
@@ -1261,16 +1554,9 @@ class PopupWin {
             });
             return;
         }
-
-        // Same bridge as the PiP path (see _openDirectPiP): the popup runs in a
-        // separate realm, so wire its Run button / Shift+Q back to queue our node.
-        this.win.addEventListener("load", () => {
-            try {
-                this.win.__nkd_queue = () => this._queueOwnNode();
-                this.win.__nkd_send_to_load = () => this._sendOwnToLoad();
-                this.win.__nkd_save = () => this._saveOwn();
-            } catch { /* cross-origin */ }
-        });
+        this.win      = win;
+        this._pipMode = false;
+        this._mountInWindow(win);
 
         const saveState = () => {
             if (this.win && !this.win.closed) {
@@ -1282,40 +1568,16 @@ class PopupWin {
                 }));
             }
         };
-
         const saveInterval = setInterval(() => {
             if (!this.win || this.win.closed) clearInterval(saveInterval);
             else saveState();
         }, 500);
-
-        this.win.addEventListener("beforeunload", () => {
-            saveState();
-            clearInterval(saveInterval);
-            this.win = null;
-        });
-    }
-
-    _pushMeta() {
-        // In blank-window mode metadata is captured in the closure of createViewerDOM;
-        // for PiP/regular-window mode update the window global.
-        if (!this._container && this.win && !this.win.closed) {
-            try { this.win.__nkd_img_meta = this.currentMeta; } catch { /* cross-origin */ }
-        }
+        win.addEventListener("beforeunload", () => { saveState(); clearInterval(saveInterval); });
     }
 
     _updateImage(url) {
-        try {
-            const img = this._container
-                ? this._container.querySelector(".nkd-vimg")
-                : this.win.document.getElementById("img");
-            if (!img) { this._openViewer(); return; }
-            img.src = url;
-        } catch {
-            this.win        = null;
-            this._pipMode   = false;
-            this._container = null;
-            this._openViewer();
-        }
+        const img = this._container?.querySelector(".nkd-vimg");
+        if (img) img.src = url;
     }
 
     // ── Live preview (TAESD frames) ───────────────────────────────────────────
@@ -1326,21 +1588,18 @@ class PopupWin {
     }
 
     _setLiveFrame(dataUrl) {
-        // dataUrl is a self-contained data: URL (works in any realm, no CSP
-        // blob: dependency, no revocation needed).
-        let img = null;
-        if (this._container) {
-            img = this._container.querySelector(".nkd-vimg");
-        } else if (this.win && !this.win.closed) {
-            try { img = this.win.document.getElementById("img"); } catch { return; }
-        }
+        // A self-contained data: URL: works in any window (no per-realm blob partitioning).
+        const img = this._container?.querySelector(".nkd-vimg");
         if (!img) return;
-
         img.src = dataUrl;
         img.style.opacity = "1";
-        const doc = img.ownerDocument;
-        const emptyState = doc?.getElementById("empty-state");
-        if (emptyState) emptyState.classList.add("hidden");
+        if (this._liveState !== "live") this._live("live", "LIVE");
+    }
+
+    /** Badge state on the in-DOM viewer: "live" | "cancelled" | null. */
+    _live(state, text) {
+        this._liveState = state;
+        try { this._container?._nkdLive?.(state, text); } catch { /* ignore */ }
     }
 
     _startLivePreview() { /* handled globally in setup() via WebSocket intercept */ }
@@ -1349,7 +1608,7 @@ class PopupWin {
     destroy() {
         this._stopLivePreview();
         if (this.win && !this.win.closed) this.win.close();
-        try { this._container?.remove(); } catch { /* ignore */ }
+        try { this._container?._nkdDispose?.(); this._container?.remove(); } catch { /* ignore */ }
         this._container = null;
     }
 }
@@ -1368,6 +1627,7 @@ function _noImageToast() {
 /** Download a copy through the browser. The Downloads folder is the one place a project
  *  system cannot reach, so this stays available but is no longer what "Save" means. */
 function downloadImage(popup) {
+    popup?.ensureCurrent();
     if (!popup?.currentMeta) return _noImageToast();
     const { filename, type, subfolder } = popup.currentMeta;
     const p = new URLSearchParams({ filename, type, subfolder: subfolder ?? "" });
@@ -1545,6 +1805,7 @@ function buildNodePanel(node) {
 }
 
 function openViewer(node) {
+    lastActiveId = String(node.id);
     const p = getPopup(String(node.id));
     p.setTitle(node.title || "Preview Window");
     p.open();
@@ -1695,8 +1956,26 @@ app.registerExtension({
             popup.wiredRef  = detail.output.nkd_ref?.[0]  || null;
             popup.wiredMask = detail.output.nkd_mask?.[0] || null;
             popup.setTitle(node.title || "Preview Window");
-            popup.showImage(detail.output.images[0]);
+            popup._live(null);
+            popup.showBatch(detail.output.images);
+            lastActiveId = String(node.id);
+            // Opt-in per node. PiP needs a user gesture, so on a bare run it falls back to the
+            // floating panel (see _openViewer).
+            if (node.widgets?.find(w => w.name === "open_on_run")?.value && !popup._isOpen()) openViewer(node);
         });
+
+        // Sampling progress feeds the LIVE badge; an interrupted/failed run flags the low-res
+        // frame it left behind so it is not mistaken for a result.
+        api.addEventListener("progress", ({ detail }) => {
+            if (!detail?.max) return;
+            for (const p of popups.values())
+                if (p._liveState === "live") p._live("live", `LIVE · ${detail.value}/${detail.max}`);
+        });
+        const flagCancelled = () => {
+            for (const p of popups.values()) if (p._liveState === "live") p._live("cancelled");
+        };
+        api.addEventListener("execution_interrupted", flagCancelled);
+        api.addEventListener("execution_error", flagCancelled);
 
         // A reference node may finish after the preview node in the same run, so
         // also refresh references once the whole prompt completes.
@@ -1763,6 +2042,7 @@ app.registerExtension({
                 }
                 const dataUrl = `data:${found.mime};base64,${btoa(binary)}`;
 
+                const openCount = [...popups.values()].filter(p => p._isOpen()).length;
                 for (const popup of popups.values()) {
                     if (!popup._isOpen()) continue;
                     // Filter by upstream sampler when we can identify one and the
@@ -1772,6 +2052,9 @@ app.registerExtension({
                     if (nkdNode && headerStr) {
                         const sampler = findUpstreamSampler(nkdNode);
                         if (sampler && !headerStr.includes(String(sampler.id))) continue;
+                        // No sampler to match against: with several popups open we cannot tell
+                        // whose frame this is, so show it nowhere rather than everywhere.
+                        if (!sampler && openCount > 1) continue;
                     }
                     popup._setLiveFrame(dataUrl);
                 }
@@ -1813,6 +2096,10 @@ app.registerExtension({
             this.addWidget("text", "filename", "NKD", () => {},
                 { tooltip: "File name for the saved still. Empty keeps the prefix's own name." });
 
+            this.addWidget("toggle", "open_on_run", false, () => {},
+                { tooltip: "Open the viewer by itself when this node produces an image. " +
+                           "Off by default: a window that appears on every run gets in the way." });
+
             const panel = buildNodePanel(this);
 
             // Let the node be dragged TALLER than the panel, so ComfyUI's own preview (drawn
@@ -1851,6 +2138,16 @@ app.registerExtension({
             if (isPrimary(this.id)) applyPrimaryStyle(this, true);
         };
 
+        // Double-click the node body (not the title, not a widget row) to open the viewer.
+        const origDbl = nodeType.prototype.onDblClick;
+        nodeType.prototype.onDblClick = function (e, pos) {
+            const r = origDbl?.apply(this, arguments);
+            const onWidget = (this.widgets ?? []).some(w =>
+                w.last_y != null && pos && pos[1] >= w.last_y && pos[1] <= w.last_y + (w.computedHeight ?? 24));
+            if (pos && pos[1] > 0 && !onWidget) openViewer(this);
+            return r;
+        };
+
         const origTitleChanged = nodeType.prototype.onTitleChanged;
         nodeType.prototype.onTitleChanged = function (title) {
             origTitleChanged?.apply(this, arguments);
@@ -1871,24 +2168,12 @@ app.registerExtension({
 
     // Restore primary + load-target styles after graph load (IDs are stable now).
     afterConfigureGraph() {
-        if (primaryNodeId) {
-            const node = app.graph?.getNodeById(Number(primaryNodeId));
-            if (!node || node.comfyClass !== NODE_TYPE) {
-                setPrimary(null); // saved ID no longer maps to a valid popup node
-            } else {
-                applyPrimaryStyle(node, true);
-                node.setDirtyCanvas(true, true);
-            }
-        }
-        if (loadTargetId) {
-            const t = app.graph?.getNodeById(Number(loadTargetId));
-            if (!t || t.comfyClass !== "LoadImage") {
-                setLoadTarget(null);
-            } else {
-                applyLoadTargetStyle(t, true);
-                t.setDirtyCanvas(true, true);
-            }
-        }
+        const p = adoptMark(NODE_TYPE, "nkdPrimary");
+        primaryNodeId = p ? String(p.id) : null;
+        if (p) { applyPrimaryStyle(p, true); p.setDirtyCanvas(true, true); }
+        const t = adoptMark("LoadImage", "nkdLoadTarget");
+        loadTargetId = t ? String(t.id) : null;
+        if (t) { applyLoadTargetStyle(t, true); t.setDirtyCanvas(true, true); }
     },
 
     getNodeMenuItems(node) {
@@ -1908,6 +2193,7 @@ app.registerExtension({
                 content: "⧉ Copy Image",
                 callback: () => {
                     const p = getPopup(String(node.id));
+                    p.ensureCurrent();
                     copyImageToClipboard(p.currentUrl);
                 },
             },

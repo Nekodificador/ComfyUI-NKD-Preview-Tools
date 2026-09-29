@@ -7,8 +7,8 @@ import { defineConfig } from "vite";
  * a mano como un <style> con id (ver src/timeline/styles.ts). Eso evita de raíz la trampa
  * de los scope-id de los SFC desincronizados que documenta la skill nkd-node.
  *
- * emptyOutDir: false es OBLIGATORIO — js/ contiene popup_preview.js y viewer.html, que
- * están escritos a mano y el build no debe tocar.
+ * emptyOutDir: false es OBLIGATORIO — js/ contiene popup_preview.js, que
+ * está escrito a mano y el build no debe tocar.
  */
 export default defineConfig({
   build: {
