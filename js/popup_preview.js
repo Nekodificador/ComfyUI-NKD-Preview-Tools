@@ -295,89 +295,89 @@ function collectUpstreamNodes(startNode) {
 // blank window's body — no fetch, no script re-injection needed.
 
 const VIEWER_CSS = `
-.nkd-viewer-root *,.nkd-viewer-root *::before,.nkd-viewer-root *::after{box-sizing:border-box;margin:0;padding:0}
-.nkd-viewer-root{width:100%;height:100%;background:#080808;overflow:hidden;cursor:grab;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;position:relative;container-type:inline-size;}
-.nkd-viewer-root.panning{cursor:grabbing}
-.nkd-help{position:absolute;top:14px;left:14px;z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:help;color:rgba(255,255,255,0.55);background:rgba(28,28,28,0.85);border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(6px);opacity:0.5;transition:opacity 0.25s,color 0.14s;}
-.nkd-viewer-root:hover .nkd-help{opacity:1}
-.nkd-help:hover{color:#fff}
-.nkd-help svg{width:15px;height:15px;}
-.nkd-help-panel{position:absolute;top:32px;left:0;display:none;width:250px;padding:11px 13px;border-radius:8px;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(8px);box-shadow:0 10px 34px rgba(0,0,0,0.55);font:11px/1.75 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:rgba(255,255,255,0.72);}
-.nkd-help:hover .nkd-help-panel{display:block}
-.nkd-help-panel .k{display:inline-block;min-width:80px;color:#9fe09f;font-family:monospace;}
-.nkd-help-panel hr{border:none;border-top:1px solid rgba(255,255,255,0.1);margin:7px 0;}
-.nkd-vwrap{width:100%;height:100%;position:relative;overflow:hidden;background-color:#050505;background-image:linear-gradient(45deg,#101010 25%,transparent 25%),linear-gradient(-45deg,#101010 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#101010 75%),linear-gradient(-45deg,transparent 75%,#101010 75%);background-size:20px 20px;background-position:0 0,0 10px,10px -10px,-10px 0;}
-.nkd-vimg,.nkd-refimg{position:absolute;top:0;left:0;display:block;transform-origin:0 0;transition:opacity 0.15s;user-select:none;-webkit-user-drag:none;}
-.nkd-refclip{position:absolute;inset:0;display:none;z-index:1;pointer-events:none;overflow:hidden}
-.nkd-viewer-root.holding-ref .nkd-vimg{visibility:hidden}
-.nkd-viewer-root.holding-ref .nkd-refclip,.nkd-viewer-root.cmp-wipe .nkd-refclip,.nkd-viewer-root.cmp-diff .nkd-refclip{display:block}
-.nkd-viewer-root.cmp-diff .nkd-refclip{mix-blend-mode:difference}
-.nkd-viewer-root.holding-ref .nkd-refclip{clip-path:none !important;mix-blend-mode:normal !important}
-.nkd-wipe{position:absolute;top:0;bottom:0;width:16px;margin-left:-8px;z-index:4;display:none;cursor:ew-resize;touch-action:none}
-.nkd-wipe::before{content:"";position:absolute;left:7px;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.85);box-shadow:0 0 6px rgba(0,0,0,0.6)}
-.nkd-wipe::after{content:"";position:absolute;left:0;top:50%;margin-top:-8px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 0 6px rgba(0,0,0,0.6)}
-.nkd-viewer-root.cmp-wipe .nkd-wipe{display:block}
-.nkd-viewer-root.holding-ref .nkd-wipe{display:none}
-.nkd-viewer-root:focus{outline:none}
-.nkd-live-badge{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:7;display:none;padding:3px 10px;border-radius:10px;font:bold 11px monospace;letter-spacing:1px;color:#fff;background:rgba(180,32,48,0.92);pointer-events:none;}
-.nkd-live-badge.on{display:block}.nkd-live-badge.cancelled{background:rgba(120,120,120,0.92)}
-.nkd-strip{position:absolute;left:50%;bottom:74px;transform:translateX(-50%);z-index:6;display:none;gap:6px;max-width:80%;overflow-x:auto;padding:5px;border-radius:8px;background:rgba(18,18,18,0.85);border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(6px);opacity:0;transition:opacity 0.25s;}
-.nkd-viewer-root:hover .nkd-strip{opacity:1}
-.nkd-strip.on{display:flex}
-.nkd-strip img{height:46px;width:auto;border-radius:4px;border:2px solid transparent;cursor:pointer;flex:none;opacity:0.7}
-.nkd-strip img.cur{border-color:#7dc97d;opacity:1}
-.nkd-count{position:absolute;top:18px;left:50%;margin-left:70px;font:11px monospace;color:rgba(255,255,255,0.5);pointer-events:none;z-index:5;display:none}
-.nkd-count.on{display:block}
-.nkd-ref-badge{position:absolute;top:38px;left:14px;background:rgba(180,32,48,0.92);color:#fff;font:bold 11px monospace;padding:4px 9px;border-radius:4px;pointer-events:none;display:none;z-index:5;letter-spacing:1px;backdrop-filter:blur(4px);}
-.nkd-viewer-root.holding-ref .nkd-ref-badge{display:block}
-.nkd-mask-ov{position:absolute;top:0;left:0;transform-origin:0 0;pointer-events:none;display:none;z-index:2;-webkit-mask-size:100% 100%;mask-size:100% 100%;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;-webkit-mask-mode:luminance;mask-mode:luminance;}
-.nkd-viewer-root.holding-mask .nkd-mask-ov,.nkd-viewer-root.mask-on .nkd-mask-ov{display:block}
-.nkd-mask-ctl{display:flex;gap:6px;align-items:center;}
-.nkd-btn-mask{user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
-.nkd-btn-mask:hover{background:rgba(72,40,48,0.96);color:#fff}
-.nkd-btn-mask.active{background:rgba(180,32,48,0.95);color:#fff}
-.nkd-mask-color{width:30px;height:30px;padding:0;border:1px solid rgba(255,255,255,0.15);border-radius:6px;background:none;cursor:pointer;flex:none;}
-.nkd-mask-color::-webkit-color-swatch-wrapper{padding:0;}
-.nkd-mask-color::-webkit-color-swatch{border:none;border-radius:5px;}
-.nkd-mask-op{width:80px;height:30px;cursor:pointer;accent-color:#7dc97d;}
-.nkd-bar,.nkd-btn-close{opacity:0;transition:opacity 0.25s;}
-.nkd-viewer-root:hover .nkd-bar,.nkd-viewer-root:hover .nkd-btn-close,.nkd-viewer-root:focus-within .nkd-bar{opacity:1}
+.nkd-pv-viewer-root *,.nkd-pv-viewer-root *::before,.nkd-pv-viewer-root *::after{box-sizing:border-box;margin:0;padding:0}
+.nkd-pv-viewer-root{width:100%;height:100%;background:#080808;overflow:hidden;cursor:grab;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;position:relative;container-type:inline-size;}
+.nkd-pv-viewer-root.panning{cursor:grabbing}
+.nkd-pv-help{position:absolute;top:14px;left:14px;z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:help;color:rgba(255,255,255,0.55);background:rgba(28,28,28,0.85);border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(6px);opacity:0.5;transition:opacity 0.25s,color 0.14s;}
+.nkd-pv-viewer-root:hover .nkd-pv-help{opacity:1}
+.nkd-pv-help:hover{color:#fff}
+.nkd-pv-help svg{width:15px;height:15px;}
+.nkd-pv-help-panel{position:absolute;top:32px;left:0;display:none;width:250px;padding:11px 13px;border-radius:8px;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(8px);box-shadow:0 10px 34px rgba(0,0,0,0.55);font:11px/1.75 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:rgba(255,255,255,0.72);}
+.nkd-pv-help:hover .nkd-pv-help-panel{display:block}
+.nkd-pv-help-panel .k{display:inline-block;min-width:80px;color:#9fe09f;font-family:monospace;}
+.nkd-pv-help-panel hr{border:none;border-top:1px solid rgba(255,255,255,0.1);margin:7px 0;}
+.nkd-pv-vwrap{width:100%;height:100%;position:relative;overflow:hidden;background-color:#050505;background-image:linear-gradient(45deg,#101010 25%,transparent 25%),linear-gradient(-45deg,#101010 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#101010 75%),linear-gradient(-45deg,transparent 75%,#101010 75%);background-size:20px 20px;background-position:0 0,0 10px,10px -10px,-10px 0;}
+.nkd-pv-vimg,.nkd-pv-refimg{position:absolute;top:0;left:0;display:block;transform-origin:0 0;transition:opacity 0.15s;user-select:none;-webkit-user-drag:none;}
+.nkd-pv-refclip{position:absolute;inset:0;display:none;z-index:1;pointer-events:none;overflow:hidden}
+.nkd-pv-viewer-root.holding-ref .nkd-pv-vimg{visibility:hidden}
+.nkd-pv-viewer-root.holding-ref .nkd-pv-refclip,.nkd-pv-viewer-root.cmp-wipe .nkd-pv-refclip,.nkd-pv-viewer-root.cmp-diff .nkd-pv-refclip{display:block}
+.nkd-pv-viewer-root.cmp-diff .nkd-pv-refclip{mix-blend-mode:difference}
+.nkd-pv-viewer-root.holding-ref .nkd-pv-refclip{clip-path:none !important;mix-blend-mode:normal !important}
+.nkd-pv-wipe{position:absolute;top:0;bottom:0;width:16px;margin-left:-8px;z-index:4;display:none;cursor:ew-resize;touch-action:none}
+.nkd-pv-wipe::before{content:"";position:absolute;left:7px;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.85);box-shadow:0 0 6px rgba(0,0,0,0.6)}
+.nkd-pv-wipe::after{content:"";position:absolute;left:0;top:50%;margin-top:-8px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 0 6px rgba(0,0,0,0.6)}
+.nkd-pv-viewer-root.cmp-wipe .nkd-pv-wipe{display:block}
+.nkd-pv-viewer-root.holding-ref .nkd-pv-wipe{display:none}
+.nkd-pv-viewer-root:focus{outline:none}
+.nkd-pv-live-badge{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:7;display:none;padding:3px 10px;border-radius:10px;font:bold 11px monospace;letter-spacing:1px;color:#fff;background:rgba(180,32,48,0.92);pointer-events:none;}
+.nkd-pv-live-badge.on{display:block}.nkd-pv-live-badge.cancelled{background:rgba(120,120,120,0.92)}
+.nkd-pv-strip{position:absolute;left:50%;bottom:74px;transform:translateX(-50%);z-index:6;display:none;gap:6px;max-width:80%;overflow-x:auto;padding:5px;border-radius:8px;background:rgba(18,18,18,0.85);border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(6px);opacity:0;transition:opacity 0.25s;}
+.nkd-pv-viewer-root:hover .nkd-pv-strip{opacity:1}
+.nkd-pv-strip.on{display:flex}
+.nkd-pv-strip img{height:46px;width:auto;border-radius:4px;border:2px solid transparent;cursor:pointer;flex:none;opacity:0.7}
+.nkd-pv-strip img.cur{border-color:#7dc97d;opacity:1}
+.nkd-pv-count{position:absolute;top:18px;left:50%;margin-left:70px;font:11px monospace;color:rgba(255,255,255,0.5);pointer-events:none;z-index:5;display:none}
+.nkd-pv-count.on{display:block}
+.nkd-pv-ref-badge{position:absolute;top:38px;left:14px;background:rgba(180,32,48,0.92);color:#fff;font:bold 11px monospace;padding:4px 9px;border-radius:4px;pointer-events:none;display:none;z-index:5;letter-spacing:1px;backdrop-filter:blur(4px);}
+.nkd-pv-viewer-root.holding-ref .nkd-pv-ref-badge{display:block}
+.nkd-pv-mask-ov{position:absolute;top:0;left:0;transform-origin:0 0;pointer-events:none;display:none;z-index:2;-webkit-mask-size:100% 100%;mask-size:100% 100%;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;-webkit-mask-mode:luminance;mask-mode:luminance;}
+.nkd-pv-viewer-root.holding-mask .nkd-pv-mask-ov,.nkd-pv-viewer-root.mask-on .nkd-pv-mask-ov{display:block}
+.nkd-pv-mask-ctl{display:flex;gap:6px;align-items:center;}
+.nkd-pv-btn-mask{user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
+.nkd-pv-btn-mask:hover{background:rgba(72,40,48,0.96);color:#fff}
+.nkd-pv-btn-mask.active{background:rgba(180,32,48,0.95);color:#fff}
+.nkd-pv-mask-color{width:30px;height:30px;padding:0;border:1px solid rgba(255,255,255,0.15);border-radius:6px;background:none;cursor:pointer;flex:none;}
+.nkd-pv-mask-color::-webkit-color-swatch-wrapper{padding:0;}
+.nkd-pv-mask-color::-webkit-color-swatch{border:none;border-radius:5px;}
+.nkd-pv-mask-op{width:80px;height:30px;cursor:pointer;accent-color:#7dc97d;}
+.nkd-pv-bar,.nkd-pv-btn-close{opacity:0;transition:opacity 0.25s;}
+.nkd-pv-viewer-root:hover .nkd-pv-bar,.nkd-pv-viewer-root:hover .nkd-pv-btn-close,.nkd-pv-viewer-root:focus-within .nkd-pv-bar{opacity:1}
 /* No hover on touch / PiP-without-pointer: hidden controls would be invisible controls. */
-@media (hover:none){.nkd-bar,.nkd-btn-close,.nkd-strip{opacity:1}}
+@media (hover:none){.nkd-pv-bar,.nkd-pv-btn-close,.nkd-pv-strip{opacity:1}}
 /* One full-width bottom bar split into left (reference) + right (actions)
    groups; space-between keeps them apart and each wraps on its own so the
    clusters never overlap on narrow windows. */
-.nkd-bar{position:absolute;left:18px;right:18px;bottom:18px;display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:8px 16px;z-index:6;}
-.nkd-bar-group{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
-.nkd-bar-right{display:flex;flex-direction:column;align-items:flex-end;gap:8px;margin-left:auto;}
-.nkd-bar-row{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;}
-.nkd-btn-close{position:absolute;top:14px;right:14px;z-index:6;}
-.nkd-btn-hold{user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
-.nkd-btn-hold:hover{background:rgba(72,40,48,0.96);color:#fff}
-.nkd-btn-hold.active{background:rgba(180,32,48,0.95);color:#fff}
-.nkd-vbtn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;line-height:1;white-space:nowrap;background:rgba(28,28,28,0.92);border:1px solid rgba(255,255,255,0.12);color:#ccc;border-radius:6px;cursor:pointer;font-size:13px;backdrop-filter:blur(6px);transition:background 0.14s,color 0.14s;}
-.nkd-vbtn svg{width:15px;height:15px;flex:none;display:block;}
+.nkd-pv-bar{position:absolute;left:18px;right:18px;bottom:18px;display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:8px 16px;z-index:6;}
+.nkd-pv-bar-group{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+.nkd-pv-bar-right{display:flex;flex-direction:column;align-items:flex-end;gap:8px;margin-left:auto;}
+.nkd-pv-bar-row{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;}
+.nkd-pv-btn-close{position:absolute;top:14px;right:14px;z-index:6;}
+.nkd-pv-btn-hold{user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
+.nkd-pv-btn-hold:hover{background:rgba(72,40,48,0.96);color:#fff}
+.nkd-pv-btn-hold.active{background:rgba(180,32,48,0.95);color:#fff}
+.nkd-pv-vbtn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;line-height:1;white-space:nowrap;background:rgba(28,28,28,0.92);border:1px solid rgba(255,255,255,0.12);color:#ccc;border-radius:6px;cursor:pointer;font-size:13px;backdrop-filter:blur(6px);transition:background 0.14s,color 0.14s;}
+.nkd-pv-vbtn svg{width:15px;height:15px;flex:none;display:block;}
 /* Narrow viewer → collapse buttons to icon-only (names stay in tooltips). */
-@container (max-width:470px){.nkd-vbtn .nkd-lbl{display:none;}.nkd-vbtn{padding:0 9px;}}
-.nkd-vbtn:hover{background:rgba(72,72,72,0.96);color:#fff}
-.nkd-vbtn:active{transform:scale(0.97)}
-.nkd-btn-run{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
-.nkd-btn-run:hover{background:rgba(60,84,60,0.96);color:#fff}
-.nkd-info{position:absolute;top:18px;left:48px;display:flex;gap:10px;align-items:center;font:11px monospace;color:rgba(255,255,255,0.3);pointer-events:none;z-index:5;}
-.nkd-zoom{pointer-events:auto;cursor:pointer;font:inherit;color:rgba(255,255,255,0.55);background:rgba(28,28,28,0.7);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:1px 6px}
-.nkd-zoom:hover{color:#fff}
-.nkd-px{color:rgba(255,255,255,0.55)}
-.nkd-more{position:relative;display:inline-flex}
-.nkd-more-menu{position:absolute;bottom:36px;right:0;display:none;flex-direction:column;align-items:stretch;gap:6px;padding:6px;border-radius:8px;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);box-shadow:0 10px 34px rgba(0,0,0,0.55);z-index:9}
-.nkd-more.open .nkd-more-menu{display:flex}
-.nkd-more-menu .nkd-vbtn{justify-content:flex-start}
-.nkd-more-menu .nkd-lbl{display:inline !important}
-.nkd-btn-save.saved{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
-.nkd-btn-cmp{background:rgba(28,34,44,0.92)}
-.nkd-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:rgba(255,255,255,0.18);pointer-events:none;}
-.nkd-empty svg{width:64px;height:64px;}
-.nkd-empty p{font:14px/1.4 monospace;margin:0;letter-spacing:0.02em;}
-.nkd-empty.hidden{display:none;}
+@container (max-width:470px){.nkd-pv-vbtn .nkd-pv-lbl{display:none;}.nkd-pv-vbtn{padding:0 9px;}}
+.nkd-pv-vbtn:hover{background:rgba(72,72,72,0.96);color:#fff}
+.nkd-pv-vbtn:active{transform:scale(0.97)}
+.nkd-pv-btn-run{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
+.nkd-pv-btn-run:hover{background:rgba(60,84,60,0.96);color:#fff}
+.nkd-pv-info{position:absolute;top:18px;left:48px;display:flex;gap:10px;align-items:center;font:11px monospace;color:rgba(255,255,255,0.3);pointer-events:none;z-index:5;}
+.nkd-pv-zoom{pointer-events:auto;cursor:pointer;font:inherit;color:rgba(255,255,255,0.55);background:rgba(28,28,28,0.7);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:1px 6px}
+.nkd-pv-zoom:hover{color:#fff}
+.nkd-pv-px{color:rgba(255,255,255,0.55)}
+.nkd-pv-more{position:relative;display:inline-flex}
+.nkd-pv-more-menu{position:absolute;bottom:36px;right:0;display:none;flex-direction:column;align-items:stretch;gap:6px;padding:6px;border-radius:8px;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);box-shadow:0 10px 34px rgba(0,0,0,0.55);z-index:9}
+.nkd-pv-more.open .nkd-pv-more-menu{display:flex}
+.nkd-pv-more-menu .nkd-pv-vbtn{justify-content:flex-start}
+.nkd-pv-more-menu .nkd-pv-lbl{display:inline !important}
+.nkd-pv-btn-save.saved{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
+.nkd-pv-btn-cmp{background:rgba(28,34,44,0.92)}
+.nkd-pv-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:rgba(255,255,255,0.18);pointer-events:none;}
+.nkd-pv-empty svg{width:64px;height:64px;}
+.nkd-pv-empty p{font:14px/1.4 monospace;margin:0;letter-spacing:0.02em;}
+.nkd-pv-empty.hidden{display:none;}
 `;
 
 // Inline SVG icons (consistent stroke, currentColor) — replaces emoji/box glyphs
@@ -418,18 +418,18 @@ function createViewerDOM(opts = {}) {
     }
 
     const root = document.createElement("div");
-    root.className = "nkd-viewer-root";
+    root.className = "nkd-pv-viewer-root";
     // Focusable so the shortcuts live on the root (not on `document`): they act only while
     // the pointer is over this viewer, work in any window it is moved to, and leak nothing.
     root.tabIndex = -1;
     root.style.cssText = "width:100%;height:100%;";
 
     root.innerHTML = `
-        <div class="nkd-vwrap">
-            <img class="nkd-vimg" alt="" draggable="false">
-            <div class="nkd-refclip"><img class="nkd-refimg" alt="" draggable="false"></div>
-            <div class="nkd-mask-ov"></div>
-            <div class="nkd-empty">
+        <div class="nkd-pv-vwrap">
+            <img class="nkd-pv-vimg" alt="" draggable="false">
+            <div class="nkd-pv-refclip"><img class="nkd-pv-refimg" alt="" draggable="false"></div>
+            <div class="nkd-pv-mask-ov"></div>
+            <div class="nkd-pv-empty">
                 <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <rect x="8" y="12" width="48" height="40" rx="4" stroke="currentColor" stroke-width="2.5"/>
                     <circle cx="22" cy="26" r="4" stroke="currentColor" stroke-width="2.5"/>
@@ -438,14 +438,14 @@ function createViewerDOM(opts = {}) {
                 <p>Run the node to preview an image</p>
             </div>
         </div>
-        <div class="nkd-ref-badge">REF</div>
-        <div class="nkd-live-badge"></div>
-        <div class="nkd-count"></div>
-        <div class="nkd-wipe"></div>
-        <div class="nkd-strip"></div>
-        <div class="nkd-help" title="Gestures & shortcuts">
+        <div class="nkd-pv-ref-badge">REF</div>
+        <div class="nkd-pv-live-badge"></div>
+        <div class="nkd-pv-count"></div>
+        <div class="nkd-pv-wipe"></div>
+        <div class="nkd-pv-strip"></div>
+        <div class="nkd-pv-help" title="Gestures & shortcuts">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.1 9.2a3 3 0 0 1 5.8 1c0 2-3 2.3-3 4"/><path d="M12 17h.01"/></svg>
-            <div class="nkd-help-panel">
+            <div class="nkd-pv-help-panel">
                 <div><span class="k">Drag</span> pan image</div>
                 <div><span class="k">Wheel</span> zoom</div>
                 <div><span class="k">Double-click</span> 1:1 / fit</div>
@@ -461,41 +461,41 @@ function createViewerDOM(opts = {}) {
                 <div><span class="k">0 / F</span> fit &middot; <span class="k">1</span> 1:1 &middot; <span class="k">Esc</span> close</div>
             </div>
         </div>
-        <button class="nkd-btn-close nkd-vbtn" title="Close">${ICON.close}<span class="nkd-lbl">Close</span></button>
-        <div class="nkd-info"><span class="nkd-dims"></span><button class="nkd-zoom" title="Zoom - click for 100%"></button><span class="nkd-px"></span></div>
-        <div class="nkd-bar">
-            <div class="nkd-bar-group nkd-bar-left">
-                <button class="nkd-btn-hold nkd-vbtn" title="Hold to show reference image (Space)" style="display:${refUrl ? '' : 'none'}">${ICON.swap}<span class="nkd-lbl">Hold for Ref</span></button>
-                <button class="nkd-btn-cmp nkd-vbtn" title="Compare mode (V): Flash / Wipe / Diff" style="display:none">${ICON.cmp}<span class="nkd-lbl">Flash</span></button>
-                <span class="nkd-mask-ctl" style="display:${maskUrl ? '' : 'none'}">
-                    <button class="nkd-btn-mask nkd-vbtn" title="Toggle the reference mask overlay — hold M to peek">${ICON.mask}<span class="nkd-lbl">Mask</span></button>
-                    <input type="color" class="nkd-mask-color" title="Overlay colour">
-                    <input type="range" class="nkd-mask-op" min="5" max="100" title="Overlay opacity">
+        <button class="nkd-pv-btn-close nkd-pv-vbtn" title="Close">${ICON.close}<span class="nkd-pv-lbl">Close</span></button>
+        <div class="nkd-pv-info"><span class="nkd-pv-dims"></span><button class="nkd-pv-zoom" title="Zoom - click for 100%"></button><span class="nkd-pv-px"></span></div>
+        <div class="nkd-pv-bar">
+            <div class="nkd-pv-bar-group nkd-pv-bar-left">
+                <button class="nkd-pv-btn-hold nkd-pv-vbtn" title="Hold to show reference image (Space)" style="display:${refUrl ? '' : 'none'}">${ICON.swap}<span class="nkd-pv-lbl">Hold for Ref</span></button>
+                <button class="nkd-pv-btn-cmp nkd-pv-vbtn" title="Compare mode (V): Flash / Wipe / Diff" style="display:none">${ICON.cmp}<span class="nkd-pv-lbl">Flash</span></button>
+                <span class="nkd-pv-mask-ctl" style="display:${maskUrl ? '' : 'none'}">
+                    <button class="nkd-pv-btn-mask nkd-pv-vbtn" title="Toggle the reference mask overlay — hold M to peek">${ICON.mask}<span class="nkd-pv-lbl">Mask</span></button>
+                    <input type="color" class="nkd-pv-mask-color" title="Overlay colour">
+                    <input type="range" class="nkd-pv-mask-op" min="5" max="100" title="Overlay opacity">
                 </span>
             </div>
-            <div class="nkd-bar-right">
-                <div class="nkd-bar-row">
-                    <button class="nkd-btn-fit nkd-vbtn" title="Fit image to window (0)">${ICON.fit}<span class="nkd-lbl">Fit Image</span></button>
-                    <button class="nkd-btn-100 nkd-vbtn" title="Actual size (1)">${ICON.pixel}<span class="nkd-lbl">1:1 Pixel</span></button>
+            <div class="nkd-pv-bar-right">
+                <div class="nkd-pv-bar-row">
+                    <button class="nkd-pv-btn-fit nkd-pv-vbtn" title="Fit image to window (0)">${ICON.fit}<span class="nkd-pv-lbl">Fit Image</span></button>
+                    <button class="nkd-pv-btn-100 nkd-pv-vbtn" title="Actual size (1)">${ICON.pixel}<span class="nkd-pv-lbl">1:1 Pixel</span></button>
                 </div>
-                <div class="nkd-bar-row">
-                    <button class="nkd-btn-run nkd-vbtn" title="Queue this node (Shift+Q)" style="display:${onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-lbl">Run</span></button>
-                    <button class="nkd-btn-copy nkd-vbtn" title="Copy image to clipboard (C)">${ICON.copy}<span class="nkd-lbl">Copy</span></button>
-                    <button class="nkd-btn-save nkd-vbtn" title="Save into the active project's folder (S)">${ICON.folder}<span class="nkd-lbl">Save</span></button>
-                    <span class="nkd-more"><button class="nkd-btn-more nkd-vbtn" title="More">${ICON.more}</button><div class="nkd-more-menu"><button class="nkd-btn-adj nkd-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-lbl">Fit Window</span></button><button class="nkd-btn-dl nkd-vbtn" title="Download a copy through the browser">${ICON.save}<span class="nkd-lbl">Download</span></button><button class="nkd-btn-load nkd-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-lbl">To Load</span></button><button class="nkd-btn-reveal nkd-vbtn" title="Show in the file manager" style="display:none">${ICON.folder}<span class="nkd-lbl">Show in folder</span></button></div></span>
+                <div class="nkd-pv-bar-row">
+                    <button class="nkd-pv-btn-run nkd-pv-vbtn" title="Queue this node (Shift+Q)" style="display:${onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-pv-lbl">Run</span></button>
+                    <button class="nkd-pv-btn-copy nkd-pv-vbtn" title="Copy image to clipboard (C)">${ICON.copy}<span class="nkd-pv-lbl">Copy</span></button>
+                    <button class="nkd-pv-btn-save nkd-pv-vbtn" title="Save into the active project's folder (S)">${ICON.folder}<span class="nkd-pv-lbl">Save</span></button>
+                    <span class="nkd-pv-more"><button class="nkd-pv-btn-more nkd-pv-vbtn" title="More">${ICON.more}</button><div class="nkd-pv-more-menu"><button class="nkd-pv-btn-adj nkd-pv-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-pv-lbl">Fit Window</span></button><button class="nkd-pv-btn-dl nkd-pv-vbtn" title="Download a copy through the browser">${ICON.save}<span class="nkd-pv-lbl">Download</span></button><button class="nkd-pv-btn-load nkd-pv-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-pv-lbl">To Load</span></button><button class="nkd-pv-btn-reveal nkd-pv-vbtn" title="Show in the file manager" style="display:none">${ICON.folder}<span class="nkd-pv-lbl">Show in folder</span></button></div></span>
                 </div>
             </div>
         </div>`;
 
-    const wrap    = root.querySelector(".nkd-vwrap");
-    const img     = root.querySelector(".nkd-vimg");
-    const refImg  = root.querySelector(".nkd-refimg");
-    const empty   = root.querySelector(".nkd-empty");
-    const dims    = root.querySelector(".nkd-dims");
-    const btnHold = root.querySelector(".nkd-btn-hold");
-    const maskOv  = root.querySelector(".nkd-mask-ov");
-    const zoomBtn = root.querySelector(".nkd-zoom");
-    const pxEl    = root.querySelector(".nkd-px");
+    const wrap    = root.querySelector(".nkd-pv-vwrap");
+    const img     = root.querySelector(".nkd-pv-vimg");
+    const refImg  = root.querySelector(".nkd-pv-refimg");
+    const empty   = root.querySelector(".nkd-pv-empty");
+    const dims    = root.querySelector(".nkd-pv-dims");
+    const btnHold = root.querySelector(".nkd-pv-btn-hold");
+    const maskOv  = root.querySelector(".nkd-pv-mask-ov");
+    const zoomBtn = root.querySelector(".nkd-pv-zoom");
+    const pxEl    = root.querySelector(".nkd-pv-px");
     let pxCtx = null, pxSrc = "", pxLast = 0;   // cached 2D copy of the image for the pixel readout
 
     let scale = 1, tx = 0, ty = 0, fitScale = 1;
@@ -562,7 +562,7 @@ function createViewerDOM(opts = {}) {
     root._nkdFit = fit;
     root._nkdSetMeta = (meta) => { imgMeta = meta; setSaved(null); };
     // Batch navigator: thumbnails + counter, driven by the host (which owns the items).
-    const strip = root.querySelector(".nkd-strip"), counter = root.querySelector(".nkd-count");
+    const strip = root.querySelector(".nkd-pv-strip"), counter = root.querySelector(".nkd-pv-count");
     let batch = { n: 0, i: 0, go: null };
     root._nkdSetBatch = (urls, index, go) => {
         batch = { n: urls.length, i: index, go };
@@ -584,7 +584,7 @@ function createViewerDOM(opts = {}) {
     const stepBatch = (d) => { if (batch.n > 1) batch.go?.((batch.i + d + batch.n) % batch.n); };
     // state: "live" | "cancelled" | null. Sampling frames are low-res; without this a cancelled
     // run leaves a blurry frame that reads as the final image.
-    const liveBadge = root.querySelector(".nkd-live-badge");
+    const liveBadge = root.querySelector(".nkd-pv-live-badge");
     root._nkdLive = (state, text) => {
         liveBadge.classList.toggle("on", !!state);
         liveBadge.classList.toggle("cancelled", state === "cancelled");
@@ -639,8 +639,8 @@ function createViewerDOM(opts = {}) {
     root.addEventListener("keyup", e => { if (e.code === "Space") { e.preventDefault(); showCur(); } });
 
     // ── Compare modes: flash (hold) / wipe (divider) / diff ─────────────────────
-    const cmpBtn = root.querySelector(".nkd-btn-cmp"), wipeEl = root.querySelector(".nkd-wipe"),
-          refClip = root.querySelector(".nkd-refclip");
+    const cmpBtn = root.querySelector(".nkd-pv-btn-cmp"), wipeEl = root.querySelector(".nkd-pv-wipe"),
+          refClip = root.querySelector(".nkd-pv-refclip");
     const MODES = ["flash", "wipe", "diff"];
     let cmpMode = localStorage.getItem("nkd_cmp_mode");
     if (!MODES.includes(cmpMode)) cmpMode = "flash";
@@ -649,7 +649,7 @@ function createViewerDOM(opts = {}) {
         root.classList.toggle("cmp-wipe", !!curRef && cmpMode === "wipe");
         root.classList.toggle("cmp-diff", !!curRef && cmpMode === "diff");
         cmpBtn.style.display = curRef ? "" : "none";
-        cmpBtn.querySelector(".nkd-lbl").textContent = cmpMode[0].toUpperCase() + cmpMode.slice(1);
+        cmpBtn.querySelector(".nkd-pv-lbl").textContent = cmpMode[0].toUpperCase() + cmpMode.slice(1);
         wipeEl.style.left = (wipeX * 100) + "%";
         // Reference layer sits on top and reads left = before, right = after.
         refClip.style.clipPath = curRef && cmpMode === "wipe" ? `inset(0 ${(1 - wipeX) * 100}% 0 0)` : "";
@@ -672,9 +672,9 @@ function createViewerDOM(opts = {}) {
     wipeEl.addEventListener("pointerup", endWipe); wipeEl.addEventListener("pointercancel", endWipe);
 
     // ── Mask overlay (toggle button + M peek) — always wired, gated on curMask ──
-    const btnMask = root.querySelector(".nkd-btn-mask");
-    const colorIn = root.querySelector(".nkd-mask-color");
-    const opIn    = root.querySelector(".nkd-mask-op");
+    const btnMask = root.querySelector(".nkd-pv-btn-mask");
+    const colorIn = root.querySelector(".nkd-pv-mask-color");
+    const opIn    = root.querySelector(".nkd-pv-mask-op");
     colorIn.value = localStorage.getItem("nkd_mask_color") || "#ff2f38";
     opIn.value    = localStorage.getItem("nkd_mask_op")    || "50";
     const styleMask = () => { maskOv.style.backgroundColor = colorIn.value; maskOv.style.opacity = String(opIn.value / 100); };
@@ -696,8 +696,8 @@ function createViewerDOM(opts = {}) {
     root.addEventListener("keyup", e => { if (e.key === "m" || e.key === "M") { e.preventDefault(); peekOff(); } });
 
     // Update reference/mask availability live (called on every workflow run).
-    const refBadge = root.querySelector(".nkd-ref-badge");
-    const holdLbl  = btnHold.querySelector(".nkd-lbl");
+    const refBadge = root.querySelector(".nkd-pv-ref-badge");
+    const holdLbl  = btnHold.querySelector(".nkd-pv-lbl");
     const setRefLabel = (label) => {
         // "PREV" = the implicit reference (the render before this one); "REF" = a wired/global one.
         refBadge.textContent = label || "REF";
@@ -711,7 +711,7 @@ function createViewerDOM(opts = {}) {
         btnHold.style.display = curRef ? "" : "none";
         if (curRef) { if (refImg.src !== curRef) refImg.src = curRef; }
         else { holding = false; latched = false; root.classList.remove("holding-ref"); btnHold.classList.remove("active"); }
-        root.querySelector(".nkd-mask-ctl").style.display = curMask ? "" : "none";
+        root.querySelector(".nkd-pv-mask-ctl").style.display = curMask ? "" : "none";
         if (curMask) { maskOv.style.webkitMaskImage = `url("${curMask}")`; maskOv.style.maskImage = `url("${curMask}")`; }
         else { maskOn = peeking = false; root.classList.remove("holding-mask", "mask-on"); btnMask.classList.remove("active"); }
         syncCmp();
@@ -722,7 +722,7 @@ function createViewerDOM(opts = {}) {
     if (curMask) { maskOv.style.webkitMaskImage = `url("${curMask}")`; maskOv.style.maskImage = `url("${curMask}")`; }
 
     // Fit Window button — resizes the panel (floating mode) or the OS window (popup mode)
-    root.querySelector(".nkd-btn-adj").addEventListener("click", () => {
+    root.querySelector(".nkd-pv-btn-adj").addEventListener("click", () => {
         const nw = img.naturalWidth, nh = img.naturalHeight;
         if (!nw || !nh) return;
         const maxW = Math.round(screen.availWidth  * 0.9);
@@ -742,13 +742,13 @@ function createViewerDOM(opts = {}) {
         }
     });
 
-    if (onQueue) root.querySelector(".nkd-btn-run").addEventListener("click", () => onQueue());
+    if (onQueue) root.querySelector(".nkd-pv-btn-run").addEventListener("click", () => onQueue());
 
-    root.querySelector(".nkd-btn-copy").addEventListener("click", () => copyImageToClipboard(img.src));
-    if (onSendToLoad) root.querySelector(".nkd-btn-load").addEventListener("click", () => onSendToLoad());
+    root.querySelector(".nkd-pv-btn-copy").addEventListener("click", () => copyImageToClipboard(img.src));
+    if (onSendToLoad) root.querySelector(".nkd-pv-btn-load").addEventListener("click", () => onSendToLoad());
 
-    root.querySelector(".nkd-btn-fit").addEventListener("click", fit);
-    root.querySelector(".nkd-btn-100").addEventListener("click", () => {
+    root.querySelector(".nkd-pv-btn-fit").addEventListener("click", fit);
+    root.querySelector(".nkd-pv-btn-100").addEventListener("click", () => {
         // If in panel mode, resize panel to image size and center it, then fit zoom.
         if (typeof root._nkdResizeTo === "function") {
             const nw = img.naturalWidth, nh = img.naturalHeight;
@@ -784,11 +784,11 @@ function createViewerDOM(opts = {}) {
         a.click();
         document.body.removeChild(a);
     };
-    root.querySelector(".nkd-btn-dl").addEventListener("click", download);
+    root.querySelector(".nkd-pv-btn-dl").addEventListener("click", download);
 
     // Save — into the active project's folder. Falls back to the download when the host
     // could not hand us a saver, so the button is never a no-op.
-    const saveBtn = root.querySelector(".nkd-btn-save"), saveLbl = saveBtn.querySelector(".nkd-lbl");
+    const saveBtn = root.querySelector(".nkd-pv-btn-save"), saveLbl = saveBtn.querySelector(".nkd-pv-lbl");
     const saveTitle = saveBtn.title;
     function setSaved(saved) {
         saveBtn.classList.toggle("saved", !!saved);
@@ -802,12 +802,12 @@ function createViewerDOM(opts = {}) {
     });
 
     // "..." menu: the rarely-used actions, so the bar keeps to what is used every run.
-    const more = root.querySelector(".nkd-more");
-    root.querySelector(".nkd-btn-more").addEventListener("click", e => { e.stopPropagation(); more.classList.toggle("open"); });
-    root.querySelector(".nkd-more-menu").addEventListener("click", () => more.classList.remove("open"));
+    const more = root.querySelector(".nkd-pv-more");
+    root.querySelector(".nkd-pv-btn-more").addEventListener("click", e => { e.stopPropagation(); more.classList.toggle("open"); });
+    root.querySelector(".nkd-pv-more-menu").addEventListener("click", () => more.classList.remove("open"));
     root.addEventListener("pointerdown", e => { if (!more.contains(e.target)) more.classList.remove("open"); });
     root.addEventListener("mouseleave", () => more.classList.remove("open"));
-    const btnReveal = root.querySelector(".nkd-btn-reveal");
+    const btnReveal = root.querySelector(".nkd-pv-btn-reveal");
     if (onReveal) {
         void revealAvailable().then(ok => { if (ok) btnReveal.style.display = ""; });
         btnReveal.addEventListener("click", () => onReveal());
@@ -904,7 +904,7 @@ function createViewerDOM(opts = {}) {
     // Keyboard
     root.addEventListener("keydown", e => {
         if (typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
-        if (e.key === "Escape") root.querySelector(".nkd-btn-close").click();
+        if (e.key === "Escape") root.querySelector(".nkd-pv-btn-close").click();
         if ((e.key === "v" || e.key === "V") && curRef) cycleCmp();
         if (e.shiftKey && e.key.startsWith("Arrow")) {
             e.preventDefault();
@@ -918,9 +918,9 @@ function createViewerDOM(opts = {}) {
         else if (e.key === "ArrowLeft")    { e.preventDefault(); stepBatch(-1); }
         // F, not R: plain R is ComfyUI's "refresh node definitions".
         if (e.key === "0" || e.key === "f" || e.key === "F") fit();
-        if (e.key === "1") root.querySelector(".nkd-btn-100").click();
-        if (e.key === "s" || e.key === "S") root.querySelector(".nkd-btn-save").click();
-        if (e.key === "c" || e.key === "C") root.querySelector(".nkd-btn-copy").click();
+        if (e.key === "1") root.querySelector(".nkd-pv-btn-100").click();
+        if (e.key === "s" || e.key === "S") root.querySelector(".nkd-pv-btn-save").click();
+        if (e.key === "c" || e.key === "C") root.querySelector(".nkd-pv-btn-copy").click();
     });
 
     return root;
@@ -1274,7 +1274,7 @@ class PopupWin {
         });
         container.style.cssText = "width:100%;height:100%;";
         // Hide the viewer's own close button — the panel titlebar has one.
-        const viewerClose = container.querySelector(".nkd-btn-close");
+        const viewerClose = container.querySelector(".nkd-pv-btn-close");
         if (viewerClose) viewerClose.style.display = "none";
 
         // Fit Window resizes the panel keeping its current position.
@@ -1299,7 +1299,7 @@ class PopupWin {
         content.appendChild(container);
 
         // Update img
-        const imgEl = container.querySelector(".nkd-vimg");
+        const imgEl = container.querySelector(".nkd-pv-vimg");
         if (imgEl && this.currentUrl) { imgEl.style.opacity = "0.4"; imgEl.src = this.currentUrl; }
 
         this._container = container;
@@ -1316,7 +1316,7 @@ class PopupWin {
             if (this.win) { this.win.closed = true; this.win = null; }
         };
         closeBtn.addEventListener("click", closePanel);
-        container.querySelector(".nkd-btn-close").addEventListener("click", closePanel);
+        container.querySelector(".nkd-pv-btn-close").addEventListener("click", closePanel);
 
         // ── Drag ───────────────────────────────────────────────────────────────
         // Pointer capture on the titlebar: no window listeners to pile up per open.
@@ -1476,7 +1476,7 @@ class PopupWin {
         container.style.cssText = "width:100vw;height:100vh;";
         doc.body.appendChild(container);
         container._nkdRebind?.(win);
-        container.querySelector(".nkd-btn-close")?.addEventListener("click", () => win.close());
+        container.querySelector(".nkd-pv-btn-close")?.addEventListener("click", () => win.close());
         // Fit Window / 1:1 resize THIS window, not the main one.
         container._nkdResizeTo = (w, h, { center = false } = {}) => {
             try {
@@ -1488,7 +1488,7 @@ class PopupWin {
         };
         this._container = container;
 
-        const img = container.querySelector(".nkd-vimg");
+        const img = container.querySelector(".nkd-pv-vimg");
         if (img && this.currentUrl) { img.style.opacity = "0.4"; img.src = this.currentUrl; }
         this._syncBatch();
 
@@ -1576,7 +1576,7 @@ class PopupWin {
     }
 
     _updateImage(url) {
-        const img = this._container?.querySelector(".nkd-vimg");
+        const img = this._container?.querySelector(".nkd-pv-vimg");
         if (img) img.src = url;
     }
 
@@ -1589,7 +1589,7 @@ class PopupWin {
 
     _setLiveFrame(dataUrl) {
         // A self-contained data: URL: works in any window (no per-realm blob partitioning).
-        const img = this._container?.querySelector(".nkd-vimg");
+        const img = this._container?.querySelector(".nkd-pv-vimg");
         if (!img) return;
         img.src = dataUrl;
         img.style.opacity = "1";
