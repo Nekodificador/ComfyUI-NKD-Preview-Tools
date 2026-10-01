@@ -744,7 +744,7 @@ function createViewerDOM(opts = {}) {
 
     if (onQueue) root.querySelector(".nkd-pv-btn-run").addEventListener("click", () => onQueue());
 
-    root.querySelector(".nkd-pv-btn-copy").addEventListener("click", () => copyImageToClipboard(img.src));
+    root.querySelector(".nkd-pv-btn-copy").addEventListener("click", () => copyImageToClipboard(img.src, root.ownerDocument.defaultView || window));
     if (onSendToLoad) root.querySelector(".nkd-pv-btn-load").addEventListener("click", () => onSendToLoad());
 
     root.querySelector(".nkd-pv-btn-fit").addEventListener("click", fit);
@@ -1813,7 +1813,18 @@ function openViewer(node) {
 
 // ── CopyImage ────────────────────────────────────────────────────────────────
 
-async function copyImageToClipboard(url) {
+// The clipboard only accepts image/png, and a PiP / OS window must use ITS OWN navigator:
+// the main window's clipboard rejects writes while another document has focus.
+async function pngBlob(url) {
+    const blob = await fetch(url).then(r => r.blob());
+    if (blob.type === "image/png") return blob;
+    const bmp = await createImageBitmap(blob);
+    const c = Object.assign(document.createElement("canvas"), { width: bmp.width, height: bmp.height });
+    c.getContext("2d").drawImage(bmp, 0, 0);
+    return new Promise((res, rej) => c.toBlob(b => (b ? res(b) : rej(new Error("png encode failed"))), "image/png"));
+}
+
+async function copyImageToClipboard(url, win = window) {
     if (!url) {
         app.extensionManager?.toast?.add?.({
             severity: "warn",
@@ -1824,8 +1835,8 @@ async function copyImageToClipboard(url) {
         return;
     }
     try {
-        const blob = await fetch(url).then(r => r.blob());
-        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+        // Promise inside ClipboardItem keeps the click's user gesture alive during the fetch.
+        await win.navigator.clipboard.write([new win.ClipboardItem({ "image/png": pngBlob(url) })]);
         app.extensionManager?.toast?.add?.({
             severity: "success",
             summary: "Image Copied",
@@ -1833,7 +1844,7 @@ async function copyImageToClipboard(url) {
             life: 3000,
         });
     } catch (err) {
-        console.error("NKD copy image error:", err);
+        console.error("NKD copy image error:", err?.name, err?.message, err);
         app.extensionManager?.toast?.add?.({
             severity: "error",
             summary: "Copy Failed",
@@ -1946,6 +1957,7 @@ app.registerExtension({
             popup.wiredMask = detail.output.nkd_mask?.[0] || null;
             popup.setTitle(node.title || "Preview Window");
             popup._live(null);
+            popup._runDone = true;   // later sampler frames of THIS run must not overwrite the result
             popup.showBatch(detail.output.images);
             lastActiveId = String(node.id);
             // Opt-in per node. PiP needs a user gesture, so on a bare run it falls back to the
@@ -1968,7 +1980,18 @@ app.registerExtension({
 
         // A reference node may finish after the preview node in the same run, so
         // also refresh references once the whole prompt completes.
+        api.addEventListener("execution_start", () => {
+            for (const p of popups.values()) p._runDone = false;
+        });
         api.addEventListener("execution_success", () => {
+            for (const p of popups.values()) {
+                // Run over but still showing a sampling frame (this node was cached, or its
+                // result never arrived): put the last real image back instead of staying stuck.
+                if (p._liveState === "live") {
+                    p._live(null);
+                    if (p.currentUrl) p._updateImage(p.currentUrl);
+                }
+            }
             for (const p of popups.values()) p.refreshRefs();
         });
 
@@ -2045,6 +2068,7 @@ app.registerExtension({
                         // whose frame this is, so show it nowhere rather than everywhere.
                         if (!sampler && openCount > 1) continue;
                     }
+                    if (popup._runDone) continue;
                     popup._setLiveFrame(dataUrl);
                 }
             });
