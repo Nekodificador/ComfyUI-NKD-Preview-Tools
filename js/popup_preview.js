@@ -1931,20 +1931,9 @@ app.registerExtension({
     ],
 
     async setup() {
-        // Global keydown so shortcuts work regardless of where focus is.
-        document.addEventListener("keydown", (e) => {
-            if (e.ctrlKey || e.altKey || e.metaKey) return;
-            if (e.key !== "q" && e.key !== "Q") return;
-            const tag = document.activeElement?.tagName;
-            if (tag === "INPUT" || tag === "TEXTAREA" || document.activeElement?.isContentEditable) return;
-            if (e.shiftKey) {
-                e.preventDefault();
-                app.extensionManager?.command?.execute?.("NKD.PopupPreview.QueuePrimary");
-            } else {
-                e.preventDefault();
-                app.extensionManager?.command?.execute?.("NKD.PopupPreview.OpenPrimary");
-            }
-        });
+        // Q / Shift+Q come ONLY from the `keybindings` above. A second global keydown
+        // listener here fired the same command twice, and since open() is async the
+        // second call saw no window yet and opened a second panel.
 
         api.addEventListener("executed", ({ detail }) => {
             if (!detail?.output?.images?.length) return;
