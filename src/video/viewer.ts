@@ -43,8 +43,8 @@ export interface VideoInfo {
   preview: "video" | "image" | "none";
   /** MIME + codec string to ask `canPlayType` about, when `preview` is "video". */
   mime?: string | null;
-  /** Fallback still, relative to the same subfolder, when the browser cannot play it. */
-  poster?: string | null;
+  /** Fallback still (in temp/), when the browser cannot play the render. */
+  poster?: MediaRef | null;
   format: string;
   size: number;
   /** Absolute path on the server, for the copy button. */
@@ -56,7 +56,11 @@ export interface VideoInfo {
   reference?: MediaRef | null;
   /** The `_labeled` review copy (always h264/mp4), when any widgets are tracked. */
   labeled?: MediaRef | null;
+  /** The clip as transparent vp9, when its frames carry alpha. */
+  alpha?: MediaRef | null;
 }
+
+const VP9 = 'video/webm; codecs="vp9"';
 
 /** Tallest the picture is allowed to get, in logical px. Widening the node must NOT grow
  *  the monitor - same reasoning, and same number, as the timeline's preview. */
@@ -245,7 +249,11 @@ export class VideoViewer {
     const labeled = info.labeled ?? null;
     this.labelsBtn.style.display = labeled ? "" : "none";
     this.labelsBtn.classList.toggle("on", this.showLabels && !!labeled);
-    this.shown = this.showLabels && labeled ? labeled : ref;
+    // An RGBA clip plays from its transparent vp9 twin, over a checkerboard, wherever this
+    // browser decodes vp9. The labeled review copy still wins when asked for.
+    const alpha = info.alpha && this.video.canPlayType(VP9) !== "" ? info.alpha : null;
+    this.shown = this.showLabels && labeled ? labeled : alpha ?? ref;
+    this.stage.classList.toggle("nkd-vid-alpha", this.shown === alpha);
     const url = viewUrl(this.shown);
     this.link.href = viewUrl(ref);
     this.link.setAttribute("download", ref.filename);
@@ -275,9 +283,7 @@ export class VideoViewer {
       this.video.load();
       this.video.style.display = "none";
       this.still.style.display = "";
-      this.still.src = info.poster
-        ? viewUrl({ ...ref, filename: info.poster })
-        : url;
+      this.still.src = info.poster ? viewUrl(info.poster) : url;
     }
     // The path line and the download button always point at the RENDER, never at the
     // poster: the poster is a preview artefact, not the thing that was asked for.
@@ -553,6 +559,7 @@ export class VideoViewer {
     if (this.showLabels && this.info?.labeled) {
       return this.video.canPlayType('video/mp4; codecs="avc1.42E01E"') !== "";
     }
+    if (this.shown && this.shown === this.info?.alpha) return true;  // vp9 already checked
     if (this.info?.preview !== "video") return false;
     const mime = this.info.mime;
     if (!mime) return true;

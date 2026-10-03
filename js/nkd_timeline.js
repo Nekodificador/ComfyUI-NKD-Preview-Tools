@@ -3902,6 +3902,10 @@ const CSS = `
   background: #000; border: 1px solid #3a3d46; border-radius: 6px;
   overflow: hidden;
 }
+/* Transparent clips: a checkerboard shows where the alpha is. */
+.nkd-vid-stage.nkd-vid-alpha {
+  background: repeating-conic-gradient(#2a2c33 0 25%, #1c1e24 0 50%) 0 0 / 16px 16px;
+}
 .nkd-vid-el {
   position: absolute; inset: 0;
   width: 100%; height: 100%; object-fit: contain; display: block;
@@ -4871,6 +4875,7 @@ async function openPopout(root, title, onMoved) {
 }
 const COMPARE_ORDER = ["off", "wipe", "difference"];
 const REF_DRIFT_S = 0.25;
+const VP9 = 'video/webm; codecs="vp9"';
 const PREVIEW_MAX_H = 260;
 const SCRUB_H = 44;
 const SHUTTLE = [1, 2, 4, 8];
@@ -5045,7 +5050,9 @@ class VideoViewer {
     const labeled = info.labeled ?? null;
     this.labelsBtn.style.display = labeled ? "" : "none";
     this.labelsBtn.classList.toggle("on", this.showLabels && !!labeled);
-    this.shown = this.showLabels && labeled ? labeled : ref;
+    const alpha = info.alpha && this.video.canPlayType(VP9) !== "" ? info.alpha : null;
+    this.shown = this.showLabels && labeled ? labeled : alpha ?? ref;
+    this.stage.classList.toggle("nkd-vid-alpha", this.shown === alpha);
     const url = viewUrl(this.shown);
     this.link.href = viewUrl(ref);
     this.link.setAttribute("download", ref.filename);
@@ -5068,7 +5075,7 @@ class VideoViewer {
       this.video.load();
       this.video.style.display = "none";
       this.still.style.display = "";
-      this.still.src = info.poster ? viewUrl({ ...ref, filename: info.poster }) : url;
+      this.still.src = info.poster ? viewUrl(info.poster) : url;
     }
     const shown = ref.filename;
     this.link.setAttribute("download", shown);
@@ -5323,11 +5330,12 @@ class VideoViewer {
    * backend states the codec and this decides.
    */
   get playable() {
-    var _a, _b;
+    var _a, _b, _c;
     if (this.showLabels && ((_a = this.info) == null ? void 0 : _a.labeled)) {
       return this.video.canPlayType('video/mp4; codecs="avc1.42E01E"') !== "";
     }
-    if (((_b = this.info) == null ? void 0 : _b.preview) !== "video") return false;
+    if (this.shown && this.shown === ((_b = this.info) == null ? void 0 : _b.alpha)) return true;
+    if (((_c = this.info) == null ? void 0 : _c.preview) !== "video") return false;
     const mime = this.info.mime;
     if (!mime) return true;
     return this.video.canPlayType(mime) !== "";

@@ -195,7 +195,7 @@ FORMATS = {
 
 # prores_ks profile numbers, straight from ffmpeg.
 #
-# **4444 is the pack's only working alpha path.**
+# **4444 is the only profile with an alpha plane** (vp9 is the pack's other alpha path).
 #
 # The pixel format here is what the encoder is ASKED for, which is not what ends up in the
 # file, and asking for the stored one directly fails to open. So this is the value that has
@@ -326,6 +326,12 @@ def _to_u8(frame: torch.Tensor, channels: int) -> np.ndarray:
     return (frame[..., :channels] * 255).clamp(0, 255).byte().cpu().numpy()
 
 
+def _to_u16(frame: torch.Tensor, channels: int) -> np.ndarray:
+    """One frame as HxWxC uint16, for ProRes: its 10/12-bit planes are wasted on 8-bit input."""
+    return ((frame[..., :channels].float() * 65535).round().clamp(0, 65535)
+            .to(torch.int32).cpu().numpy().astype(np.uint16))
+
+
 def _add_audio_stream(container, audio: dict | None, codec: str | None,
                       max_seconds: float):
     """Declare the audio stream and prepare its source frame.
@@ -374,18 +380,17 @@ def encode_video(images: torch.Tensor, path: str, spec: dict, fps: float,
                  profile: str | None = None) -> None:
     """h264 / vp9 / ProRes through PyAV.
 
-    **Alpha survives on ProRes 4444 and nowhere else.** Both halves checked,
-    by encoding a half-transparent clip and reading it back:
+    **Alpha survives on ProRes 4444 and vp9.** Both checked by encoding a half-transparent
+    clip and reading it back:
 
     - **ProRes 4444: yes.** Comes back with alpha 0 on one side and 255 on the other.
-    - **vp9: no**, however it is asked. WebM carries a vp9 alpha plane in `BlockAdditional`,
-      which the ffmpeg CLI assembles as a second stream; libavformat does not, so nothing
-      PyAV can express produces it - with or without `auto-alt-ref 0`. The core's `SaveWEBM`
-      sets `yuva420p` and implies otherwise.
+    - **vp9: yes, as `yuva420p`.** The alpha plane lives in WebM's `BlockAdditional`, and
+      only libvpx decodes it: FFmpeg's built-in `vp9` decoder (what `container.decode`
+      picks) silently drops it, which is what made this look impossible once. Browsers use
+      libvpx, so the file plays transparent in Chrome.
     - h264 has no alpha path at all.
 
-    Everywhere except 4444 the alpha is flattened. Promising it would be a lie that only
-    turns up once someone composites the result.
+    Everywhere else the alpha is flattened.
     """
     # mp4 drops any tag it does not recognise unless `use_metadata_tags` is on, so without
     # this the embedded prompt silently vanishes. `faststart` earns its place separately:
@@ -415,7 +420,6 @@ def encode_video(images: torch.Tensor, path: str, spec: dict, fps: float,
         stream.width = images.shape[2]
         stream.height = images.shape[1]
         stream.bit_rate = 0
-        alpha = False
         if spec["vcodec"] == "prores_ks":
             # ProRes is quality-by-PROFILE, not by crf: the profile picks the bitrate class
             # and the pixel format together, and 4444 is the only one with an alpha plane.
@@ -424,7 +428,8 @@ def encode_video(images: torch.Tensor, path: str, spec: dict, fps: float,
             stream.options = {"profile": str(number)}
             alpha = number == 4 and images.shape[-1] == 4
         else:
-            stream.pix_fmt = "yuv420p"
+            alpha = spec["vcodec"] == "libvpx-vp9" and images.shape[-1] == 4
+            stream.pix_fmt = "yuva420p" if alpha else "yuv420p"
             stream.options = {"crf": str(int(crf))}
             if preset and spec["vcodec"] == "libx264":
                 stream.options["preset"] = preset
@@ -432,10 +437,13 @@ def encode_video(images: torch.Tensor, path: str, spec: dict, fps: float,
         prepared = _add_audio_stream(
             container, audio, spec["acodec"], len(images) / max(fps, 1e-6))
 
-        fmt = "rgba" if alpha else "rgb24"
+        channels = 4 if alpha else 3
+        if spec["vcodec"] == "prores_ks":
+            fmt, convert = ("rgba64le" if alpha else "rgb48le"), _to_u16
+        else:
+            fmt, convert = ("rgba" if alpha else "rgb24"), _to_u8
         for frame in images:
-            packet = stream.encode(av.VideoFrame.from_ndarray(
-                _to_u8(frame, 4 if alpha else 3), format=fmt))
+            packet = stream.encode(av.VideoFrame.from_ndarray(convert(frame, channels), format=fmt))
             container.mux(packet)
             if pbar:
                 pbar.update(1)
@@ -1218,15 +1226,43 @@ class NKDVideoViewer(io.ComfyNode):
                              metadata, comfy.utils.ProgressBar(len(images)))
             remember_render(lkey, src_images, src_audio, lsettings, "mp4", labeled_path)
 
-        # A fallback still, for anything the browser cannot open.
+        # Preview artefacts (the transparent twin, the poster) are for the node's player,
+        # not part of the render, so they go to temp/ - which ComfyUI empties - under the
+        # same subfolder, and output/ holds only what was asked for. `subfolder` already
+        # passed get_save_image_path's containment check.
+        preview_dir = os.path.join(folder_paths.get_temp_directory(), subfolder)
+
+        # Transparency the viewer can show. h264 has no alpha and no browser plays ProRes
+        # or a PNG sequence, so an RGBA clip in any of those also gets a vp9 `.alpha.webm`,
+        # which plays over a checkerboard. A vp9 render already is one.
+        alpha_ref = None
+        if images.shape[-1] == 4 and spec["ext"] in ("mp4", "mov", "png", "webm"):
+            alpha_ref = {"filename": file, "subfolder": subfolder,
+                         "type": "output" if save_output else "temp"}
+            if spec["ext"] != "webm":
+                alpha_ref = {"filename": f"{stem}.alpha.webm", "subfolder": subfolder,
+                             "type": "temp"}
+                alpha_path = os.path.join(preview_dir, alpha_ref["filename"])
+                os.makedirs(preview_dir, exist_ok=True)
+                akey = f"{node_key}:alpha"
+                reuse_a = reusable_render(akey, src_images, src_audio, settings, "webm")
+                if reuse_a and os.path.abspath(reuse_a) != os.path.abspath(alpha_path):
+                    shutil.copy2(reuse_a, alpha_path)
+                elif not reuse_a:
+                    encode_video(images, alpha_path, FORMATS["webm / vp9"], fps, 30.0, None,
+                                 audio, None, comfy.utils.ProgressBar(len(images)))
+                remember_render(akey, src_images, src_audio, settings, "webm", alpha_path)
+
+        # A fallback still, for anything the browser cannot open. Not needed when the
+        # transparent twin plays instead.
+        # ponytail: a browser without vp9 then gets no still; every current one has vp9.
         preview = spec["preview"]
-        poster_file = None
-        if spec["poster"]:
-            poster_file = f"{stem}.poster.png"
-            write_poster(images, os.path.join(
-                seq_dir if seq_dir else full_folder, poster_file))
-            if seq_dir:
-                poster_file = f"{stem}/{poster_file}"
+        poster_ref = None
+        if spec["poster"] and alpha_ref is None:
+            poster_ref = {"filename": f"{stem}.poster.png", "subfolder": subfolder,
+                          "type": "temp"}
+            os.makedirs(preview_dir, exist_ok=True)
+            write_poster(images, os.path.join(preview_dir, poster_ref["filename"]))
 
         result = {
             "filename": file,
@@ -1242,7 +1278,7 @@ class NKDVideoViewer(io.ComfyNode):
             # The viewer asks canPlayType about this and falls back to the poster if the
             # answer is no. Only the browser can settle it — see FORMATS.
             "mime": spec["mime"],
-            "poster": poster_file,
+            "poster": poster_ref,
             "format": key,
             "size": _tree_size(path),
             "path": path,
@@ -1255,7 +1291,11 @@ class NKDVideoViewer(io.ComfyNode):
             "labeled": ({"filename": labeled_file, "subfolder": l_sub,
                          "type": "output"}
                         if labeled_file else None),
+            # The same clip as transparent vp9, when the frames carry alpha.
+            "alpha": alpha_ref,
         }
+        # VIDEO keeps colour and alpha apart (the core encoders choke on 4 channels).
         out = InputImpl.VideoFromComponents(
-            Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps)))
+            Types.VideoComponents(images=images[..., :3], audio=audio, frame_rate=Fraction(fps),
+                                  alpha=images[..., 3:] if images.shape[-1] == 4 else None))
         return io.NodeOutput(out, path, ui=NKDVideoUI(result, info))

@@ -97,6 +97,10 @@ const CSS = `
   background: #000; border: 1px solid #3a3d46; border-radius: 6px;
   overflow: hidden;
 }
+/* Transparent clips: a checkerboard shows where the alpha is. */
+.nkd-vid-stage.nkd-vid-alpha {
+  background: repeating-conic-gradient(#2a2c33 0 25%, #1c1e24 0 50%) 0 0 / 16px 16px;
+}
 .nkd-vid-el {
   position: absolute; inset: 0;
   width: 100%; height: 100%; object-fit: contain; display: block;
