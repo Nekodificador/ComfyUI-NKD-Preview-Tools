@@ -187,7 +187,7 @@ export class VideoViewer {
 
     this.scrub = el("canvas", "nkd-vid-scrub", this.root);
 
-    const bar = el("div", "nkd-tl-bar", this.root);
+    const bar = el("div", "nkd-tl-bar nkd-vid-bar", this.root);
     this.playBtn = button(bar, "pi pi-play", "Play / pause (Space)", () => this.toggle());
     button(bar, "pi pi-step-backward", "Previous frame (←)", () => this.step(-1));
     button(bar, "pi pi-step-forward", "Next frame (→)", () => this.step(1));

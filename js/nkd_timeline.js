@@ -3906,6 +3906,11 @@ const CSS = `
 .nkd-vid-stage.nkd-vid-alpha {
   background: repeating-conic-gradient(#2a2c33 0 25%, #1c1e24 0 50%) 0 0 / 16px 16px;
 }
+/* Viewer bar: the controls on one line with "show in folder" closing it, the clip's
+   readout on a line of its own underneath. The folder button is added late (once the
+   server is known to be local), so it is placed by CSS rather than by DOM order. */
+.nkd-vid-bar .nkd-tl-status { order: 1; flex-basis: 100%; margin-left: 0; padding: 0 2px; }
+.nkd-vid-bar > .nkd-tl-btn:has(> .pi-folder-open) { margin-left: auto; }
 .nkd-vid-el {
   position: absolute; inset: 0;
   width: 100%; height: 100%; object-fit: contain; display: block;
@@ -4980,7 +4985,7 @@ class VideoViewer {
     this.compare = (state == null ? void 0 : state.compare) ?? "off";
     if (typeof (state == null ? void 0 : state.wipe) === "number") this.wipe = state.wipe;
     this.scrub = el("canvas", "nkd-vid-scrub", this.root);
-    const bar = el("div", "nkd-tl-bar", this.root);
+    const bar = el("div", "nkd-tl-bar nkd-vid-bar", this.root);
     this.playBtn = button(bar, "pi pi-play", "Play / pause (Space)", () => this.toggle());
     button(bar, "pi pi-step-backward", "Previous frame (←)", () => this.step(-1));
     button(bar, "pi pi-step-forward", "Next frame (→)", () => this.step(1));
