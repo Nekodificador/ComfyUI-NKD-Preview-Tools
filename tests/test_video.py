@@ -147,6 +147,54 @@ def test_prores_profiles_pick_the_right_pixel_format():
     print("  ok  test_prores_profiles_pick_the_right_pixel_format")
 
 
+def test_trim_cuts_only_the_saved_file():
+    """A trim writes just those frames (and that stretch of audio); the VIDEO output and
+    the player keep the whole clip, so the brackets can be dragged back out."""
+    import json as J
+
+    import folder_paths
+    import nkd_video
+    from nkd_video import parse_trim, trim_audio
+
+    assert parse_trim("", 10) is None
+    assert parse_trim(J.dumps({"in": 0, "out": 9}), 10) is None      # the whole clip
+    assert parse_trim(J.dumps({"in": 7, "out": 2}), 10) == (2, 7)    # dragged past
+    assert parse_trim(J.dumps({"in": -3, "out": 99}), 10) is None
+    wave = {"waveform": torch.arange(48000.0).view(1, 1, -1), "sample_rate": 48000}
+    cut = trim_audio(wave, 12, 23, 24.0)["waveform"]          # the second half-second
+    assert cut.shape[-1] == 24000 and cut[0, 0, 0] == 24000
+
+    class FakeHidden:
+        unique_id = "12"
+        extra_pnginfo = None
+        prompt = None
+
+    node = nkd_video.NKDVideoViewer
+    with tempfile.TemporaryDirectory() as out, tempfile.TemporaryDirectory() as tmp:
+        orig, orig_tmp = folder_paths.get_output_directory, folder_paths.get_temp_directory
+        folder_paths.get_output_directory = lambda: out
+        folder_paths.get_temp_directory = lambda: tmp
+        node.hidden = FakeHidden()
+        try:
+            r = node.execute(images=ramp(6), fps=24.0,
+                             format={"format": "mp4 / h264", "crf": 30.0},
+                             filename_prefix="t/clip", save_output=True,
+                             versioning="off", numbering="none",
+                             trim=J.dumps({"in": 1, "out": 3}))
+            meta = r.ui.as_dict()["nkd_meta"][0]
+            assert probe(r.result[1])["frames"] == 3
+            assert meta["frame_count"] == 6 and meta["saved_frames"] == 3
+            player = os.path.join(tmp, "t", meta["player"]["filename"])
+            assert meta["player"]["type"] == "temp" and probe(player)["frames"] == 6
+            assert r.result[0].get_components().images.shape[0] == 6
+            assert sorted(os.listdir(os.path.join(out, "t"))) == ["clip.mp4"]
+        finally:
+            node.hidden = None
+            folder_paths.get_output_directory, folder_paths.get_temp_directory = orig, orig_tmp
+            nkd_video._ENCODED.clear()
+    print("  ok  test_trim_cuts_only_the_saved_file")
+
+
 def test_prores_keeps_more_than_8_bits():
     """ProRes gets 16-bit input, so a ramp finer than 8-bit steps survives in the file."""
     ramp16 = torch.linspace(0.40, 0.41, 64).view(1, 1, 64, 1).expand(2, 32, 64, 3).contiguous()
@@ -301,9 +349,10 @@ def test_execute_gives_rgba_clips_a_transparent_preview():
             for fmt, name in (({"format": "mp4 / h264", "crf": 30.0}, "h"),
                               ({"format": "mov / prores", "profile": "hq"}, "p")):
                 r, meta = go(rgba, fmt, name)
-                item = meta["alpha"]
-                assert item == {"filename": f"{name}.alpha.webm", "subfolder": "a",
+                item = meta["player"]
+                assert item == {"filename": f"{name}.preview.webm", "subfolder": "a",
                                 "type": "temp"}, item
+                assert meta["transparent"] is True
                 frame = read_rgba(os.path.join(tmp, "a", item["filename"]))
                 assert frame[0, 0, 3] < 16 and frame[0, 40, 3] > 240
                 # The twin plays instead, so no poster - not even for ProRes.
@@ -312,10 +361,10 @@ def test_execute_gives_rgba_clips_a_transparent_preview():
                 assert video.images.shape[-1] == 3 and video.alpha.shape[-1] == 1
 
             _, meta = go(rgba, {"format": "webm / vp9", "crf": 30.0}, "v")
-            assert meta["alpha"]["filename"] == "v.webm", meta["alpha"]
+            assert meta["player"]["filename"] == "v.webm", meta["player"]
 
             _, meta = go(ramp(4), {"format": "mp4 / h264", "crf": 30.0}, "rgb")
-            assert meta["alpha"] is None
+            assert meta["player"] is None
             # output/ holds the renders and nothing else.
             assert sorted(os.listdir(os.path.join(out, "a"))) ==                 ["h.mp4", "p.mov", "rgb.mp4", "v.webm"], os.listdir(os.path.join(out, "a"))
         finally:

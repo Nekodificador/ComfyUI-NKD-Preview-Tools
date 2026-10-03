@@ -132,6 +132,20 @@ export function registerVideoViewer(): void {
         // A viewer dropped into a graph that already has marks must pick them up.
         requestAnimationFrame(syncLabelWidgets);
         const viewer = new VideoViewer(node.properties?.[STATE_PROP]);
+        // The saved stretch: set on the scrub bar, kept in a hidden widget because it
+        // changes what gets written (an input), unlike the rest of the viewer state.
+        const trimW = findW(node, "trim");
+        hideWidget(trimW);
+        if (trimW) {
+          viewer.onTrim = (v) => { trimW.value = v; node.setDirtyCanvas(true, true); };
+          requestAnimationFrame(() => viewer.setTrim(trimW.value));
+          const origConfigure = node.onConfigure;
+          node.onConfigure = function (this: any) {
+            const r = origConfigure?.apply(this, arguments as any);
+            viewer.setTrim(trimW.value);
+            return r;
+          };
+        }
         viewer.onState = (s) => {
           node.properties = node.properties || {};
           node.properties[STATE_PROP] = s;
