@@ -106,6 +106,7 @@ export class VideoViewer {
   private readonly still: HTMLImageElement;   // GIF has no seekable stream; show it as-is
   private readonly scrub: HTMLCanvasElement;
   private readonly status: HTMLElement;
+  private readonly bar: HTMLElement;
   private readonly playBtn: HTMLButtonElement;
   private readonly loopBtn: HTMLButtonElement;
   private readonly muteBtn: HTMLButtonElement;
@@ -187,7 +188,7 @@ export class VideoViewer {
 
     this.scrub = el("canvas", "nkd-vid-scrub", this.root);
 
-    const bar = el("div", "nkd-tl-bar nkd-vid-bar", this.root);
+    const bar = this.bar = el("div", "nkd-tl-bar nkd-vid-bar", this.root);
     this.playBtn = button(bar, "pi pi-play", "Play / pause (Space)", () => this.toggle());
     button(bar, "pi pi-step-backward", "Previous frame (←)", () => this.step(-1));
     button(bar, "pi pi-step-forward", "Next frame (→)", () => this.step(1));
@@ -537,6 +538,27 @@ export class VideoViewer {
    *  which is already the trimmed file. */
   private get trimmable(): boolean {
     return this.playable && !!this.info && this.shown !== this.info.labeled;
+  }
+
+  /**
+   * The width the controls need to sit on ONE line: their own widths plus the gaps, the
+   * separators and the bar's padding. Summed from the children rather than read off the bar,
+   * whose width is just whatever the node gives it. The readout lives on its own line, so it
+   * doesn't count, and neither does the folder button's auto margin.
+   */
+  barMinWidth(): number {
+    const kids = (Array.from(this.bar.children) as HTMLElement[])
+      .filter((k) => k !== this.status && k.offsetWidth > 0);
+    const css = getComputedStyle(this.bar);
+    const px = (v: string) => parseFloat(v) || 0;
+    let sum = px(css.paddingLeft) + px(css.paddingRight)
+      + px(css.borderLeftWidth) + px(css.borderRightWidth)
+      + px(css.columnGap) * Math.max(0, kids.length - 1);
+    for (const k of kids) {
+      sum += k.offsetWidth;
+      if (!k.querySelector(".pi-folder-open")) sum += px(getComputedStyle(k).marginLeft);
+    }
+    return Math.ceil(sum);
   }
 
   private get lastFrame(): number { return Math.max(0, (this.info?.frame_count ?? 1) - 1); }

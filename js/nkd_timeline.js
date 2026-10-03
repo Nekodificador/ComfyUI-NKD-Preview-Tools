@@ -4911,6 +4911,7 @@ class VideoViewer {
     // GIF has no seekable stream; show it as-is
     __publicField(this, "scrub");
     __publicField(this, "status");
+    __publicField(this, "bar");
     __publicField(this, "playBtn");
     __publicField(this, "loopBtn");
     __publicField(this, "muteBtn");
@@ -4985,7 +4986,7 @@ class VideoViewer {
     this.compare = (state == null ? void 0 : state.compare) ?? "off";
     if (typeof (state == null ? void 0 : state.wipe) === "number") this.wipe = state.wipe;
     this.scrub = el("canvas", "nkd-vid-scrub", this.root);
-    const bar = el("div", "nkd-tl-bar nkd-vid-bar", this.root);
+    const bar = this.bar = el("div", "nkd-tl-bar nkd-vid-bar", this.root);
     this.playBtn = button(bar, "pi pi-play", "Play / pause (Space)", () => this.toggle());
     button(bar, "pi pi-step-backward", "Previous frame (←)", () => this.step(-1));
     button(bar, "pi pi-step-forward", "Next frame (→)", () => this.step(1));
@@ -5307,6 +5308,23 @@ class VideoViewer {
    *  which is already the trimmed file. */
   get trimmable() {
     return this.playable && !!this.info && this.shown !== this.info.labeled;
+  }
+  /**
+   * The width the controls need to sit on ONE line: their own widths plus the gaps, the
+   * separators and the bar's padding. Summed from the children rather than read off the bar,
+   * whose width is just whatever the node gives it. The readout lives on its own line, so it
+   * doesn't count, and neither does the folder button's auto margin.
+   */
+  barMinWidth() {
+    const kids = Array.from(this.bar.children).filter((k) => k !== this.status && k.offsetWidth > 0);
+    const css = getComputedStyle(this.bar);
+    const px = (v) => parseFloat(v) || 0;
+    let sum = px(css.paddingLeft) + px(css.paddingRight) + px(css.borderLeftWidth) + px(css.borderRightWidth) + px(css.columnGap) * Math.max(0, kids.length - 1);
+    for (const k of kids) {
+      sum += k.offsetWidth;
+      if (!k.querySelector(".pi-folder-open")) sum += px(getComputedStyle(k).marginLeft);
+    }
+    return Math.ceil(sum);
   }
   get lastFrame() {
     var _a;
@@ -5832,6 +5850,8 @@ function registerVideoViewer() {
           type: "NKD_VIDEO",
           root: viewer.root,
           minWidth: MIN_W$1,
+          // Never narrower than the controls on one line.
+          minWidthOf: () => viewer.barMinWidth(),
           estimate: () => {
             var _a2;
             return viewer.estimateHeight(Math.max(((_a2 = node.size) == null ? void 0 : _a2[0]) ?? MIN_W$1, MIN_W$1));

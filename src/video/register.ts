@@ -156,6 +156,8 @@ export function registerVideoViewer(): void {
           type: "NKD_VIDEO",
           root: viewer.root,
           minWidth: MIN_W,
+          // Never narrower than the controls on one line.
+          minWidthOf: () => viewer.barMinWidth(),
           estimate: () => viewer.estimateHeight(Math.max(node.size?.[0] ?? MIN_W, MIN_W)),
           onResize: () => viewer.draw(),
         });
