@@ -6,7 +6,7 @@ import { api } from "../../scripts/api.js";
 // registerExtension calls still run exactly once.
 import {
     config as nkdConfig, ensureStyles, loadConfig, mountDomWidget, projectChip,
-    revealButton, saveToProject, reveal, revealAvailable,
+    saveToProject,
 } from "./nkd_timeline.js";
 
 const NODE_TYPE = "NKDPopupPreviewNode";
@@ -400,7 +400,7 @@ const ICON = {
 
 function createViewerDOM(opts = {}) {
     const { refUrl = null, refLabel = null, maskUrl = null, apiBase = null, onQueue = null, onSendToLoad = null,
-            onSave = null, onReveal = null } = opts;
+            onSave = null } = opts;
     let fitWindowOnLoad = !!opts.fitWindowOnLoad;   // one-shot Fit Window on the first image
     // imgMeta is mutable — caller can update via root._nkdSetMeta(meta)
     let imgMeta = opts.imgMeta || null;
@@ -483,7 +483,7 @@ function createViewerDOM(opts = {}) {
                     <button class="nkd-pv-btn-run nkd-pv-vbtn" title="Queue this node (Shift+Q)" style="display:${onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-pv-lbl">Run</span></button>
                     <button class="nkd-pv-btn-copy nkd-pv-vbtn" title="Copy image to clipboard (C)">${ICON.copy}<span class="nkd-pv-lbl">Copy</span></button>
                     <button class="nkd-pv-btn-save nkd-pv-vbtn" title="Save into the active project's folder (S)">${ICON.folder}<span class="nkd-pv-lbl">Save</span></button>
-                    <span class="nkd-pv-more"><button class="nkd-pv-btn-more nkd-pv-vbtn" title="More">${ICON.more}</button><div class="nkd-pv-more-menu"><button class="nkd-pv-btn-adj nkd-pv-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-pv-lbl">Fit Window</span></button><button class="nkd-pv-btn-dl nkd-pv-vbtn" title="Download a copy through the browser">${ICON.save}<span class="nkd-pv-lbl">Download</span></button><button class="nkd-pv-btn-load nkd-pv-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-pv-lbl">To Load</span></button><button class="nkd-pv-btn-reveal nkd-pv-vbtn" title="Show in the file manager" style="display:none">${ICON.folder}<span class="nkd-pv-lbl">Show in folder</span></button></div></span>
+                    <span class="nkd-pv-more"><button class="nkd-pv-btn-more nkd-pv-vbtn" title="More">${ICON.more}</button><div class="nkd-pv-more-menu"><button class="nkd-pv-btn-adj nkd-pv-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-pv-lbl">Fit Window</span></button><button class="nkd-pv-btn-dl nkd-pv-vbtn" title="Download a copy through the browser">${ICON.save}<span class="nkd-pv-lbl">Download</span></button><button class="nkd-pv-btn-load nkd-pv-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-pv-lbl">To Load</span></button></div></span>
                 </div>
             </div>
         </div>`;
@@ -810,11 +810,6 @@ function createViewerDOM(opts = {}) {
     root.querySelector(".nkd-pv-more-menu").addEventListener("click", () => more.classList.remove("open"));
     root.addEventListener("pointerdown", e => { if (!more.contains(e.target)) more.classList.remove("open"); });
     root.addEventListener("mouseleave", () => more.classList.remove("open"));
-    const btnReveal = root.querySelector(".nkd-pv-btn-reveal");
-    if (onReveal) {
-        void revealAvailable().then(ok => { if (ok) btnReveal.style.display = ""; });
-        btnReveal.addEventListener("click", () => onReveal());
-    }
 
     // Pan & zoom
     wrap.addEventListener("wheel", e => {
@@ -994,10 +989,6 @@ class PopupWin {
 
     /** Save into the active project. Bridged into the separate realms the same way the
      *  Run button is: those documents cannot reach `app`/`api` on their own. */
-    _revealOwn() {
-        const ref = this.savedRef || this.currentMeta;
-        if (ref) void reveal(ref);
-    }
 
     _saveOwn() {
         return saveImage(this, app.graph?.getNodeById(Number(this.nodeId)));
@@ -1285,7 +1276,6 @@ class PopupWin {
             onQueue: () => this._queueOwnNode(),
             onSendToLoad: () => this._sendOwnToLoad(),
             onSave: () => this._saveOwn(),
-            onReveal: () => this._revealOwn(),
             fitWindowOnLoad: this._fitOnOpen,
         });
         container.style.cssText = "width:100%;height:100%;";
@@ -1474,7 +1464,6 @@ class PopupWin {
             onQueue: () => this._queueOwnNode(),
             onSendToLoad: () => this._sendOwnToLoad(),
             onSave: () => this._saveOwn(),
-            onReveal: () => this._revealOwn(),
             fitWindowOnLoad: this._fitOnOpen,
         });
     }
@@ -1788,8 +1777,6 @@ function buildNodePanel(node) {
          () => copyImageToClipboard(popup.currentUrl || _refUrl(currentRef(node, popup))));
     _btn(bar, "pi-save", "Save into the active project's folder",
          () => void saveImage(popup, node));
-    // Reveals whatever exists: the filed copy once there is one, the temp preview before.
-    revealButton(bar, () => popup.savedRef || currentRef(node, popup));
     const star = _btn(bar, "pi-star", "Set as the primary preview",
                       () => { setPrimary(isPrimary(node.id) ? null : node.id);
                               node.graph?.setDirtyCanvas(true, true); });

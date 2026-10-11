@@ -107,6 +107,10 @@ def next_version(root: str, prefix: str, pad: int) -> int:
             fixed.append(part)
             continue
         folder = os.path.join(root, *fixed) if fixed else root
+        # The prefix comes from a request: never list a folder outside the root.
+        real_root, real = os.path.realpath(root), os.path.realpath(folder)
+        if real != real_root and not real.startswith(real_root + os.sep):
+            return 1
         try:
             entries = os.listdir(folder)
         except OSError:

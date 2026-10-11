@@ -4431,18 +4431,6 @@ async function askNumber(title, initial) {
   const n = parseInt(String(raw ?? ""), 10);
   return Number.isFinite(n) && n >= 1 ? n : null;
 }
-let availability = null;
-function revealAvailable() {
-  return availability ?? (availability = api.fetchApi("/nkd/open").then((r) => r.json()).then((j) => !!j.available).catch(() => false));
-}
-async function reveal(ref) {
-  const q = new URLSearchParams({
-    filename: ref.filename,
-    subfolder: ref.subfolder ?? "",
-    type: ref.type ?? "output"
-  });
-  await api.fetchApi(`/nkd/open?${q}`);
-}
 const LS_VERSIONING = "nkd_save_versioning";
 function saveVersioning() {
   return localStorage.getItem(LS_VERSIONING) === "off" ? "off" : "auto";
@@ -4702,19 +4690,6 @@ function registerProjectTopbar() {
     }
   });
   void loadConfig();
-}
-function revealButton(parent, getRef) {
-  void revealAvailable().then((ok) => {
-    if (!ok) return;
-    const btn = el$1("button", "nkd-tl-btn", parent);
-    btn.title = "Show in the file manager";
-    el$1("i", "pi pi-folder-open", btn);
-    btn.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      const ref = getRef();
-      if (ref) void reveal(ref);
-    });
-  });
 }
 const TRACKED_PROP = "nkdTracked";
 const VIEWER = "NKDVideoViewer";
@@ -5111,7 +5086,6 @@ class VideoViewer {
     this.link = el("a", "nkd-tl-btn", bar);
     this.link.title = "Save a copy";
     this.link.appendChild(el("i", "pi pi-download"));
-    revealButton(bar, () => this.ref);
     this.chip = projectChip(bar);
     this.labelsChip = trackedChip(bar);
     this.status = el("div", "nkd-tl-status", bar);
@@ -6591,8 +6565,5 @@ export {
   loadConfig,
   mountDomWidget,
   projectChip,
-  reveal,
-  revealAvailable,
-  revealButton,
   saveToProject
 };

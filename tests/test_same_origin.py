@@ -1,10 +1,10 @@
-"""😺NKD /nkd/open — same-origin gate.
+"""😺NKD same-origin gate for the routes that write project config.
 
-`_is_local` alone isn't authentication: any page open in the operator's browser can fire a
-plain GET at localhost. Guards that `_is_same_origin` actually requires the browser-set
+Any page open in the operator's browser can fire a plain request at localhost. Guards that
+`_is_same_origin` actually requires the browser-set
 `Sec-Fetch-Site: same-origin` header, and that a missing/forged header fails closed.
 
-Run: python tests/test_open_route.py   (with ComfyUI's interpreter)
+Run: python tests/test_same_origin.py   (with ComfyUI's interpreter)
 """
 import importlib
 import importlib.util
@@ -60,4 +60,4 @@ if __name__ == "__main__":
     test_same_origin_header_required()
     test_cross_site_header_rejected()
     test_missing_header_fails_closed()
-    print("test_open_route: all passed")
+    print("test_same_origin: all passed")

@@ -5,10 +5,6 @@
  * already knows how to expand, plus this: one chip that says which values they carry and
  * lets you change them. Global on purpose - "what am I working on right now" is a fact
  * about the machine, not about the workflow, so a saved graph carries no project.
- *
- * `reveal` is the other half: opening the folder a file landed in. It only exists when the
- * browser and the ComfyUI server are the same box (the backend decides, not us), so the
- * button is never drawn when it would do nothing.
  */
 import { app as comfyApp, api } from "./comfyRuntime";
 import { ensureStyles } from "./timeline/styles";
@@ -115,27 +111,6 @@ async function askNumber(title: string, initial: number): Promise<number | null>
 }
 
 // ── Revealing a file on the server's desktop ─────────────────────────────────
-// The backend answers `{available}` based on whether the request came from localhost, so
-// on a LAN client or a cloud instance this resolves false and no button is ever drawn.
-// Asked once; the answer cannot change without a page reload.
-let availability: Promise<boolean> | null = null;
-
-export function revealAvailable(): Promise<boolean> {
-  return (availability ??= api.fetchApi("/nkd/open")
-    .then((r: Response) => r.json())
-    .then((j: { available?: boolean }) => !!j.available)
-    .catch(() => false));
-}
-
-export async function reveal(ref: FileRef): Promise<void> {
-  const q = new URLSearchParams({
-    filename: ref.filename,
-    subfolder: ref.subfolder ?? "",
-    type: ref.type ?? "output",
-  });
-  await api.fetchApi(`/nkd/open?${q}`);
-}
-
 // How a saved still is versioned — a machine-local "how I save" preference, so it lives in
 // localStorage like the primary-node id, not in the shared project config. Default `auto`:
 // the whole point of the chip menu is that a save reads as a version, not an overwrite.
@@ -466,22 +441,3 @@ export function registerProjectTopbar(): void {
   void loadConfig();
 }
 
-/**
- * A "reveal in the file manager" button, created only when the server can actually do it.
- *
- * `getRef` is called at click time, not now: the node's current file changes with every
- * run, and capturing it at build time would forever open the first render's folder.
- */
-export function revealButton(parent: HTMLElement, getRef: () => FileRef | null): void {
-  void revealAvailable().then((ok) => {
-    if (!ok) return;
-    const btn = el("button", "nkd-tl-btn", parent);
-    btn.title = "Show in the file manager";
-    el("i", "pi pi-folder-open", btn);
-    btn.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      const ref = getRef();
-      if (ref) void reveal(ref);
-    });
-  });
-}

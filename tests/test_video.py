@@ -471,6 +471,11 @@ def test_next_version_takes_the_highest_not_the_first_gap():
         assert next_version(root, "flat/take_v%v###%", 3) == 6
         # Nothing there yet - including a folder that does not exist - starts at 1.
         assert next_version(root, "brand/new_v%v###%", 3) == 1
+        # A prefix that climbs out of the root is never scanned (its v007 must not count).
+        out = os.path.join(root, "out_root")
+        os.makedirs(out)
+        open(os.path.join(root, "take_v007.mp4"), "w").close()
+        assert next_version(out, "../take_v%v###%", 3) == 1
     print("  ok  test_next_version_takes_the_highest_not_the_first_gap")
 
 

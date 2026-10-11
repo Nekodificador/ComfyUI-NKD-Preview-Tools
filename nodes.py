@@ -1,7 +1,5 @@
 import os
 import shutil
-import subprocess
-import sys
 
 import folder_paths
 import numpy as np
@@ -194,61 +192,16 @@ def _resolve_view(body: dict) -> tuple[str, str, str, str]:
     return path, filename, subfolder, kind
 
 
-def _is_local(request: web.Request) -> bool:
-    """Is the caller on the same machine as the server?
-
-    Revealing a folder acts on the SERVER's desktop, so it only makes sense - and is only
-    safe - when the browser and the server are the same box. From a LAN client or a cloud
-    instance the button would either do nothing visible or pop a window on someone else's
-    screen, so the route says "not available" and the frontend never draws it.
-    """
-    return (request.remote or "") in ("127.0.0.1", "::1", "localhost")
-
-
 def _is_same_origin(request: web.Request) -> bool:
     """Did this request come from ComfyUI's own page, not a third-party CSRF page?
 
-    `_is_local` alone isn't authentication (flagged by the registry's scanner, policy-v0.2
-    Rule 10 ARBITRARY_FILE_LAUNCH): any page open in the operator's browser can fire a plain
-    GET at localhost and land here too. `Sec-Fetch-Site` is a fetch metadata header the
-    browser itself attaches and JS cannot override, so it's a real cross-origin signal.
+    Any page open in the operator's browser can fire a plain request at localhost.
+    `Sec-Fetch-Site` is a fetch metadata header the browser itself attaches and JS cannot
+    override, so it's a real cross-origin signal.
     Sent by every browser this pack already requires for its DOM widgets; missing it fails
     closed rather than guessing.
     """
     return request.headers.get("Sec-Fetch-Site") == "same-origin"
-
-
-@routes.get("/nkd/open")
-async def _nkd_open(request: web.Request) -> web.Response:
-    """No args: whether revealing is possible at all. With a /view item: reveal it."""
-    local = _is_local(request)
-    if not request.query.get("filename"):
-        return web.json_response({"available": local})
-    if not local or not _is_same_origin(request):
-        return web.Response(status=403, text="Only available on the ComfyUI machine")
-    try:
-        path, _, _, _ = _resolve_view(dict(request.query))
-    except ValueError as exc:
-        return web.Response(status=400, text=str(exc))
-    except PermissionError as exc:
-        return web.Response(status=403, text=str(exc))
-
-    folder = path if os.path.isdir(path) else os.path.dirname(path)
-    try:
-        if sys.platform == "win32":
-            # /select, highlights the file itself. The path has to be quoted-by-argument,
-            # not shell-escaped: os.startfile cannot select, so explorer it is.
-            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", "-R", path])
-        else:
-            # ponytail: xdg-open takes a directory, so Linux opens the folder without
-            # highlighting the file. dbus FileManager1.ShowItems would select it; not worth
-            # a dbus dependency until someone asks.
-            subprocess.Popen(["xdg-open", folder])
-    except Exception as exc:
-        return web.Response(status=500, text=f"Could not open the folder: {exc}")
-    return web.json_response({"ok": True, "folder": folder})
 
 
 @routes.get("/nkd/project/config")

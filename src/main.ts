@@ -890,7 +890,7 @@ registerProjectTopbar();
  * tree-shakes the code away and the popup's import resolves to undefined.
  */
 export {
-  projectChip, revealButton, saveToProject, reveal, revealAvailable, loadConfig, config,
+  projectChip, saveToProject, loadConfig, config,
 } from "./projects";
 export { ensureStyles } from "./timeline/styles";
 export { mountDomWidget } from "./domHost";

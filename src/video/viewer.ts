@@ -14,7 +14,7 @@
 import { api } from "../comfyRuntime";
 import { type MediaRef, ensureThumbnails, thumbnailAt, viewUrl } from "../timeline/media";
 import { type Popout, openPopout } from "./popout";
-import { projectChip, revealButton } from "../projects";
+import { projectChip } from "../projects";
 import { trackedChip } from "../labels";
 
 export type CompareMode = "off" | "wipe" | "difference";
@@ -224,8 +224,6 @@ export class VideoViewer {
     this.link = el("a", "nkd-tl-btn", bar);
     this.link.title = "Save a copy";
     this.link.appendChild(el("i", "pi pi-download"));
-    // Only drawn when the server is this machine - see `revealAvailable`.
-    revealButton(bar, () => this.ref);
     this.chip = projectChip(bar);
     // Every mark in the graph, listed here so untracking never means hunting the node.
     this.labelsChip = trackedChip(bar);
