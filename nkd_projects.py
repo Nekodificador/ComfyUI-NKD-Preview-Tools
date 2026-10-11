@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 
 import folder_paths
 
@@ -93,7 +94,27 @@ def _normalise(raw: dict) -> dict:
         "category": category if category in cfg["categories"] else cfg["categories"][0],
     }
     cfg["image_prefix"] = str(cfg.get("image_prefix") or DEFAULT_CONFIG["image_prefix"])
+
+    # `{project: {"last": N, "pin": N|None}}` - see "Shared version" below. Kept for
+    # projects that no longer exist too: deleting and re-adding a project must not restart
+    # its numbering at v001 over files that are still on disk.
+    versions = {}
+    raw_versions = cfg.get("versions") if isinstance(cfg.get("versions"), dict) else {}
+    for name, entry in raw_versions.items():
+        entry = entry if isinstance(entry, dict) else {}
+        pin = _as_version(entry.get("pin"))
+        versions[str(name)] = {"last": _as_version(entry.get("last")) or 0,
+                               "pin": pin}
+    cfg["versions"] = versions
     return cfg
+
+
+def _as_version(value) -> int | None:
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v >= 1 else None
 
 
 def load() -> dict:
@@ -173,3 +194,120 @@ def signature() -> str:
 
 def uses_tokens(prefix: str) -> bool:
     return "%project%" in prefix or "%category%" in prefix
+
+
+# ── Shared version ────────────────────────────────────────────────────────────
+# The version belongs to the RUN, not to each saver: every saver with
+# `versioning = project` in one prompt gets the same number, whatever its folder or name.
+# That is how Nuke (the script's version), Unreal MRQ (the job) and AYON/ftrack (the
+# publish) all do it. Per-saver folder scans cannot: each saver looks at a different
+# folder with a different pattern, so the result depended on execution order.
+#
+# A COUNTER, not a scan: `last` only ever goes up, so deleting files never hands a number
+# out twice. `pin` re-renders a fixed version (overwrites, like re-rendering v003 in Nuke)
+# without touching `last`, so unpinning carries on where the numbering really was.
+
+_LOCAL_RUNS: dict = {}          # tests / no server
+_lock = threading.Lock()
+
+
+def _runs() -> dict:
+    """`{"prompt": id, "map": {key: [version, persisted]}}`, on PromptServer.instance.
+
+    Instance-anchored for the hot-reload reason in nodes.py: two module copies must agree
+    on what this run already claimed, or the second copy would claim it again.
+    """
+    try:
+        from server import PromptServer
+        srv = PromptServer.instance
+    except Exception:
+        srv = None
+    if srv is None:
+        return _LOCAL_RUNS
+    d = getattr(srv, "_nkd_run_versions", None)
+    if d is None:
+        d = {}
+        srv._nkd_run_versions = d
+    return d
+
+
+def _current_prompt() -> str:
+    try:
+        from server import PromptServer
+        return str(getattr(PromptServer.instance, "last_prompt_id", None) or "-")
+    except Exception:
+        return "-"
+
+
+def version_state(project: str | None = None) -> dict:
+    cfg = load()
+    name = project or cfg["active"]["project"]
+    return dict(cfg["versions"].get(name) or {"last": 0, "pin": None})
+
+
+def version_signature() -> str:
+    """What a `project`-versioned saver adds to its cache signature.
+
+    Changes after every run that consumed a version, so EVERY project saver re-runs on the
+    next queue - copying, not re-encoding, when its frames did not change. That is what
+    keeps a version complete: otherwise only the savers whose upstream changed would run,
+    and v014 would have a mask but no render.
+    """
+    s = version_state()
+    return f"{signature()}#v{s['last']}p{s['pin'] or 0}"
+
+
+def claim_version(pass_index: int, floor: int = 1, persist: bool = True) -> int:
+    """The version for this run (and list pass), the same for every saver that asks.
+
+    - `floor`: the asker's own next-free version on disk. Only the FIRST claim of a run
+      honours it - a guard for a project copied to another machine with no counter yet.
+      ponytail: later savers do not re-check their folders; raising the shared number
+      after another saver already wrote would split the version again.
+    - `persist`: whether the asker writes to output/. A temp-only run peeks at the number
+      it would get but does not spend it, so test previews do not eat versions.
+    """
+    runs = _runs()
+    prompt = _current_prompt()
+    if runs.get("prompt") != prompt:
+        runs.clear()
+        runs["prompt"] = prompt
+        runs["map"] = {}
+    key = str(pass_index)
+    with _lock:
+        claimed = runs["map"].get(key)
+        if claimed is None:
+            s = version_state()
+            v = s["pin"] or max(s["last"] + 1, floor)
+            claimed = [v, False]
+            runs["map"][key] = claimed
+        if persist and not claimed[1]:
+            cfg = dict(load())
+            name = cfg["active"]["project"]
+            versions = dict(cfg["versions"])
+            entry = dict(versions.get(name) or {"last": 0, "pin": None})
+            entry["last"] = max(entry["last"], claimed[0])
+            versions[name] = entry
+            cfg["versions"] = versions
+            save(cfg)
+            claimed[1] = True
+    return claimed[0]
+
+
+def set_version(project: str | None, action: str, value=None) -> dict:
+    """The chip's version actions: `pin` (to `value`, or the latest), `unpin`, `next`
+    (make `value` the next version - only ever forward, numbers already used stay used)."""
+    cfg = dict(load())
+    name = project if project in [p["name"] for p in cfg["projects"]] else cfg["active"]["project"]
+    versions = dict(cfg["versions"])
+    entry = dict(versions.get(name) or {"last": 0, "pin": None})
+    v = _as_version(value)
+    if action == "pin":
+        entry["pin"] = v or max(entry["last"], 1)
+    elif action == "unpin":
+        entry["pin"] = None
+    elif action == "next" and v:
+        entry["last"] = max(entry["last"], v - 1)
+    versions[name] = entry
+    cfg["versions"] = versions
+    return save(cfg)

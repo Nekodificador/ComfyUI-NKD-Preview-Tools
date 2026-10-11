@@ -19,6 +19,12 @@ export interface ProjectConfig {
   categories: string[];
   projects: ProjectEntry[];
   image_prefix: string;
+  /** The shared per-run version (`versioning = project`), per project. */
+  versions?: Record<string, { last: number; pin: number | null }>;
+}
+
+function versionOf(cfg: ProjectConfig, project = cfg.active.project) {
+  return cfg.versions?.[project] ?? { last: 0, pin: null };
 }
 
 /** A /view item - the same shape the core's `/view` endpoint takes. */
@@ -82,10 +88,30 @@ export const setActive = (project?: string, category?: string): Promise<ProjectC
 export const saveConfig = (cfg: ProjectConfig): Promise<ProjectConfig> =>
   post("/nkd/project/save", cfg);
 
-/** `Contanimation · test`, or a placeholder until the first fetch lands. */
+export const setVersion = (action: "pin" | "unpin" | "next", value?: number,
+                           project?: string): Promise<ProjectConfig> =>
+  post("/nkd/project/version", { action, value, project });
+
+/** `Contanimation · test · v013`, or a placeholder until the first fetch lands. The
+ *  version shows only once one was spent: until then it would be a number nobody chose. */
 export function activeLabel(): string {
   if (!cache) return "…";
-  return `${cache.active.project} · ${cache.active.category}`;
+  const v = versionOf(cache);
+  const ver = v.pin ? ` · v${pad(v.pin)} pinned` : v.last ? ` · v${pad(v.last)}` : "";
+  return `${cache.active.project} · ${cache.active.category}${ver}`;
+}
+
+const pad = (n: number) => String(n).padStart(3, "0");
+
+/** A number from the user, through ComfyUI's own dialog when there is one: the desktop
+ *  app is Electron, where `window.prompt` does not exist. */
+async function askNumber(title: string, initial: number): Promise<number | null> {
+  const dialog = (comfyApp as any).extensionManager?.dialog;
+  const raw = dialog?.prompt
+    ? await dialog.prompt({ title, message: title, defaultValue: String(initial) })
+    : window.prompt(title, String(initial));
+  const n = parseInt(String(raw ?? ""), 10);
+  return Number.isFinite(n) && n >= 1 ? n : null;
 }
 
 // ── Revealing a file on the server's desktop ─────────────────────────────────
@@ -219,6 +245,22 @@ function openPicker(x: number, y: number): void {
   items.push({ label: "auto (next version)", active: mode === "auto",
     on: () => setSaveVersioning("auto") });
 
+  // The shared version every `project (shared)` saver uses: one per run.
+  const v = versionOf(cfg);
+  items.push({ label: `Shared version — last v${pad(v.last)}, next v${pad(v.pin ?? v.last + 1)}`,
+    header: true });
+  if (v.pin) {
+    items.push({ label: `Unpin v${pad(v.pin)} (continue at v${pad(v.last + 1)})`,
+      on: () => void setVersion("unpin") });
+  } else if (v.last) {
+    items.push({ label: `Pin v${pad(v.last)} — re-render it, overwriting`,
+      on: () => void setVersion("pin") });
+  }
+  items.push({ label: "Set next version…", on: () => void askNumber(
+    "Next shared version (only forward)", v.last + 1).then((n) => {
+    if (n) void setVersion("next", n);
+  }) });
+
   items.push({ label: " ", header: true });
   items.push({ label: "⚙ Manage projects…", on: () => openManager() });
   openMenu(x, y, items);
@@ -315,6 +357,49 @@ function openManager(): void {
   back.addEventListener("pointerdown", (ev) => { if (ev.target === back) close(); });
 }
 
+interface Provenance { project: string; version: number; product?: string; file?: string }
+
+/**
+ * "This render is Contanimation · v005 · mask" when one is dragged back in.
+ *
+ * Nothing happens unless a button is pressed: re-running an imported graph just takes
+ * the project's next version, which never overwrites. Re-rendering THAT version is a
+ * pin, and a pin is a decision, not a side effect of opening a file.
+ */
+function showProvenance(info: Provenance): void {
+  const cfg = cache;
+  if (!cfg) return;
+  ensureStyles();
+  const known = cfg.projects.some((p) => p.name === info.project);
+  const back = el("div", "nkd-proj-modal", document.body);
+  const box = el("div", "nkd-proj-box", back);
+  el("div", "nkd-proj-title", box).textContent = "NKD render";
+  const what = [info.project, `v${pad(info.version)}`, info.product].filter(Boolean).join(" · ");
+  el("label", "nkd-proj-lab", box).textContent =
+    `This graph made ${what}${info.file ? ` (${info.file})` : ""}.`
+    + (info.project !== cfg.active.project ? ` Active project: ${cfg.active.project}.` : "")
+    + ` Running it as-is makes the next version, v${pad(versionOf(cfg, info.project).last + 1)}.`;
+
+  const row = el("div", "nkd-proj-row", box);
+  const close = () => back.remove();
+  const button = (label: string, on: () => Promise<unknown> | void, primary = false) => {
+    const b = el("button", primary ? "nkd-tl-btn on" : "nkd-tl-btn", row);
+    b.textContent = label;
+    b.addEventListener("click", () => void Promise.resolve(on()).then(close));
+  };
+  button("Close", () => {});
+  if (known && info.project !== cfg.active.project) {
+    button(`Switch to ${info.project}`, () => setActive(info.project, undefined));
+  }
+  if (known) {
+    button(`Re-render v${pad(info.version)} (pin)`, async () => {
+      if (info.project !== cfg.active.project) await setActive(info.project, undefined);
+      await setVersion("pin", info.version, info.project);
+    }, true);
+  }
+  back.addEventListener("pointerdown", (ev) => { if (ev.target === back) close(); });
+}
+
 /** Open the picker anchored to an element, or centred if there is nothing to anchor to. */
 function openPickerAt(anchor?: Element | null): void {
   const r = anchor?.getBoundingClientRect();
@@ -354,8 +439,20 @@ export function registerProjectTopbar(): void {
       function: () => openPickerAt(
         document.querySelector('[data-testid="action-bar-buttons"] button')),
     }],
+    // A render dragged back into ComfyUI restores its graph; its `nkd_render` block says
+    // which project and version it was, which the graph alone cannot (see nkd_video.py).
+    afterConfigureGraph() {
+      const extra = comfyApp.graph?.extra;
+      const info = extra?.nkd_render;
+      if (!info) return;
+      // Consumed, so saving this workflow and reopening it does not ask again.
+      delete extra.nkd_render;
+      if (info.mode === "project (shared)") void loadConfig().then(() => showProvenance(info));
+    },
   };
   comfyApp.registerExtension(ext);
+  // A run spends a version on the server; the chip has to hear about it.
+  api.addEventListener("execution_success", () => void loadConfig(true));
 
   onProjectChange(() => {
     ext.actionBarButtons = [button()];

@@ -59,6 +59,8 @@ except ImportError:  # pragma: no cover - flat import, tests only
 # the same reason, so the tests can import it flat.
 
 VERSION_RE = re.compile(r"%v(#+)%")
+# The combo label of the shared, per-run version (see `nkd_projects.claim_version`).
+PROJECT_VERSIONING = "project (shared)"
 
 
 def resolve_tokens(prefix: str, ctx: dict) -> str:
@@ -474,6 +476,37 @@ def encode_video(images: torch.Tensor, path: str, spec: dict, fps: float,
         container.close()
 
 
+def copy_with_metadata(src: str, dst: str, metadata: dict | None, ext: str) -> None:
+    """Copy a reused render, rewriting its embedded metadata on the way.
+
+    A plain copy carries the PREVIOUS run's prompt, workflow and `nkd_render` block, so a
+    v006 made by copying would claim to be v005 when dragged back into ComfyUI. A remux
+    (packets only, no re-encode) is the cheap way to restamp it.
+
+    mp4/mov only: a WebM's alpha lives in BlockAdditional, which a remux does not carry,
+    and gif/webp/png never had the metadata to begin with. Those keep a plain copy, as
+    does any file PyAV cannot remux (an old PyAV without `add_stream_from_template`).
+    """
+    if not metadata or ext not in ("mp4", "mov"):
+        shutil.copy2(src, dst)
+        return
+    opts = {"movflags": "use_metadata_tags+faststart"} if ext == "mp4" else {}
+    try:
+        with av.open(src) as inp, av.open(dst, mode="w", options=opts) as out:
+            for k, v in metadata.items():
+                out.metadata[k] = json.dumps(v)
+            pairs = {s.index: out.add_stream_from_template(s)
+                     for s in inp.streams if s.type in ("video", "audio")}
+            for packet in inp.demux(*[inp.streams[i] for i in pairs]):
+                if packet.dts is None:      # the demuxer's end-of-stream flush packets
+                    continue
+                packet.stream = pairs[packet.stream.index]
+                out.mux(packet)
+    except Exception as exc:
+        print(f"[NKD Video] metadata remux failed ({exc!r}); copying as-is")
+        shutil.copy2(src, dst)
+
+
 PALETTE_SAMPLES = 16
 
 
@@ -866,7 +899,9 @@ class NKDVideoViewer(io.ComfyNode):
                     ),
                 ),
                 io.Combo.Input(
-                    "versioning", options=["off", "auto (next free)", "manual"],
+                    # `project (shared)` LAST so saved combos keep their meaning.
+                    "versioning", options=["off", "auto (next free)", "manual",
+                                           PROJECT_VERSIONING],
                     default="auto (next free)",
                     tooltip=(
                         "Adds _v001 to the name — no need to type %v###% yourself; spell "
@@ -876,7 +911,10 @@ class NKDVideoViewer(io.ComfyNode):
                         "which would number the same thing twice. Note that a cached graph "
                         "does not re-run, so it makes no new version — the render would be "
                         "identical; use `manual` to force one (and it overwrites, like "
-                        "re-rendering a version in Nuke)."
+                        "re-rendering a version in Nuke). `project (shared)`: one version "
+                        "per RUN for every saver in the graph — a render and its mask land "
+                        "as v014 together. The number lives in the project chip, where it "
+                        "can also be pinned to re-render a version."
                     ),
                 ),
                 io.Int.Input("version", default=1, min=1, max=99999,
@@ -944,6 +982,14 @@ class NKDVideoViewer(io.ComfyNode):
                                 tooltip="Frames to save, set on the scrub bar. Only the "
                                         "saved file is trimmed: the video output and the "
                                         "player keep the whole clip."),
+                # What this file IS within the version (AYON's "product"): main, mask,
+                # alpha... Appended after the version (`NKD_v014_mask`) unless the name
+                # places %product% itself. Last: widgets_values is positional.
+                io.String.Input("product", default="", multiline=False,
+                                tooltip="Suffix naming what this file is - mask, alpha, "
+                                        "ref. Goes after the version (NKD_v014_mask); "
+                                        "use %product% to put it elsewhere. Empty: no "
+                                        "suffix."),
             ],
             outputs=[io.Video.Output("video"), io.String.Output("filepath")],
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo, io.Hidden.unique_id],
@@ -964,6 +1010,9 @@ class NKDVideoViewer(io.ComfyNode):
         what is wanted here. Returns None when the prefix uses neither token, so a graph
         that pins its own path never re-renders because of a chip nobody touched.
         """
+        if kwargs.get("versioning") == PROJECT_VERSIONING:
+            # Also covers the tokens: the version signature includes the selection.
+            return nkd_projects.version_signature()
         if not nkd_projects.uses_tokens(str(filename_prefix or "")):
             return None
         return nkd_projects.signature()
@@ -1006,7 +1055,8 @@ class NKDVideoViewer(io.ComfyNode):
 
     @classmethod
     def _resolve_prefix(cls, filename_prefix, folder, versioning, version,
-                        key, spec, fps, images, filename="") -> tuple[str, int | None]:
+                        key, spec, fps, images, filename="", product="",
+                        pass_index=0, persist=True) -> tuple[str, int | None]:
         """Render-time tokens, then the version. Returns (prefix, version used).
 
         `naming` is deliberately absent: the preset was already written into
@@ -1032,6 +1082,7 @@ class NKDVideoViewer(io.ComfyNode):
             "format": spec["ext"],
             "codec": key.split("/")[-1].strip(),
             "node": cls._node_title(),
+            "product": product,
             **nkd_projects.tokens(),
         })
         if versioning != "off" and not has_version(prefix):
@@ -1041,12 +1092,20 @@ class NKDVideoViewer(io.ComfyNode):
             # layout decision the user did not make. Spell out the token yourself when you
             # want it somewhere else, or padded differently.
             prefix = f"{prefix}_v%v{'#' * DEFAULT_VERSION_PAD}%"
+        # The product goes AFTER the version, where the token just landed: NKD_v014_mask.
+        if product and "%product%" not in joined:
+            prefix = f"{prefix}_{product}"
         if versioning == "off":
             # A template carrying %v###% with versioning off would otherwise write the token
             # into the filename verbatim, which is never what anyone meant.
             return apply_version(prefix, version), None
-        used = (version if versioning == "manual"
-                else next_version(folder, prefix, version_pad(prefix)))
+        if versioning == "manual":
+            used = version
+        elif versioning == PROJECT_VERSIONING:
+            used = nkd_projects.claim_version(
+                pass_index, next_version(folder, prefix, version_pad(prefix)), persist)
+        else:
+            used = next_version(folder, prefix, version_pad(prefix))
         return apply_version(prefix, used), used
 
     @classmethod
@@ -1093,8 +1152,9 @@ class NKDVideoViewer(io.ComfyNode):
     def execute(cls, images=None, video=None, audio=None, fps=24.0, format=None,
                 filename_prefix="video/NKD", save_output=True, pingpong=False,
                 versioning="off", version=1, numbering="counter", reference=None,
-                filename="", labels="", labeled_copy=True, trim=""):
+                filename="", labels="", labeled_copy=True, trim="", product=""):
         key = (format or {}).get("format", "mp4 / h264")
+        product = nkd_projects.sanitize_name(product) if str(product).strip() else ""
         spec = FORMATS[key]
 
         # `video` is the socket this node used to have. It is no longer in the schema, but a
@@ -1166,7 +1226,8 @@ class NKDVideoViewer(io.ComfyNode):
             version_root = folder_paths.get_output_directory()
         prefix, used_version = cls._resolve_prefix(
             filename_prefix, version_root, versioning, version, key, spec, fps, images,
-            filename)
+            filename, product, pass_index,
+            persist=version_root == folder_paths.get_output_directory())
 
         # Still through the core helper: it is the authority on containment (it refuses any
         # path escaping the output folder, folder_paths.py:552) and it creates the subfolder.
@@ -1196,6 +1257,20 @@ class NKDVideoViewer(io.ComfyNode):
             meta = dict(cls.hidden.extra_pnginfo or {}) if cls.hidden else {}
             if cls.hidden and cls.hidden.prompt is not None:
                 meta["prompt"] = cls.hidden.prompt
+            # Provenance, INSIDE the file: dragging it back into ComfyUI restores the graph,
+            # and this block says which project/version it was - the workflow alone cannot
+            # (`auto` and `project` are not numbers). A copy, never the shared dict: every
+            # output node of the run gets the same `extra_pnginfo`.
+            if used_version is not None and isinstance(meta.get("workflow"), dict):
+                wf = dict(meta["workflow"])
+                wf["extra"] = {**(wf.get("extra") or {}), "nkd_render": {
+                    "project": nkd_projects.load()["active"]["project"],
+                    "version": used_version,
+                    "mode": versioning,
+                    "product": product,
+                    "file": file,
+                }}
+                meta["workflow"] = wf
             metadata = meta or None
 
         # Same bytes as last time? Copy them. Bumping a version must not cost a re-encode.
@@ -1208,7 +1283,7 @@ class NKDVideoViewer(io.ComfyNode):
             if seq_dir:
                 shutil.copytree(reuse, path, dirs_exist_ok=True)
             else:
-                shutil.copy2(reuse, path)
+                copy_with_metadata(reuse, path, metadata, spec["ext"])
         elif not reuse:
             pbar = comfy.utils.ProgressBar(len(saved))
             if seq_dir:
@@ -1256,7 +1331,7 @@ class NKDVideoViewer(io.ComfyNode):
             lsettings = render_settings + ("\n".join(lines),)
             reuse_l = reusable_render(lkey, src_images, src_audio, lsettings, "mp4")
             if reuse_l and os.path.abspath(reuse_l) != os.path.abspath(labeled_path):
-                shutil.copy2(reuse_l, labeled_path)
+                copy_with_metadata(reuse_l, labeled_path, metadata, "mp4")
             elif not reuse_l:
                 encode_video(burn_labels(saved, lines), labeled_path,
                              FORMATS["mp4 / h264"], fps, 19.0, "veryfast", saved_audio,

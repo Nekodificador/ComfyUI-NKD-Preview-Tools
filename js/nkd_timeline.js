@@ -4367,6 +4367,10 @@ function registerFreezeFrames() {
     }
   });
 }
+function versionOf(cfg, project = cfg.active.project) {
+  var _a;
+  return ((_a = cfg.versions) == null ? void 0 : _a[project]) ?? { last: 0, pin: null };
+}
 const el$1 = (tag, cls, parent) => {
   const node = document.createElement(tag);
   if (cls) node.className = cls;
@@ -4412,9 +4416,20 @@ async function loadConfig(force = false) {
 }
 const setActive = (project, category) => post("/nkd/project/active", { project, category });
 const saveConfig = (cfg) => post("/nkd/project/save", cfg);
+const setVersion = (action, value, project) => post("/nkd/project/version", { action, value, project });
 function activeLabel() {
   if (!cache) return "…";
-  return `${cache.active.project} · ${cache.active.category}`;
+  const v = versionOf(cache);
+  const ver = v.pin ? ` · v${pad(v.pin)} pinned` : v.last ? ` · v${pad(v.last)}` : "";
+  return `${cache.active.project} · ${cache.active.category}${ver}`;
+}
+const pad = (n) => String(n).padStart(3, "0");
+async function askNumber(title, initial) {
+  var _a;
+  const dialog = (_a = app.extensionManager) == null ? void 0 : _a.dialog;
+  const raw = (dialog == null ? void 0 : dialog.prompt) ? await dialog.prompt({ title, message: title, defaultValue: String(initial) }) : window.prompt(title, String(initial));
+  const n = parseInt(String(raw ?? ""), 10);
+  return Number.isFinite(n) && n >= 1 ? n : null;
 }
 let availability = null;
 function revealAvailable() {
@@ -4511,6 +4526,28 @@ function openPicker(x, y) {
     active: mode === "auto",
     on: () => setSaveVersioning("auto")
   });
+  const v = versionOf(cfg);
+  items.push({
+    label: `Shared version — last v${pad(v.last)}, next v${pad(v.pin ?? v.last + 1)}`,
+    header: true
+  });
+  if (v.pin) {
+    items.push({
+      label: `Unpin v${pad(v.pin)} (continue at v${pad(v.last + 1)})`,
+      on: () => void setVersion("unpin")
+    });
+  } else if (v.last) {
+    items.push({
+      label: `Pin v${pad(v.last)} — re-render it, overwriting`,
+      on: () => void setVersion("pin")
+    });
+  }
+  items.push({ label: "Set next version…", on: () => void askNumber(
+    "Next shared version (only forward)",
+    v.last + 1
+  ).then((n) => {
+    if (n) void setVersion("next", n);
+  }) });
   items.push({ label: " ", header: true });
   items.push({ label: "⚙ Manage projects…", on: () => openManager() });
   openMenu(x, y, items);
@@ -4589,6 +4626,38 @@ function openManager() {
     if (ev.target === back) close();
   });
 }
+function showProvenance(info) {
+  const cfg = cache;
+  if (!cfg) return;
+  ensureStyles();
+  const known = cfg.projects.some((p) => p.name === info.project);
+  const back = el$1("div", "nkd-proj-modal", document.body);
+  const box = el$1("div", "nkd-proj-box", back);
+  el$1("div", "nkd-proj-title", box).textContent = "NKD render";
+  const what = [info.project, `v${pad(info.version)}`, info.product].filter(Boolean).join(" · ");
+  el$1("label", "nkd-proj-lab", box).textContent = `This graph made ${what}${info.file ? ` (${info.file})` : ""}.` + (info.project !== cfg.active.project ? ` Active project: ${cfg.active.project}.` : "") + ` Running it as-is makes the next version, v${pad(versionOf(cfg, info.project).last + 1)}.`;
+  const row = el$1("div", "nkd-proj-row", box);
+  const close = () => back.remove();
+  const button2 = (label, on, primary = false) => {
+    const b = el$1("button", primary ? "nkd-tl-btn on" : "nkd-tl-btn", row);
+    b.textContent = label;
+    b.addEventListener("click", () => void Promise.resolve(on()).then(close));
+  };
+  button2("Close", () => {
+  });
+  if (known && info.project !== cfg.active.project) {
+    button2(`Switch to ${info.project}`, () => setActive(info.project, void 0));
+  }
+  if (known) {
+    button2(`Re-render v${pad(info.version)} (pin)`, async () => {
+      if (info.project !== cfg.active.project) await setActive(info.project, void 0);
+      await setVersion("pin", info.version, info.project);
+    }, true);
+  }
+  back.addEventListener("pointerdown", (ev) => {
+    if (ev.target === back) close();
+  });
+}
 function openPickerAt(anchor) {
   const r = anchor == null ? void 0 : anchor.getBoundingClientRect();
   const x = r ? r.left : window.innerWidth / 2 - 90;
@@ -4611,9 +4680,20 @@ function registerProjectTopbar() {
       function: () => openPickerAt(
         document.querySelector('[data-testid="action-bar-buttons"] button')
       )
-    }]
+    }],
+    // A render dragged back into ComfyUI restores its graph; its `nkd_render` block says
+    // which project and version it was, which the graph alone cannot (see nkd_video.py).
+    afterConfigureGraph() {
+      var _a;
+      const extra = (_a = app.graph) == null ? void 0 : _a.extra;
+      const info = extra == null ? void 0 : extra.nkd_render;
+      if (!info) return;
+      delete extra.nkd_render;
+      if (info.mode === "project (shared)") void loadConfig().then(() => showProvenance(info));
+    }
   };
   app.registerExtension(ext);
+  api.addEventListener("execution_success", () => void loadConfig(true));
   onProjectChange(() => {
     ext.actionBarButtons = [button2()];
     const host = document.querySelector('[data-testid="action-bar-buttons"]');

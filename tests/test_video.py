@@ -1130,6 +1130,80 @@ def test_execute_writes_a_labeled_review_copy_alongside():
     print("  ok  test_execute_writes_a_labeled_review_copy_alongside")
 
 
+def test_project_versioning_shares_one_version_per_run():
+    """A render and its mask, two savers, one run -> NKD_v001 and NKD_v001_mask, whatever
+    order they run in. Next run -> v002 for both. And the provenance travels inside the
+    file - including when the render is a COPY of the previous run's bytes, which would
+    otherwise claim to be the old version."""
+    import json as J
+
+    import folder_paths
+    import nkd_projects
+    import nkd_video
+
+    class FakeHidden:
+        extra_pnginfo = {"workflow": {"nodes": [], "extra": {"ds": 1}}}
+        prompt = {}
+
+        def __init__(self, uid):
+            self.unique_id = uid
+
+    def embedded(path):
+        with av.open(path) as c:
+            return J.loads(c.metadata["workflow"])["extra"]
+
+    node = nkd_video.NKDVideoViewer
+    with tempfile.TemporaryDirectory() as out:
+        orig = folder_paths.get_output_directory
+        orig_cfg, orig_prompt = nkd_projects.config_path, nkd_projects._current_prompt
+        folder_paths.get_output_directory = lambda: out
+        nkd_projects.config_path = lambda: os.path.join(out, "cfg.json")
+        nkd_projects._cache = None
+        try:
+            frames, matte = ramp(4), ramp(4, channels=3) * 0.5
+
+            def go(pid, uid, images, product):
+                nkd_projects._current_prompt = lambda: pid
+                node.hidden = FakeHidden(uid)
+                r = node.execute(
+                    images=images, fps=24.0,
+                    format={"format": "mp4 / h264", "crf": 30.0, "preset": "veryfast"},
+                    filename_prefix="shot", filename="NKD", save_output=True,
+                    pingpong=False, versioning=nkd_video.PROJECT_VERSIONING, version=1,
+                    numbering="none", product=product)
+                return r.ui.as_dict()["nkd_video"][0]
+
+            # The mask saver runs FIRST on purpose: with per-folder scans that order is
+            # what used to split the version.
+            nkd_video._reset_pass_counts(None)
+            m1 = go("p1", "72", matte, "mask")
+            r1 = go("p1", "71", frames, "")
+            assert m1["filename"] == "NKD_v001_mask.mp4", m1
+            assert r1["filename"] == "NKD_v001.mp4", r1
+
+            nkd_video._reset_pass_counts(None)
+            r2 = go("p2", "71", frames, "")      # same frames -> a copy, not an encode
+            m2 = go("p2", "72", matte, "mask")
+            assert (r2["filename"], m2["filename"]) == ("NKD_v002.mp4", "NKD_v002_mask.mp4")
+
+            prov = embedded(os.path.join(out, "shot", r2["filename"]))["nkd_render"]
+            assert prov["version"] == 2 and prov["product"] == "", prov
+            assert prov["mode"] == nkd_video.PROJECT_VERSIONING
+            assert embedded(os.path.join(out, "shot", m2["filename"]))["nkd_render"][
+                "product"] == "mask"
+            assert embedded(os.path.join(out, "shot", r2["filename"]))["ds"] == 1, \
+                "the rest of the workflow's extra must survive"
+            assert probe(os.path.join(out, "shot", r2["filename"]))["frames"] == 4, \
+                "the restamping remux lost frames"
+        finally:
+            node.hidden = None
+            folder_paths.get_output_directory = orig
+            nkd_projects.config_path, nkd_projects._current_prompt = orig_cfg, orig_prompt
+            nkd_projects._cache = None
+            nkd_video._ENCODED.clear()
+    print("  ok  test_project_versioning_shares_one_version_per_run")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_"):

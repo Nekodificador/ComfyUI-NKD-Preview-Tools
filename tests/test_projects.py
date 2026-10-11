@@ -149,6 +149,73 @@ def test_save_target_versions_instead_of_overwriting():
     assert name == "NKD_v0007.png"
 
 
+def run(pid):
+    """Pretend the executor moved on to prompt `pid`."""
+    nkd_projects._current_prompt = lambda: pid
+
+
+def test_one_run_one_version_for_every_saver():
+    # The bug this exists for: a render and its mask, two savers, one version.
+    reset({"projects": ["A"], "categories": ["x"]})
+    run("p1")
+    assert nkd_projects.claim_version(0) == 1
+    assert nkd_projects.claim_version(0) == 1, "a second saver in the same run must agree"
+    assert nkd_projects.claim_version(1) == 2, "a list pass is its own version"
+    run("p2")
+    assert nkd_projects.claim_version(0) == 3, "the next run continues after the last pass"
+
+
+def test_a_temp_only_run_does_not_spend_a_version():
+    reset({"projects": ["A"], "categories": ["x"]})
+    run("t1")
+    assert nkd_projects.claim_version(0, persist=False) == 1
+    run("t2")
+    assert nkd_projects.claim_version(0, persist=False) == 1, "a preview spent the number"
+    # ...but a saver in the same run that DOES write to output/ spends it.
+    assert nkd_projects.claim_version(0, persist=True) == 1
+    run("t3")
+    assert nkd_projects.claim_version(0) == 2
+
+
+def test_the_disk_floor_only_raises_the_first_claim():
+    # A project copied from another machine: files up to v009 exist, the counter is new.
+    reset({"projects": ["A"], "categories": ["x"]})
+    run("f1")
+    assert nkd_projects.claim_version(0, floor=10) == 10
+    assert nkd_projects.claim_version(0, floor=50) == 10, "a later saver split the version"
+
+
+def test_pin_rerenders_without_moving_the_counter():
+    reset({"projects": ["A"], "categories": ["x"]})
+    run("a"); nkd_projects.claim_version(0)
+    run("b"); nkd_projects.claim_version(0)                    # last = 2
+    nkd_projects.set_version(None, "pin", 1)
+    run("c")
+    assert nkd_projects.claim_version(0) == 1
+    assert nkd_projects.version_state()["last"] == 2, "a pin must not rewind the counter"
+    nkd_projects.set_version(None, "unpin")
+    run("d")
+    assert nkd_projects.claim_version(0) == 3
+
+
+def test_set_next_only_goes_forward():
+    reset({"projects": ["A"], "categories": ["x"],
+           "versions": {"A": {"last": 7}}})
+    nkd_projects.set_version(None, "next", 3)
+    assert nkd_projects.version_state()["last"] == 7, "rewinding hands out used numbers"
+    nkd_projects.set_version(None, "next", 20)
+    run("n1")
+    assert nkd_projects.claim_version(0) == 20
+
+
+def test_version_signature_moves_after_a_spent_run():
+    # Every project saver must re-run on the next queue, or a version ends up incomplete.
+    reset({"projects": ["A"], "categories": ["x"]})
+    before = nkd_projects.version_signature()
+    run("s1"); nkd_projects.claim_version(0)
+    assert nkd_projects.version_signature() != before
+
+
 def test_a_broken_file_does_not_take_the_render_down():
     reset()
     with open(nkd_projects.config_path(), "w", encoding="utf-8") as fh:

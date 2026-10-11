@@ -401,6 +401,7 @@ const ICON = {
 function createViewerDOM(opts = {}) {
     const { refUrl = null, refLabel = null, maskUrl = null, apiBase = null, onQueue = null, onSendToLoad = null,
             onSave = null, onReveal = null } = opts;
+    let fitWindowOnLoad = !!opts.fitWindowOnLoad;   // one-shot Fit Window on the first image
     // imgMeta is mutable — caller can update via root._nkdSetMeta(meta)
     let imgMeta = opts.imgMeta || null;
     // Reference/mask availability is dynamic — refreshed via root._nkdSetRefs()
@@ -601,6 +602,7 @@ function createViewerDOM(opts = {}) {
             dims.textContent = `${nw} × ${nh} px`;
             apply();
         } else fit();
+        if (fitWindowOnLoad) { fitWindowOnLoad = false; fitWindow(); }
         img.style.opacity = "1";
         empty.classList.add("hidden");
     });
@@ -722,7 +724,7 @@ function createViewerDOM(opts = {}) {
     if (curMask) { maskOv.style.webkitMaskImage = `url("${curMask}")`; maskOv.style.maskImage = `url("${curMask}")`; }
 
     // Fit Window button — resizes the panel (floating mode) or the OS window (popup mode)
-    root.querySelector(".nkd-pv-btn-adj").addEventListener("click", () => {
+    function fitWindow() {
         const nw = img.naturalWidth, nh = img.naturalHeight;
         if (!nw || !nh) return;
         const maxW = Math.round(screen.availWidth  * 0.9);
@@ -740,7 +742,8 @@ function createViewerDOM(opts = {}) {
             window.resizeTo(w + dx, h + dy);
             window.moveTo(left, top);
         }
-    });
+    }
+    root.querySelector(".nkd-pv-btn-adj").addEventListener("click", fitWindow);
 
     if (onQueue) root.querySelector(".nkd-pv-btn-run").addEventListener("click", () => onQueue());
 
@@ -1101,9 +1104,21 @@ class PopupWin {
     }
 
     async _openViewer() {
-        if (this._opening) return;
+        // Re-checked AFTER open()'s await: two quick calls both passed its early check and
+        // opened a panel AND a PiP.
+        if (this._opening || this._isOpen()) return;
         this._opening = true;
         try {
+            // One viewer at a time. A window (PiP / OS popup) is handed over in place, so it
+            // stays on its screen at its position; the in-page panel reopens at its saved bounds.
+            const other = [...popups.values()].find(o => o !== this && o._isOpen());
+            if (other?._handOver(this)) return;
+            const pan = other?._panel;   // the next panel lands exactly where this one is now
+            if (pan) try {
+                localStorage.setItem("nkd_panel_bounds", JSON.stringify({
+                    w: pan.offsetWidth, h: pan.offsetHeight - 32, x: pan.offsetLeft, y: pan.offsetTop }));
+            } catch { /* storage off: it reopens at the last saved place */ }
+            other?.win?.close();
             const isElectron = navigator.userAgent.includes("Electron");
             if (!isElectron && window.documentPictureInPicture) {
                 try {
@@ -1139,8 +1154,8 @@ class PopupWin {
             position: "fixed",
             width: winW + "px",
             height: (winH + TITLEBAR_H) + "px",
-            left: (Number.isFinite(x) ? Math.min(Math.max(0, x), window.innerWidth - 80) : Math.round((window.innerWidth  - winW) / 2)) + "px",
-            top:  (Number.isFinite(y) ? Math.min(Math.max(0, y), window.innerHeight - 40) : Math.round((window.innerHeight - winH - TITLEBAR_H) / 2)) + "px",
+            left: (Number.isFinite(x) ? Math.max(0, Math.min(x, window.innerWidth - 80)) : Math.round((window.innerWidth  - winW) / 2)) + "px",
+            top:  (Number.isFinite(y) ? Math.max(0, Math.min(y, window.innerHeight - 40)) : Math.round((window.innerHeight - winH - TITLEBAR_H) / 2)) + "px",
             zIndex: "9999",
             display: "flex",
             flexDirection: "column",
@@ -1271,6 +1286,7 @@ class PopupWin {
             onSendToLoad: () => this._sendOwnToLoad(),
             onSave: () => this._saveOwn(),
             onReveal: () => this._revealOwn(),
+            fitWindowOnLoad: this._fitOnOpen,
         });
         container.style.cssText = "width:100%;height:100%;";
         // Hide the viewer's own close button — the panel titlebar has one.
@@ -1459,6 +1475,7 @@ class PopupWin {
             onSendToLoad: () => this._sendOwnToLoad(),
             onSave: () => this._saveOwn(),
             onReveal: () => this._revealOwn(),
+            fitWindowOnLoad: this._fitOnOpen,
         });
     }
 
@@ -1573,6 +1590,23 @@ class PopupWin {
             else saveState();
         }, 500);
         win.addEventListener("beforeunload", () => { saveState(); clearInterval(saveInterval); });
+    }
+
+    /** Give this viewer's PiP / OS window to another node: same window, its content swapped.
+     *  The in-page panel is not handed over (false): its closures belong to this instance.
+     *  ponytail: a handed-over OS popup stops saving its bounds; it still stays where it is. */
+    _handOver(to) {
+        if (this._panel || !this.win || this.win.closed) return false;
+        const win = this.win, pip = this._pipMode;
+        this._container?._nkdDispose?.();
+        this._container = null;
+        this.win = null;
+        this._pipMode = false;
+        to.win = win;
+        to._pipMode = pip;
+        to._fitOnOpen = false;   // keep the size the user gave the window, not just its place
+        to._mountInWindow(win);
+        return true;
     }
 
     _updateImage(url) {
@@ -1804,11 +1838,12 @@ function buildNodePanel(node) {
     return { syncPrimary, refresh: paint };
 }
 
-function openViewer(node) {
+function openViewer(node, { auto = false } = {}) {
     lastActiveId = String(node.id);
     const p = getPopup(String(node.id));
     p.setTitle(node.title || "Preview Window");
-    p.open();
+    p._fitOnOpen = auto;   // open_on_run lands with Fit Window applied
+    p.open().finally(() => { p._fitOnOpen = false; });
 }
 
 // ── CopyImage ────────────────────────────────────────────────────────────────
@@ -1923,8 +1958,7 @@ app.registerExtension({
                 if (p.win && !p.win.closed) {
                     p.destroy();
                 } else {
-                    p.setTitle(node.title || "Preview Window");
-                    p.open();
+                    openViewer(node);
                 }
             },
         },
@@ -1960,9 +1994,23 @@ app.registerExtension({
             popup._runDone = true;   // later sampler frames of THIS run must not overwrite the result
             popup.showBatch(detail.output.images);
             lastActiveId = String(node.id);
-            // Opt-in per node. PiP needs a user gesture, so on a bare run it falls back to the
-            // floating panel (see _openViewer).
-            if (node.widgets?.find(w => w.name === "open_on_run")?.value && !popup._isOpen()) openViewer(node);
+        });
+
+        // open_on_run opens when the run is QUEUED, not when it finishes: the Run click (or its
+        // shortcut) is still a user gesture here, so the viewer can be a PiP you take to another
+        // screen. By the time results arrive that gesture is long gone and only an in-page panel
+        // could open. Opening early also shows the live sampling frames.
+        // ponytail: a run queued from elsewhere (API, another tab) does not auto-open.
+        api.addEventListener("promptQueueing", () => {
+            const open = [...popups.values()].find(p => p._isOpen());
+            const nodes = (app.graph?._nodes ?? []).filter(n => n.comfyClass === NODE_TYPE
+                && n.widgets?.find(w => w.name === "open_on_run")?.value);
+            // The open viewer already shows one of them: leave it. Otherwise it is retargeted
+            // (same window, same place) or, with none open, opened.
+            if (!nodes.length || nodes.some(n => String(n.id) === open?.nodeId)) return;
+            const node = nodes.find(n => String(n.id) === primaryNodeId)
+                ?? nodes.find(n => String(n.id) === lastActiveId) ?? nodes[0];
+            openViewer(node, { auto: true });
         });
 
         // Sampling progress feeds the LIVE badge; an interrupted/failed run flags the low-res
@@ -2110,7 +2158,7 @@ app.registerExtension({
                 { tooltip: "File name for the saved still. Empty keeps the prefix's own name." });
 
             this.addWidget("toggle", "open_on_run", false, () => {},
-                { tooltip: "Open the viewer by itself when this node produces an image. " +
+                { tooltip: "Open the viewer by itself when you press Run, with the live preview. " +
                            "Off by default: a window that appears on every run gets in the way." });
 
             const panel = buildNodePanel(this);

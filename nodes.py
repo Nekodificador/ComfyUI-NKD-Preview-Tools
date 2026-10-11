@@ -278,7 +278,29 @@ async def _nkd_project_save(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         return web.Response(status=400, text="Expected JSON")
+    if not isinstance(body, dict):
+        return web.Response(status=400, text="Expected an object")
+    # The counters are NEVER taken from the body: the page posts back its cached copy of
+    # the whole config, which is stale by however many runs happened since it was fetched.
+    # Writing it would rewind `last` and hand out versions that already exist on disk.
+    body["versions"] = nkd_projects.load()["versions"]
     return web.json_response(nkd_projects.save(body))
+
+
+@routes.post("/nkd/project/version")
+async def _nkd_project_version(request: web.Request) -> web.Response:
+    """Pin / unpin / set-next on the shared version. Writes one integer to the config."""
+    if not _is_same_origin(request):
+        return web.Response(status=403, text="Same-origin requests only")
+    try:
+        body = await request.json()
+        action = str(body.get("action") or "")
+    except Exception:
+        return web.Response(status=400, text="Expected JSON")
+    if action not in ("pin", "unpin", "next"):
+        return web.Response(status=400, text="action must be pin, unpin or next")
+    return web.json_response(
+        nkd_projects.set_version(body.get("project"), action, body.get("value")))
 
 
 @routes.post("/nkd/save")
