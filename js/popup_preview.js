@@ -328,8 +328,10 @@ const VIEWER_CSS = `
 .nkd-pv-strip img.cur{border-color:#7dc97d;opacity:1}
 .nkd-pv-count{position:absolute;top:18px;left:50%;margin-left:70px;font:11px monospace;color:rgba(255,255,255,0.5);pointer-events:none;z-index:5;display:none}
 .nkd-pv-count.on{display:block}
-.nkd-pv-ref-badge{position:absolute;top:38px;left:14px;background:rgba(180,32,48,0.92);color:#fff;font:bold 11px monospace;padding:4px 9px;border-radius:4px;pointer-events:none;display:none;z-index:5;letter-spacing:1px;backdrop-filter:blur(4px);}
-.nkd-pv-viewer-root.holding-ref .nkd-pv-ref-badge{display:block}
+.nkd-pv-ref-badge,.nkd-pv-cur-badge{position:absolute;top:52px;left:14px;background:rgba(180,32,48,0.92);color:#fff;font:bold 11px monospace;padding:4px 9px;border-radius:4px;pointer-events:none;display:none;z-index:5;letter-spacing:1px;backdrop-filter:blur(4px);}
+.nkd-pv-cur-badge{left:auto;right:14px;background:rgba(40,40,40,0.92)}
+.nkd-pv-viewer-root.holding-ref .nkd-pv-ref-badge,.nkd-pv-viewer-root.cmp-wipe .nkd-pv-ref-badge,.nkd-pv-viewer-root.cmp-wipe .nkd-pv-cur-badge{display:block}
+.nkd-pv-viewer-root.holding-ref .nkd-pv-cur-badge{display:none}
 .nkd-pv-mask-ov{position:absolute;top:0;left:0;transform-origin:0 0;pointer-events:none;display:none;z-index:2;-webkit-mask-size:100% 100%;mask-size:100% 100%;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;-webkit-mask-mode:luminance;mask-mode:luminance;}
 .nkd-pv-viewer-root.holding-mask .nkd-pv-mask-ov,.nkd-pv-viewer-root.mask-on .nkd-pv-mask-ov{display:block}
 .nkd-pv-mask-ctl{display:flex;gap:6px;align-items:center;}
@@ -399,7 +401,7 @@ const ICON = {
 };
 
 function createViewerDOM(opts = {}) {
-    const { refUrl = null, refLabel = null, maskUrl = null, apiBase = null, onQueue = null, onSendToLoad = null,
+    const { refUrl = null, labels = () => ({}), maskUrl = null, apiBase = null, onQueue = null, onSendToLoad = null,
             onSave = null } = opts;
     let fitWindowOnLoad = !!opts.fitWindowOnLoad;   // one-shot Fit Window on the first image
     // imgMeta is mutable — caller can update via root._nkdSetMeta(meta)
@@ -440,6 +442,7 @@ function createViewerDOM(opts = {}) {
             </div>
         </div>
         <div class="nkd-pv-ref-badge">REF</div>
+        <div class="nkd-pv-cur-badge"></div>
         <div class="nkd-pv-live-badge"></div>
         <div class="nkd-pv-count"></div>
         <div class="nkd-pv-wipe"></div>
@@ -613,7 +616,7 @@ function createViewerDOM(opts = {}) {
     // Latch: a quick click on the button pins the reference (trackpads / touch cannot hold);
     // click again to release. Holding still works as before.
     let latched = false, pressT = 0;
-    const showRef = () => { if (!curRef || holding) return; holding = true; root.classList.add("holding-ref"); btnHold.classList.add("active"); };
+    const showRef = () => { if (!curRef || holding) return; setRefLabel(); holding = true; root.classList.add("holding-ref"); btnHold.classList.add("active"); };
     const showCur = (force) => { if (!holding || (latched && force !== true)) return; holding = false; latched = false; root.classList.remove("holding-ref"); btnHold.classList.remove("active"); };
     btnHold.addEventListener("mousedown", e => {
         e.preventDefault();
@@ -648,6 +651,7 @@ function createViewerDOM(opts = {}) {
     if (!MODES.includes(cmpMode)) cmpMode = "flash";
     let wipeX = 0.5;
     const syncCmp = () => {
+        setRefLabel();
         root.classList.toggle("cmp-wipe", !!curRef && cmpMode === "wipe");
         root.classList.toggle("cmp-diff", !!curRef && cmpMode === "diff");
         cmpBtn.style.display = curRef ? "" : "none";
@@ -698,16 +702,16 @@ function createViewerDOM(opts = {}) {
     root.addEventListener("keyup", e => { if (e.key === "m" || e.key === "M") { e.preventDefault(); peekOff(); } });
 
     // Update reference/mask availability live (called on every workflow run).
-    const refBadge = root.querySelector(".nkd-pv-ref-badge");
+    const refBadge = root.querySelector(".nkd-pv-ref-badge"), curBadge = root.querySelector(".nkd-pv-cur-badge");
     const holdLbl  = btnHold.querySelector(".nkd-pv-lbl");
-    const setRefLabel = (label) => {
-        // "PREV" = the implicit reference (the render before this one); "REF" = a wired/global one.
-        refBadge.textContent = label || "REF";
-        holdLbl.textContent  = label === "PREV" ? "Hold for Prev" : "Hold for Ref";
-    };
-    setRefLabel(refLabel);
-    root._nkdSetRefs = (rUrl, mUrl, label) => {
-        setRefLabel(label);
+    function setRefLabel() {
+        // Read on every show: renaming a socket must not need a re-run to reach the badge.
+        const { ref, cur } = labels();
+        refBadge.textContent = ref || "REF";
+        curBadge.textContent = cur || "IMAGE";
+        holdLbl.textContent  = ref === "PREV" ? "Hold for Prev" : "Hold for Ref";
+    }
+    root._nkdSetRefs = (rUrl, mUrl) => {
         curRef  = rUrl  || null;
         curMask = mUrl  || null;
         btnHold.style.display = curRef ? "" : "none";
@@ -1063,7 +1067,16 @@ class PopupWin {
         if (!this.win || this.win.closed) return;
         const [refUrl, maskUrl] = await this._resolveRefUrls();
         this._refUrl = refUrl; this._maskUrl = maskUrl;
-        this._container?._nkdSetRefs?.(refUrl, maskUrl, this._refLabel);
+        this._container?._nkdSetRefs?.(refUrl, maskUrl);
+    }
+
+    /** Badge text for each side of the compare: a socket the user renamed (`qwen`, `klein`)
+     *  says which input it is. PREV / the global slot keep their own names. */
+    _badgeLabels() {
+        const inputs = app.graph?.getNodeById?.(Number(this.nodeId))?.inputs || [];
+        const named = (n) => { const i = inputs.find(x => x.name === n); return i?.label && i.label !== n ? i.label : null; };
+        const ref = this._refLabel || (this.wiredRef ? named("reference") || "REF" : "REF");
+        return { ref, cur: named("image") || (this._refLabel === "PREV" ? "CURRENT" : "IMAGE") };
     }
 
     /** `executed` does not fire for a cached node, nor after a reload, but the node still shows
@@ -1269,7 +1282,7 @@ class PopupWin {
         // ── Viewer DOM (pan/zoom/save/etc.) ───────────────────────────────────
         const container = createViewerDOM({
             refUrl:  this._refUrl,
-            refLabel: this._refLabel,
+            labels: () => this._badgeLabels(),
             maskUrl: this._maskUrl,
             imgMeta: this.currentMeta,
             apiBase: location.origin,
@@ -1457,7 +1470,7 @@ class PopupWin {
     _makeViewer() {
         return createViewerDOM({
             refUrl:  this._refUrl,
-            refLabel: this._refLabel,
+            labels: () => this._badgeLabels(),
             maskUrl: this._maskUrl,
             imgMeta: this.currentMeta,
             apiBase: location.origin,
