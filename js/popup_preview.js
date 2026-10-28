@@ -728,11 +728,17 @@ function createViewerDOM(opts = {}) {
         root.focus({ preventScroll: true });
     });
     const typing = (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName || "");
+    // In wipe mode Space sweeps the divider across instead of flashing: over to the
+    // reference on press, back to the render on release.
+    let wipeHeld = false;
+    const releaseSpace = () => { if (wipeHeld) { wipeHeld = false; sweepTo(0); } };
     root.addEventListener("keydown", e => {
         if (e.code !== "Space" || e.repeat || !curRef || typing(e)) return;
-        e.preventDefault(); showRef();
+        e.preventDefault();
+        if (cmpMode === "wipe") { wipeHeld = true; sweepTo(1); } else showRef();
     });
-    root.addEventListener("keyup", e => { if (e.code === "Space") { e.preventDefault(); showCur(); } });
+    root.addEventListener("keyup", e => { if (e.code === "Space") { e.preventDefault(); releaseSpace(); showCur(); } });
+    root.addEventListener("blur", releaseSpace);
 
     // ── Compare modes: flash (hold) / wipe (divider) / diff ─────────────────────
     const cmpBtn = root.querySelector(".nkd-pv-btn-cmp"), wipeEl = root.querySelector(".nkd-pv-wipe"),
@@ -757,8 +763,25 @@ function createViewerDOM(opts = {}) {
         syncCmp();
     };
     cmpBtn.addEventListener("click", cycleCmp);
+    // The viewer can live in a PiP or OS window, so tick on the window that owns it now.
+    let sweepRaf = 0;
+    const sweepTo = (to) => {
+        const win = root.ownerDocument.defaultView;
+        win.cancelAnimationFrame(sweepRaf);
+        const from = wipeX, t0 = win.performance.now(), dur = 400 * Math.abs(to - from);
+        const step = (now) => {
+            const k = dur ? Math.min(1, (now - t0) / dur) : 1;
+            wipeX = from + (to - from) * (1 - (1 - k) ** 3);
+            syncCmp();
+            if (k < 1) sweepRaf = win.requestAnimationFrame(step);
+        };
+        sweepRaf = win.requestAnimationFrame(step);
+    };
     let wipeDrag = false;
-    wipeEl.addEventListener("pointerdown", e => { e.preventDefault(); e.stopPropagation(); wipeEl.setPointerCapture(e.pointerId); wipeDrag = true; });
+    wipeEl.addEventListener("pointerdown", e => {
+        e.preventDefault(); e.stopPropagation(); wipeEl.setPointerCapture(e.pointerId); wipeDrag = true;
+        root.ownerDocument.defaultView.cancelAnimationFrame(sweepRaf);
+    });
     wipeEl.addEventListener("pointermove", e => {
         if (!wipeDrag) return;
         const r = root.getBoundingClientRect();

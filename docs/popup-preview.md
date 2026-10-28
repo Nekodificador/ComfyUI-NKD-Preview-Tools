@@ -29,6 +29,7 @@ The node passes `image` through untouched, so it can sit inline in a chain (say 
 - With nothing wired, **Hold** compares against your previous render.
 - **Space** shows the reference while held. A quick click on the button pins it until you click again.
 - **V** switches between flash, wipe (drag the divider) and difference.
+- In wipe mode **Space** sweeps the divider across: over to the reference on press, back to the render on release.
 - **M** shows the mask overlay while held.
 
 ## Painting a fix and running it again
