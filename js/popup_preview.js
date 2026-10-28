@@ -407,16 +407,27 @@ const VIEWER_CSS = `
 .nkd-pv-viewer-root.painting .nkd-pv-vwrap{cursor:none}
 .nkd-pv-brush{position:absolute;z-index:7;display:none;pointer-events:none;border-radius:50%;border:1px solid rgba(255,255,255,0.9);box-shadow:0 0 0 1px rgba(0,0,0,0.7);transform:translate(-50%,-50%);}
 .nkd-pv-brush.on{display:block}
-.nkd-pv-paint-row{display:none;flex-basis:100%;order:-1;flex-wrap:wrap;gap:8px;align-items:center;}
+/* Paint mode: a SOLID strip on top, so no tool ever sits over the pixels being painted.
+   The image area shrinks by its height and refits; the top overlays move down with it. */
+.nkd-pv-viewer-root{--pv-strip:0px}
+.nkd-pv-viewer-root.painting{--pv-strip:40px}
+.nkd-pv-viewer-root.painting .nkd-pv-vwrap{margin-top:var(--pv-strip);height:calc(100% - var(--pv-strip))}
+.nkd-pv-viewer-root.painting :is(.nkd-pv-help,.nkd-pv-info,.nkd-pv-live-badge,.nkd-pv-count,.nkd-pv-ref-badge,.nkd-pv-cur-badge,.nkd-pv-btn-close){margin-top:var(--pv-strip)}
+.nkd-pv-viewer-root.painting .nkd-pv-wipe{top:var(--pv-strip)}
+.nkd-pv-paint-row{position:absolute;top:0;left:0;right:0;min-height:40px;z-index:8;display:none;flex-wrap:wrap;align-items:center;gap:6px;padding:6px 10px;background:#141414;border-bottom:1px solid rgba(255,255,255,0.08);}
 .nkd-pv-viewer-root.painting .nkd-pv-paint-row{display:flex}
-.nkd-pv-seg{display:inline-flex}
+.nkd-pv-paint-row .nkd-pv-vbtn{height:28px;padding:0 9px;font-size:12px;flex:none}
+.nkd-pv-paint-row .nkd-pv-sep{width:1px;height:20px;background:rgba(255,255,255,0.1);flex:none;margin:0 2px}
+.nkd-pv-paint-row .nkd-pv-send{margin-left:auto;display:flex;gap:6px;flex:none}
+.nkd-pv-seg{display:inline-flex;flex:none}
 .nkd-pv-seg .nkd-pv-vbtn{border-radius:0}
 .nkd-pv-seg .nkd-pv-vbtn:first-child{border-radius:6px 0 0 6px}
 .nkd-pv-seg .nkd-pv-vbtn:last-child{border-radius:0 6px 6px 0;margin-left:-1px}
 .nkd-pv-vbtn.on,.nkd-pv-btn-paint.active{background:rgba(30,60,90,0.95);border-color:rgba(74,180,255,0.6);color:#cfe8ff}
 .nkd-pv-vbtn:disabled{opacity:0.35;cursor:default}
-.nkd-pv-range{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border-radius:6px;background:rgba(28,28,28,0.92);border:1px solid rgba(255,255,255,0.12);color:#ccc;font-size:12px;}
-.nkd-pv-range input{width:80px;accent-color:#4ab4ff;cursor:pointer}
+.nkd-pv-scrub{flex:none;height:28px;display:inline-flex;align-items:center;gap:5px;padding:0 8px;border-radius:6px;font:12px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:rgba(255,255,255,0.5);cursor:ew-resize;user-select:none;touch-action:none}
+.nkd-pv-scrub:hover{background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.75)}
+.nkd-pv-scrub b{font-weight:600;color:#cfe8ff;min-width:2.2em;font-variant-numeric:tabular-nums}
 `;
 
 // Inline SVG icons (consistent stroke, currentColor) — replaces emoji/box glyphs
@@ -516,23 +527,27 @@ function createViewerDOM(opts = {}) {
         </div>
         <button class="nkd-pv-btn-close nkd-pv-vbtn" title="Close">${ICON.close}<span class="nkd-pv-lbl">Close</span></button>
         <div class="nkd-pv-info"><span class="nkd-pv-dims"></span><button class="nkd-pv-zoom" title="Zoom - click for 100%"></button><span class="nkd-pv-px"></span></div>
-        <div class="nkd-pv-bar">
-            <div class="nkd-pv-paint-row">
-                <span class="nkd-pv-seg">
-                    <button class="nkd-pv-btn-lmask nkd-pv-vbtn" title="Paint what to regenerate - sent as the Load Image's mask (X swaps)">${ICON.mask}<span class="nkd-pv-lbl">Mask</span></button>
-                    <button class="nkd-pv-btn-lreveal nkd-pv-vbtn" title="Paint where the reference / previous render comes back (X swaps)">${ICON.swap}<span class="nkd-pv-lbl">Reveal</span></button>
-                </span>
-                <span class="nkd-pv-seg">
-                    <button class="nkd-pv-btn-tbrush nkd-pv-vbtn" title="Brush (B)">${ICON.brush}</button>
-                    <button class="nkd-pv-btn-terase nkd-pv-vbtn" title="Eraser (E)">${ICON.eraser}</button>
-                </span>
-                <label class="nkd-pv-range" title="Brush size in image pixels ([ ])">Size<input type="range" class="nkd-pv-in-size" min="1" max="400" step="1"></label>
-                <label class="nkd-pv-range" title="Hardness (Alt + right drag up/down)">Hard<input type="range" class="nkd-pv-in-hard" min="0" max="1" step="0.01"></label>
-                <button class="nkd-pv-btn-pundo nkd-pv-vbtn" title="Undo stroke (Ctrl+Z)">${ICON.undo}</button>
-                <button class="nkd-pv-btn-pclear nkd-pv-vbtn" title="Clear the active layer">${ICON.trash}</button>
+        <div class="nkd-pv-paint-row">
+            <span class="nkd-pv-seg">
+                <button class="nkd-pv-btn-lmask nkd-pv-vbtn" title="Paint what to regenerate - sent as the Load Image's mask (X swaps)">${ICON.mask}<span class="nkd-pv-lbl">Mask</span></button>
+                <button class="nkd-pv-btn-lreveal nkd-pv-vbtn" title="Paint where the reference / previous render comes back (X swaps)">${ICON.swap}<span class="nkd-pv-lbl">Reveal</span></button>
+            </span>
+            <span class="nkd-pv-seg">
+                <button class="nkd-pv-btn-tbrush nkd-pv-vbtn" title="Brush (B)">${ICON.brush}</button>
+                <button class="nkd-pv-btn-terase nkd-pv-vbtn" title="Eraser (E)">${ICON.eraser}</button>
+            </span>
+            <span class="nkd-pv-sep"></span>
+            <span class="nkd-pv-scrub nkd-pv-sc-size" title="Brush size in image pixels - drag, Shift for fine ([ ])">Size <b></b></span>
+            <span class="nkd-pv-scrub nkd-pv-sc-hard" title="Hardness - drag, Shift for fine (Alt + right drag on the picture)">Hard <b></b></span>
+            <span class="nkd-pv-sep"></span>
+            <button class="nkd-pv-btn-pundo nkd-pv-vbtn" title="Undo stroke (Ctrl+Z)">${ICON.undo}</button>
+            <button class="nkd-pv-btn-pclear nkd-pv-vbtn" title="Clear the active layer">${ICON.trash}</button>
+            <span class="nkd-pv-send">
                 <button class="nkd-pv-btn-loop nkd-pv-vbtn" title="Send picture + mask to the target Load Image (L)" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-pv-lbl">To Load</span></button>
                 <button class="nkd-pv-btn-looprun nkd-pv-vbtn" title="Send to the Load Image and run this preview's branch (Shift+L)" style="display:${onSendToLoad && onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-pv-lbl">Load &amp; Run</span></button>
-            </div>
+            </span>
+        </div>
+        <div class="nkd-pv-bar">
             <div class="nkd-pv-bar-group nkd-pv-bar-left">
                 <button class="nkd-pv-btn-paint nkd-pv-vbtn" title="Paint a mask to regenerate, or reveal the reference (P)">${ICON.brush}<span class="nkd-pv-lbl">Paint</span></button>
                 <button class="nkd-pv-btn-hold nkd-pv-vbtn" title="Hold to show reference image (Space)" style="display:${refUrl ? '' : 'none'}">${ICON.swap}<span class="nkd-pv-lbl">Hold for Ref</span></button>
@@ -823,7 +838,7 @@ function createViewerDOM(opts = {}) {
     const pctx = paintCv.getContext("2d");
     const ring = root.querySelector(".nkd-pv-brush");
     const btnPaint = root.querySelector(".nkd-pv-btn-paint");
-    const sizeIn = root.querySelector(".nkd-pv-in-size"), hardIn = root.querySelector(".nkd-pv-in-hard");
+    const scSize = root.querySelector(".nkd-pv-sc-size b"), scHard = root.querySelector(".nkd-pv-sc-hard b");
     const pb = (c) => root.querySelector(c);
 
     function fitLayers() {
@@ -884,14 +899,17 @@ function createViewerDOM(opts = {}) {
         pb(".nkd-pv-btn-terase").classList.toggle("on", P.tool === "eraser");
         pb(".nkd-pv-btn-pundo").disabled = !undoOrder.length;
         pb(".nkd-pv-btn-pclear").disabled = !active().hasStrokes;
-        sizeIn.value = String(P.size); hardIn.value = String(P.hardness);
+        scSize.textContent = String(P.size); scHard.textContent = P.hardness.toFixed(2);
         if (!paintOn) ring.classList.remove("on");
     }
 
     const savePrefs = () => {
         try { localStorage.setItem("nkd_pv_brush_size", String(P.size)); localStorage.setItem("nkd_pv_brush_hard", String(P.hardness)); } catch { /* ignore */ }
     };
-    const setPaint = (on) => { paintOn = on; syncPaint(); };
+    // On a narrow viewer the strip wraps to two rows: the image starts below its REAL height.
+    const paintRow = root.querySelector(".nkd-pv-paint-row");
+    function syncStrip() { root.style.setProperty("--pv-strip", paintOn ? paintRow.offsetHeight + "px" : "0px"); }
+    const setPaint = (on) => { paintOn = on; syncPaint(); syncStrip(); };
     const undoPaint = () => { const n = undoOrder.pop(); if (n) { layers[n].undo(); redoOrder.push(n); } syncPaint(); };
     const redoPaint = () => { const n = redoOrder.pop(); if (n) { layers[n].redo(); undoOrder.push(n); } syncPaint(); };
     const swapLayer = () => { if (curRef) { P.layer = P.layer === "mask" ? "reveal" : "mask"; syncPaint(); } };
@@ -905,10 +923,24 @@ function createViewerDOM(opts = {}) {
     pb(".nkd-pv-btn-pclear").addEventListener("click", () => {
         if (active().clear()) { undoOrder.push(P.layer); redoOrder.length = 0; schedulePaint(); }
     });
-    // Sliders hand the keyboard back to the viewer, or B/E/[ ] would go dead after a drag.
-    sizeIn.addEventListener("input", () => { P.size = Number(sizeIn.value); savePrefs(); });
-    hardIn.addEventListener("input", () => { P.hardness = Number(hardIn.value); savePrefs(); });
-    for (const el of [sizeIn, hardIn]) el.addEventListener("change", () => root.focus({ preventScroll: true }));
+    // Drag-to-scrub numbers, the pack's idiom (Shift = fine). A third of a slider's width, and
+    // no <input> to steal the keyboard from B/E/[ ] after a drag.
+    function scrub(el, get, set, perPx) {
+        el.addEventListener("pointerdown", e => {
+            if (e.button !== 0) return;
+            e.preventDefault(); e.stopPropagation();
+            el.setPointerCapture(e.pointerId);
+            let x = e.clientX, v = get();
+            const move = (ev) => { v += (ev.clientX - x) * perPx * (ev.shiftKey ? 0.1 : 1); x = ev.clientX; set(v); syncPaint(); };
+            const up = () => {
+                el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up);
+                el.removeEventListener("pointercancel", up); savePrefs();
+            };
+            el.addEventListener("pointermove", move); el.addEventListener("pointerup", up); el.addEventListener("pointercancel", up);
+        });
+    }
+    scrub(pb(".nkd-pv-sc-size"), () => P.size, v => { P.size = Math.max(1, Math.min(400, Math.round(v))); }, 1);
+    scrub(pb(".nkd-pv-sc-hard"), () => P.hardness, v => { P.hardness = Math.max(0, Math.min(1, v)); }, 0.005);
 
     /** Image px under the pointer -> active layer px. */
     const toLayer = (e) => {
@@ -1208,6 +1240,7 @@ function createViewerDOM(opts = {}) {
 
     // Follows the element, not the window: right for the panel, PiP and OS window alike.
     const onSize = () => {
+        syncStrip();
         if (!img.naturalWidth) return;
         if (!userView) fit();
         else { fitScale = Math.min(wrap.clientWidth / img.naturalWidth, wrap.clientHeight / img.naturalHeight); apply(); }
