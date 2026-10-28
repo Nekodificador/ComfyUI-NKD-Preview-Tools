@@ -1514,13 +1514,34 @@ MAX_FREEZE_OUTPUTS = 16
 PREVIEW_MAX_W = 256
 
 
-def _badge_previews(frames: torch.Tensor, picks: list[int]) -> torch.Tensor:
+def _socket_labels(cls: Any, node_id: Any) -> dict[str, str]:
+    """`frame_N` -> the label the editor drew on that socket ("clip 7 out", "ref 2").
+
+    The labels are worked out in the frontend (freezeFrames.ts) and saved on the node's
+    outputs in the workflow, so they are read back from extra_pnginfo - hidden, outside the
+    cache signature, same route as `_read_playhead`. Empty when unavailable (tests, a node
+    inside a subgraph whose composite id is not a top-level workflow node).
+    """
+    extra = getattr(getattr(cls, "hidden", None), "extra_pnginfo", None)
+    wf = extra.get("workflow") if isinstance(extra, dict) else None
+    if not isinstance(wf, dict):
+        return {}
+    for n in wf.get("nodes") or []:
+        if str(n.get("id")) == str(node_id):
+            return {o["name"]: o["label"] for o in n.get("outputs") or []
+                    if isinstance(o, dict) and o.get("name") and o.get("label")}
+    return {}
+
+
+def _badge_previews(frames: torch.Tensor, picks: list[int],
+                    names: list[str] | None = None) -> torch.Tensor:
     """Thumbnails of the frozen frames with their ordinal and source index burned in.
 
     Burned in rather than drawn as a widget: `ui.PreviewImage` is a plain gallery with no
     captions, and a row of stills with no way to tell which is which is exactly the thing
     this node exists to avoid. Only the PREVIEW copy is written on - the tensors that leave
-    the outputs are untouched.
+    the outputs are untouched. `names` are the socket labels, so the badge reads exactly
+    like the output it came out of; without one it falls back to the socket name.
     """
     from PIL import Image as PILImage, ImageDraw, ImageFont
 
@@ -1537,7 +1558,8 @@ def _badge_previews(frames: torch.Tensor, picks: list[int]) -> torch.Tensor:
         arr = (frame.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
         img = PILImage.fromarray(arr).resize((tw, th), PILImage.BILINEAR)
         draw = ImageDraw.Draw(img)
-        label = f"{n} · f{idx}"
+        name = names[n - 1] if names and n <= len(names) else f"frame_{n}"
+        label = f"{name} · f{idx}"
         box = draw.textbbox((0, 0), label, font=font)
         draw.rectangle((3, 3, box[2] + 11, box[3] + 9), fill=(12, 14, 18))
         draw.text((7, 5), label, font=font, fill=(123, 216, 143))   # the marker green
@@ -1573,6 +1595,8 @@ class NKDFreezeFrames(io.ComfyNode):
                 *[io.Image.Output(display_name=f"frame_{i}")
                   for i in range(1, MAX_FREEZE_OUTPUTS + 1)],
             ],
+            # extra_pnginfo: the socket labels, so the preview badges match them.
+            hidden=[io.Hidden.unique_id, io.Hidden.extra_pnginfo],
             is_output_node=True,      # so the node can show the previews at all
         )
 
@@ -1591,8 +1615,11 @@ class NKDFreezeFrames(io.ComfyNode):
         # socket has no link, so nothing ever reads the None.
         singles = [out[i:i + 1] for i in range(len(picks))]
         singles += [None] * (MAX_FREEZE_OUTPUTS - len(singles))
+        node_id = getattr(getattr(cls, "hidden", None), "unique_id", None)
+        labels = _socket_labels(cls, node_id)
+        names = [labels.get(f"frame_{i}", f"frame_{i}") for i in range(1, len(picks) + 1)]
         return io.NodeOutput(out, len(picks), *singles,
-                             ui=ui.PreviewImage(_badge_previews(out, picks), cls=cls))
+                             ui=ui.PreviewImage(_badge_previews(out, picks, names), cls=cls))
 
 
 # No ComfyExtension and no NODE_CLASS_MAPPINGS here on purpose. `__init__.py` exports ONE

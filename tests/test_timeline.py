@@ -726,6 +726,20 @@ def test_freeze_frame_previews_are_labelled_copies():
     assert small.shape[2] == 256 and small.shape[1] == 144
 
 
+def test_freeze_frame_badges_use_the_socket_labels():
+    """The badge names the frame like its socket does ("clip 1 out"), read back from the
+    saved workflow; an unlabelled socket and a missing workflow fall back to frame_N."""
+    from types import SimpleNamespace
+    from nkd_timeline import _socket_labels
+    wf = {"workflow": {"nodes": [{"id": 7, "outputs": [
+        {"name": "images"}, {"name": "frame_1", "label": "clip 1 in"},
+        {"name": "frame_2", "label": "ref 1"}, {"name": "frame_3"}]}]}}
+    cls = SimpleNamespace(hidden=SimpleNamespace(extra_pnginfo=wf))
+    assert _socket_labels(cls, "7") == {"frame_1": "clip 1 in", "frame_2": "ref 1"}
+    assert _socket_labels(cls, "8") == {}
+    assert _socket_labels(SimpleNamespace(), "7") == {}
+
+
 def test_tensor_strips_describe_the_tensor_not_the_upstream_file():
     """The contact sheet is the only thing that can describe a computed slot, so its
     geometry has to line up with what the editor slices out of it."""
