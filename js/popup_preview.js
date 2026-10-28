@@ -514,8 +514,8 @@ function createViewerDOM(opts = {}) {
                 <div><span class="k">V</span> compare: flash / wipe / diff</div>
                 <div><span class="k">S</span> save &middot; <span class="k">C</span> copy image</div>
                 <hr>
-                <div><span class="k">P</span> paint: mask / reveal</div>
-                <div><span class="k">B / E</span> brush / erase &middot; <span class="k">X</span> mask &harr; reveal</div>
+                <div><span class="k">P</span> paint: reveal / mask</div>
+                <div><span class="k">B / E</span> brush / erase &middot; <span class="k">X</span> reveal &harr; mask</div>
                 <div><span class="k">[ ]</span> size &middot; <span class="k">Alt+right drag</span> size / hardness</div>
                 <div><span class="k">Ctrl+Z</span> undo stroke &middot; <span class="k">Middle drag</span> pan</div>
                 <div><span class="k">L</span> to Load Image &middot; <span class="k">Shift+L</span> load &amp; run</div>
@@ -529,8 +529,8 @@ function createViewerDOM(opts = {}) {
         <div class="nkd-pv-info"><span class="nkd-pv-dims"></span><button class="nkd-pv-zoom" title="Zoom - click for 100%"></button><span class="nkd-pv-px"></span></div>
         <div class="nkd-pv-paint-row">
             <span class="nkd-pv-seg">
-                <button class="nkd-pv-btn-lmask nkd-pv-vbtn" title="Paint what to regenerate - sent as the Load Image's mask (X swaps)">${ICON.mask}<span class="nkd-pv-lbl">Mask</span></button>
                 <button class="nkd-pv-btn-lreveal nkd-pv-vbtn" title="Paint where the reference / previous render comes back (X swaps)">${ICON.swap}<span class="nkd-pv-lbl">Reveal</span></button>
+                <button class="nkd-pv-btn-lmask nkd-pv-vbtn" title="Paint what to regenerate - sent as the Load Image's mask (X swaps)">${ICON.mask}<span class="nkd-pv-lbl">Mask</span></button>
             </span>
             <span class="nkd-pv-seg">
                 <button class="nkd-pv-btn-tbrush nkd-pv-vbtn" title="Brush (B)">${ICON.brush}</button>
@@ -827,7 +827,10 @@ function createViewerDOM(opts = {}) {
     const PAINT_MAX_SIDE = 2048;   // same cap as NKD Paint; the mask is scaled up on send
     const num = (k, d) => { const v = parseFloat(localStorage.getItem(k)); return Number.isFinite(v) ? v : d; };
     const P = { size: num("nkd_pv_brush_size", 60), hardness: num("nkd_pv_brush_hard", 0.6),
-                tool: "brush", layer: "mask" };
+                // Reveal leads: masks are easy to paint anywhere in the workflow, bringing
+                // the previous render back is what only this viewer can do. `want` is the
+                // choice; `layer` is what is usable (no reference yet = Mask).
+                tool: "brush", want: "reveal", layer: "mask" };
     const brushParams = () => ({ size: P.size, opacity: 1, hardness: P.hardness, tool: P.tool, color: "#ffffff" });
     const layers = { mask: new BrushLayer(1, 1, brushParams, () => schedulePaint()),
                      reveal: new BrushLayer(1, 1, brushParams, () => schedulePaint()) };
@@ -891,7 +894,8 @@ function createViewerDOM(opts = {}) {
     function syncPaint() {
         root.classList.toggle("painting", paintOn);
         btnPaint.classList.toggle("active", paintOn);
-        if (P.layer === "reveal" && !curRef) P.layer = "mask";   // nothing to reveal any more
+        // Never switch under a stroke in progress: its end must land on the layer it began on.
+        if (!layers[P.layer].stroking) P.layer = curRef ? P.want : "mask";   // nothing to reveal yet
         pb(".nkd-pv-btn-lmask").classList.toggle("on", P.layer === "mask");
         pb(".nkd-pv-btn-lreveal").classList.toggle("on", P.layer === "reveal");
         pb(".nkd-pv-btn-lreveal").disabled = !curRef;
@@ -912,11 +916,11 @@ function createViewerDOM(opts = {}) {
     const setPaint = (on) => { paintOn = on; syncPaint(); syncStrip(); };
     const undoPaint = () => { const n = undoOrder.pop(); if (n) { layers[n].undo(); redoOrder.push(n); } syncPaint(); };
     const redoPaint = () => { const n = redoOrder.pop(); if (n) { layers[n].redo(); undoOrder.push(n); } syncPaint(); };
-    const swapLayer = () => { if (curRef) { P.layer = P.layer === "mask" ? "reveal" : "mask"; syncPaint(); } };
+    const swapLayer = () => { if (curRef) { P.want = P.want === "mask" ? "reveal" : "mask"; syncPaint(); } };
 
     btnPaint.addEventListener("click", () => setPaint(!paintOn));
-    pb(".nkd-pv-btn-lmask").addEventListener("click", () => { P.layer = "mask"; syncPaint(); });
-    pb(".nkd-pv-btn-lreveal").addEventListener("click", () => { P.layer = "reveal"; syncPaint(); });
+    pb(".nkd-pv-btn-lmask").addEventListener("click", () => { P.want = "mask"; syncPaint(); });
+    pb(".nkd-pv-btn-lreveal").addEventListener("click", () => { P.want = "reveal"; syncPaint(); });
     pb(".nkd-pv-btn-tbrush").addEventListener("click", () => { P.tool = "brush"; syncPaint(); });
     pb(".nkd-pv-btn-terase").addEventListener("click", () => { P.tool = "eraser"; syncPaint(); });
     pb(".nkd-pv-btn-pundo").addEventListener("click", undoPaint);

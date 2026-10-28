@@ -36,7 +36,9 @@ The node passes `image` through untouched, so it can sit inline in a chain (say 
 Fix a result without leaving the viewer, and feed it straight back into the workflow.
 
 - **Paint** (or **P**) turns on the brush. It is the same brush as 😺NKD Paint in Basic Tools.
-- **Mask** paints what you want regenerated. **Reveal** paints the previous render (or the reference) back in, where the new one got worse. **X** switches between them.
+- **Reveal** is the default: it paints the previous render (or the reference) back in, where the new one got worse. Keep the hands from the last pass and the face from this one.
+- **Mask** paints what you want regenerated, for a quick touch-up without leaving the viewer. It is also what you get on the first run, before there is anything to reveal. **X** switches between them.
+- The tools sit in a strip above the picture, so nothing covers what you paint. **Size** and **Hard** change by dragging the number, with **Shift** for fine steps.
 - **B** / **E** brush and eraser, **[** **]** size, **Alt** + right drag size and hardness, **Ctrl+Z** undoes a stroke. The middle button still pans.
 - **To Load** (**L**) sends the picture, with Reveal applied, to the Load Image node and puts the mask on its `MASK` output, ready for an inpaint. Core's mask editor can keep editing it there.
 - **Load & Run** (**Shift+L**) does the same and runs this preview's branch, so the loop is one gesture: paint, run, look, paint again.
