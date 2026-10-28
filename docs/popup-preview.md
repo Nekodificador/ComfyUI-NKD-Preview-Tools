@@ -31,6 +31,20 @@ The node passes `image` through untouched, so it can sit inline in a chain (say 
 - **V** switches between flash, wipe (drag the divider) and difference.
 - **M** shows the mask overlay while held.
 
+## Painting a fix and running it again
+
+Fix a result without leaving the viewer, and feed it straight back into the workflow.
+
+- **Paint** (or **P**) turns on the brush. It is the same brush as 😺NKD Paint in Basic Tools.
+- **Mask** paints what you want regenerated. **Reveal** paints the previous render (or the reference) back in, where the new one got worse. **X** switches between them.
+- **B** / **E** brush and eraser, **[** **]** size, **Alt** + right drag size and hardness, **Ctrl+Z** undoes a stroke. The middle button still pans.
+- **To Load** (**L**) sends the picture, with Reveal applied, to the Load Image node and puts the mask on its `MASK` output, ready for an inpaint. Core's mask editor can keep editing it there.
+- **Load & Run** (**Shift+L**) does the same and runs this preview's branch, so the loop is one gesture: paint, run, look, paint again.
+- Every send is a new file (`input/nkd_loop/loop_<node>_v001.png`, `_v002`…), so earlier passes stay in the Load Image's list.
+- With more than one Load Image in the graph, right-click the one to feed and choose **Set as NKD image target**.
+
+Reveal is inspired by the Erase mode of Image Compare A/B in [ComfyUI-AusBoss](https://github.com/ausboss/ComfyUI-AusBoss).
+
 ## Batches
 
 - The thumbnail strip and the counter appear when a run produces more than one image.
@@ -46,7 +60,7 @@ The node passes `image` through untouched, so it can sit inline in a chain (say 
 
 - **Save** files the image in the active project's folder and switches to **Saved** with the path. `filename_prefix` and `filename` on the node override the project's folder and name.
 - **Copy** puts the image on the clipboard.
-- The **⋯** menu has Download, Fit Window, To Load (sends the image to a Load Image node) and Show in folder.
+- The **⋯** menu has Download, Fit Window and To Load.
 
 ## Shortcuts
 
@@ -57,6 +71,7 @@ Shortcuts only act while the pointer is over the viewer.
 - **0** or **F**: fit to window. **1**: 100%.
 - **Shift** with the arrow keys: pan.
 - **S**: save. **C**: copy.
+- **P**: paint. **L**: to Load Image. **Shift+L**: to Load Image and run.
 - **Shift+Q**: run this node.
 - **Esc**: close.
 

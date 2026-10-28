@@ -6,7 +6,7 @@ import { api } from "../../scripts/api.js";
 // registerExtension calls still run exactly once.
 import {
     config as nkdConfig, ensureStyles, loadConfig, mountDomWidget, projectChip,
-    saveToProject,
+    saveToProject, BrushLayer, adjustBrush, radiusFor, stepSize,
 } from "./nkd_timeline.js";
 
 const NODE_TYPE = "NKDPopupPreviewNode";
@@ -194,12 +194,28 @@ function resolveLoadImageNode() {
     return loads.length === 1 ? loads[0] : null;
 }
 
-// Upload the given image URL into input/ and point the target LoadImage at it.
-async function sendImageToLoadImage(url) {
-    if (!url) {
-        app.extensionManager?.toast?.add?.({ severity: "warn", summary: "No Image", detail: "Run the node first to generate an image.", life: 4000 });
-        return;
-    }
+const LOOP_SUBFOLDER = "nkd_loop";
+
+async function uploadToInput(blob, name, extra = {}) {
+    const fd = new FormData();
+    fd.append("image", blob, name);
+    fd.append("type", "input");
+    fd.append("subfolder", LOOP_SUBFOLDER);
+    for (const [k, v] of Object.entries(extra)) fd.append(k, v);
+    const resp = await api.fetchApi(extra.original_ref ? "/upload/mask" : "/upload/image", { method: "POST", body: fd });
+    if (!resp.ok) throw new Error(`upload ${resp.status}`);
+    return resp.json();   // { name, subfolder, type }
+}
+
+/**
+ * The inpainting loop's return trip: the viewer's picture (Reveal already baked in) goes to
+ * input/nkd_loop/ as a new VERSION for the target Load Image, and the painted Mask becomes
+ * that file's alpha through core's own /upload/mask - the same route the core mask editor
+ * takes, so LoadImage hands it out as its MASK and the mask editor can keep editing it.
+ * One file per send, numbered per Load Image (`loop_<id>_v003.png`): every iteration stays
+ * pickable in the node's list, which is the undo across runs. Resolves true when sent.
+ */
+async function sendToLoadImage({ image, mask }) {
     const node = resolveLoadImageNode();
     if (!node) {
         const count = (app.graph?._nodes ?? []).filter(n => n.comfyClass === "LoadImage").length;
@@ -209,19 +225,21 @@ async function sendImageToLoadImage(url) {
             detail: count === 0 ? "Add a Load Image node to the graph." : "Right-click a Load Image node → Set as NKD image target.",
             life: 6000,
         });
-        return;
+        return false;
     }
     try {
-        const blob = await fetch(url).then(r => r.blob());
-        const ext  = blob.type === "image/jpeg" ? "jpg" : blob.type === "image/webp" ? "webp" : "png";
-        const fd = new FormData();
-        // Unique name per send → the widget value changes, so the thumbnail and
-        // the cache both refresh cleanly (prefix makes them easy to prune).
-        fd.append("image", blob, `nkd_send_${Date.now()}.${ext}`);
-        fd.append("type", "input");
-        const resp = await api.fetchApi("/upload/image", { method: "POST", body: fd });
-        if (!resp.ok) throw new Error(`upload ${resp.status}`);
-        const data = await resp.json(); // { name, subfolder, type }
+        // A new name per send also changes the widget value, so the thumbnail and the
+        // execution cache both refresh. Taken names are renamed by the server, not overwritten.
+        const v = (Number(node.properties?.nkdLoopV) || 0) + 1;
+        const data = await uploadToInput(image, `loop_${node.id}_v${String(v).padStart(3, "0")}.png`);
+        if (mask) {
+            await uploadToInput(mask, data.name, {
+                overwrite: "true",
+                original_ref: JSON.stringify({ filename: data.name, subfolder: data.subfolder, type: "input" }),
+            });
+        }
+        node.properties = node.properties || {};
+        node.properties.nkdLoopV = v;
         const val  = data.subfolder ? `${data.subfolder}/${data.name}` : data.name;
         const w = node.widgets?.find(x => x.name === "image");
         if (w) {
@@ -230,10 +248,13 @@ async function sendImageToLoadImage(url) {
             w.callback?.(val);
         }
         node.setDirtyCanvas?.(true, true);
-        app.extensionManager?.toast?.add?.({ severity: "success", summary: "Sent to Load Image", detail: `→ ${node.title || "Load Image"} #${node.id}`, life: 3000 });
+        app.extensionManager?.toast?.add?.({ severity: "success", summary: mask ? "Sent with mask" : "Sent to Load Image",
+            detail: `→ ${node.title || "Load Image"} #${node.id} · ${data.name}`, life: 3000 });
+        return true;
     } catch (err) {
         console.error("NKD send to LoadImage error:", err);
         app.extensionManager?.toast?.add?.({ severity: "error", summary: "Send Failed", detail: String(err), life: 6000 });
+        return false;
     }
 }
 
@@ -363,8 +384,8 @@ const VIEWER_CSS = `
 @container (max-width:470px){.nkd-pv-vbtn .nkd-pv-lbl{display:none;}.nkd-pv-vbtn{padding:0 9px;}}
 .nkd-pv-vbtn:hover{background:rgba(72,72,72,0.96);color:#fff}
 .nkd-pv-vbtn:active{transform:scale(0.97)}
-.nkd-pv-btn-run{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
-.nkd-pv-btn-run:hover{background:rgba(60,84,60,0.96);color:#fff}
+.nkd-pv-btn-run,.nkd-pv-btn-looprun{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
+.nkd-pv-btn-run:hover,.nkd-pv-btn-looprun:hover{background:rgba(60,84,60,0.96);color:#fff}
 .nkd-pv-info{position:absolute;top:18px;left:48px;display:flex;gap:10px;align-items:center;font:11px monospace;color:rgba(255,255,255,0.3);pointer-events:none;z-index:5;}
 .nkd-pv-zoom{pointer-events:auto;cursor:pointer;font:inherit;color:rgba(255,255,255,0.55);background:rgba(28,28,28,0.7);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:1px 6px}
 .nkd-pv-zoom:hover{color:#fff}
@@ -380,6 +401,22 @@ const VIEWER_CSS = `
 .nkd-pv-empty svg{width:64px;height:64px;}
 .nkd-pv-empty p{font:14px/1.4 monospace;margin:0;letter-spacing:0.02em;}
 .nkd-pv-empty.hidden{display:none;}
+.nkd-pv-viewer-root[contenteditable]{caret-color:transparent;outline:none}
+.nkd-pv-paint{position:absolute;top:0;left:0;transform-origin:0 0;pointer-events:none;z-index:3;}
+.nkd-pv-viewer-root.holding-ref .nkd-pv-paint{display:none}
+.nkd-pv-viewer-root.painting .nkd-pv-vwrap{cursor:none}
+.nkd-pv-brush{position:absolute;z-index:7;display:none;pointer-events:none;border-radius:50%;border:1px solid rgba(255,255,255,0.9);box-shadow:0 0 0 1px rgba(0,0,0,0.7);transform:translate(-50%,-50%);}
+.nkd-pv-brush.on{display:block}
+.nkd-pv-paint-row{display:none;flex-basis:100%;order:-1;flex-wrap:wrap;gap:8px;align-items:center;}
+.nkd-pv-viewer-root.painting .nkd-pv-paint-row{display:flex}
+.nkd-pv-seg{display:inline-flex}
+.nkd-pv-seg .nkd-pv-vbtn{border-radius:0}
+.nkd-pv-seg .nkd-pv-vbtn:first-child{border-radius:6px 0 0 6px}
+.nkd-pv-seg .nkd-pv-vbtn:last-child{border-radius:0 6px 6px 0;margin-left:-1px}
+.nkd-pv-vbtn.on,.nkd-pv-btn-paint.active{background:rgba(30,60,90,0.95);border-color:rgba(74,180,255,0.6);color:#cfe8ff}
+.nkd-pv-vbtn:disabled{opacity:0.35;cursor:default}
+.nkd-pv-range{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border-radius:6px;background:rgba(28,28,28,0.92);border:1px solid rgba(255,255,255,0.12);color:#ccc;font-size:12px;}
+.nkd-pv-range input{width:80px;accent-color:#4ab4ff;cursor:pointer}
 `;
 
 // Inline SVG icons (consistent stroke, currentColor) — replaces emoji/box glyphs
@@ -398,6 +435,10 @@ const ICON = {
     more:  '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>',
     cmp:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>',
     folder:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+    brush: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18.4 2.6a2 2 0 0 1 2.9 2.9L11 15.8l-2.9-2.9z"/><path d="M8.1 12.9c-2.2 0-4 1.8-4 4 0 1.3-.7 2.3-2.1 3 4.4.6 8-1 8.9-4.1"/></svg>',
+    eraser:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 21h10M5.6 15.6l8.5-8.5a2 2 0 0 1 2.8 0l2 2a2 2 0 0 1 0 2.8L11 19.8a2 2 0 0 1-1.4.6H8.4a2 2 0 0 1-1.4-.6l-1.4-1.4a2 2 0 0 1 0-2.8z"/><path d="M9 12l5 5"/></svg>',
+    undo:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg>',
+    trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>',
 };
 
 function createViewerDOM(opts = {}) {
@@ -432,6 +473,7 @@ function createViewerDOM(opts = {}) {
             <img class="nkd-pv-vimg" alt="" draggable="false">
             <div class="nkd-pv-refclip"><img class="nkd-pv-refimg" alt="" draggable="false"></div>
             <div class="nkd-pv-mask-ov"></div>
+            <canvas class="nkd-pv-paint"></canvas>
             <div class="nkd-pv-empty">
                 <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <rect x="8" y="12" width="48" height="40" rx="4" stroke="currentColor" stroke-width="2.5"/>
@@ -446,6 +488,7 @@ function createViewerDOM(opts = {}) {
         <div class="nkd-pv-live-badge"></div>
         <div class="nkd-pv-count"></div>
         <div class="nkd-pv-wipe"></div>
+        <div class="nkd-pv-brush"></div>
         <div class="nkd-pv-strip"></div>
         <div class="nkd-pv-help" title="Gestures & shortcuts">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.1 9.2a3 3 0 0 1 5.8 1c0 2-3 2.3-3 4"/><path d="M12 17h.01"/></svg>
@@ -459,7 +502,13 @@ function createViewerDOM(opts = {}) {
                 <div><span class="k">M</span> mask overlay (peek)</div>
                 <div><span class="k">V</span> compare: flash / wipe / diff</div>
                 <div><span class="k">S</span> save &middot; <span class="k">C</span> copy image</div>
-                <div><span class="k">To Load</span> send to Load Image node</div>
+                <hr>
+                <div><span class="k">P</span> paint: mask / reveal</div>
+                <div><span class="k">B / E</span> brush / erase &middot; <span class="k">X</span> mask &harr; reveal</div>
+                <div><span class="k">[ ]</span> size &middot; <span class="k">Alt+right drag</span> size / hardness</div>
+                <div><span class="k">Ctrl+Z</span> undo stroke &middot; <span class="k">Middle drag</span> pan</div>
+                <div><span class="k">L</span> to Load Image &middot; <span class="k">Shift+L</span> load &amp; run</div>
+                <hr>
                 <div><span class="k">&larr; / &rarr;</span> previous / next in batch</div>
                 <div><span class="k">Shift+arrows</span> pan &middot; <span class="k">pinch</span> zoom</div>
                 <div><span class="k">0 / F</span> fit &middot; <span class="k">1</span> 1:1 &middot; <span class="k">Esc</span> close</div>
@@ -468,7 +517,24 @@ function createViewerDOM(opts = {}) {
         <button class="nkd-pv-btn-close nkd-pv-vbtn" title="Close">${ICON.close}<span class="nkd-pv-lbl">Close</span></button>
         <div class="nkd-pv-info"><span class="nkd-pv-dims"></span><button class="nkd-pv-zoom" title="Zoom - click for 100%"></button><span class="nkd-pv-px"></span></div>
         <div class="nkd-pv-bar">
+            <div class="nkd-pv-paint-row">
+                <span class="nkd-pv-seg">
+                    <button class="nkd-pv-btn-lmask nkd-pv-vbtn" title="Paint what to regenerate - sent as the Load Image's mask (X swaps)">${ICON.mask}<span class="nkd-pv-lbl">Mask</span></button>
+                    <button class="nkd-pv-btn-lreveal nkd-pv-vbtn" title="Paint where the reference / previous render comes back (X swaps)">${ICON.swap}<span class="nkd-pv-lbl">Reveal</span></button>
+                </span>
+                <span class="nkd-pv-seg">
+                    <button class="nkd-pv-btn-tbrush nkd-pv-vbtn" title="Brush (B)">${ICON.brush}</button>
+                    <button class="nkd-pv-btn-terase nkd-pv-vbtn" title="Eraser (E)">${ICON.eraser}</button>
+                </span>
+                <label class="nkd-pv-range" title="Brush size in image pixels ([ ])">Size<input type="range" class="nkd-pv-in-size" min="1" max="400" step="1"></label>
+                <label class="nkd-pv-range" title="Hardness (Alt + right drag up/down)">Hard<input type="range" class="nkd-pv-in-hard" min="0" max="1" step="0.01"></label>
+                <button class="nkd-pv-btn-pundo nkd-pv-vbtn" title="Undo stroke (Ctrl+Z)">${ICON.undo}</button>
+                <button class="nkd-pv-btn-pclear nkd-pv-vbtn" title="Clear the active layer">${ICON.trash}</button>
+                <button class="nkd-pv-btn-loop nkd-pv-vbtn" title="Send picture + mask to the target Load Image (L)" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-pv-lbl">To Load</span></button>
+                <button class="nkd-pv-btn-looprun nkd-pv-vbtn" title="Send to the Load Image and run this preview's branch (Shift+L)" style="display:${onSendToLoad && onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-pv-lbl">Load &amp; Run</span></button>
+            </div>
             <div class="nkd-pv-bar-group nkd-pv-bar-left">
+                <button class="nkd-pv-btn-paint nkd-pv-vbtn" title="Paint a mask to regenerate, or reveal the reference (P)">${ICON.brush}<span class="nkd-pv-lbl">Paint</span></button>
                 <button class="nkd-pv-btn-hold nkd-pv-vbtn" title="Hold to show reference image (Space)" style="display:${refUrl ? '' : 'none'}">${ICON.swap}<span class="nkd-pv-lbl">Hold for Ref</span></button>
                 <button class="nkd-pv-btn-cmp nkd-pv-vbtn" title="Compare mode (V): Flash / Wipe / Diff" style="display:none">${ICON.cmp}<span class="nkd-pv-lbl">Flash</span></button>
                 <span class="nkd-pv-mask-ctl" style="display:${maskUrl ? '' : 'none'}">
@@ -498,6 +564,7 @@ function createViewerDOM(opts = {}) {
     const dims    = root.querySelector(".nkd-pv-dims");
     const btnHold = root.querySelector(".nkd-pv-btn-hold");
     const maskOv  = root.querySelector(".nkd-pv-mask-ov");
+    const paintCv = root.querySelector(".nkd-pv-paint");
     const zoomBtn = root.querySelector(".nkd-pv-zoom");
     const pxEl    = root.querySelector(".nkd-pv-px");
     let pxCtx = null, pxSrc = "", pxLast = 0;   // cached 2D copy of the image for the pixel readout
@@ -514,6 +581,12 @@ function createViewerDOM(opts = {}) {
         img.style.imageRendering = rendering;
         if (curRef) applyRefTransform(rendering);
         if (curMask) applyMaskTransform();
+        // The paint layers are stretched over the image box, whatever their own resolution.
+        if (img.naturalWidth) {
+            paintCv.style.width  = img.naturalWidth + "px";
+            paintCv.style.height = img.naturalHeight + "px";
+            paintCv.style.transform = img.style.transform;
+        }
         zoomBtn.textContent = Math.round(scale * 100) + "%";
     }
 
@@ -527,26 +600,28 @@ function createViewerDOM(opts = {}) {
         maskOv.style.transform = img.style.transform;
     }
 
-    function applyRefTransform(rendering) {
+    /** Where the reference sits over the image, in image px: contained, centred. Shared by
+     *  the on-screen layer and the Reveal bake, so what is sent is what was seen. */
+    function refBox() {
         const cw = img.naturalWidth, ch = img.naturalHeight;
         const rw = refImg.naturalWidth, rh = refImg.naturalHeight;
-        if (!cw || !ch || !rw || !rh) {
+        if (!cw || !ch || !rw || !rh) return null;
+        const cAR = cw / ch, rAR = rw / rh;
+        if (Math.abs(cAR - rAR) < 1e-3) return { x: 0, y: 0, w: cw, h: ch };
+        if (rAR > cAR) return { x: 0, y: (ch - cw / rAR) / 2, w: cw, h: cw / rAR };
+        return { x: (cw - ch * rAR) / 2, y: 0, w: ch * rAR, h: ch };
+    }
+
+    function applyRefTransform(rendering) {
+        const b = refBox();
+        if (!b) {
             refImg.style.transform = img.style.transform;
             refImg.style.imageRendering = rendering;
             return;
         }
-        const cAR = cw / ch, rAR = rw / rh;
-        let dispW, dispH, offX = 0, offY = 0;
-        if (Math.abs(cAR - rAR) < 1e-3) {
-            dispW = cw; dispH = ch;
-        } else if (rAR > cAR) {
-            dispW = cw; dispH = cw / rAR; offY = (ch - dispH) / 2;
-        } else {
-            dispH = ch; dispW = ch * rAR; offX = (cw - dispW) / 2;
-        }
-        refImg.style.width  = dispW + "px";
-        refImg.style.height = dispH + "px";
-        refImg.style.transform = `translate(${tx + offX * scale}px,${ty + offY * scale}px) scale(${scale})`;
+        refImg.style.width  = b.w + "px";
+        refImg.style.height = b.h + "px";
+        refImg.style.transform = `translate(${tx + b.x * scale}px,${ty + b.y * scale}px) scale(${scale})`;
         refImg.style.imageRendering = rendering;
     }
 
@@ -605,13 +680,14 @@ function createViewerDOM(opts = {}) {
             dims.textContent = `${nw} × ${nh} px`;
             apply();
         } else fit();
+        fitLayers();
         if (fitWindowOnLoad) { fitWindowOnLoad = false; fitWindow(); }
         img.style.opacity = "1";
         empty.classList.add("hidden");
     });
 
     // ── Reference compare (Hold) — always wired, gated on curRef at runtime ──
-    refImg.addEventListener("load", apply);
+    refImg.addEventListener("load", () => { apply(); schedulePaint(); });
     let holding = false;
     // Latch: a quick click on the button pins the reference (trackpads / touch cannot hold);
     // click again to release. Holding still works as before.
@@ -722,10 +798,251 @@ function createViewerDOM(opts = {}) {
         else { maskOn = peeking = false; root.classList.remove("holding-mask", "mask-on"); btnMask.classList.remove("active"); }
         syncCmp();
         apply();
+        schedulePaint();   // Reveal draws the reference, and needs one to exist
     };
     if (curRef) refImg.src = curRef;
     syncCmp();
     if (curMask) { maskOv.style.webkitMaskImage = `url("${curMask}")`; maskOv.style.maskImage = `url("${curMask}")`; }
+
+    // ── Paint: the inpainting loop, with the NKD Paint brush (brush.ts) ─────────────────────
+    // Two layers stretched over the image: MASK (what to regenerate; sent as the Load Image's
+    // alpha, which core LoadImage turns into its MASK output) and REVEAL (where the reference /
+    // previous render comes back; baked into the picture sent). The layers keep image-relative
+    // geometry, so a small live preview frame does not wipe them - only a change of shape does.
+    const PAINT_MAX_SIDE = 2048;   // same cap as NKD Paint; the mask is scaled up on send
+    const num = (k, d) => { const v = parseFloat(localStorage.getItem(k)); return Number.isFinite(v) ? v : d; };
+    const P = { size: num("nkd_pv_brush_size", 60), hardness: num("nkd_pv_brush_hard", 0.6),
+                tool: "brush", layer: "mask" };
+    const brushParams = () => ({ size: P.size, opacity: 1, hardness: P.hardness, tool: P.tool, color: "#ffffff" });
+    const layers = { mask: new BrushLayer(1, 1, brushParams, () => schedulePaint()),
+                     reveal: new BrushLayer(1, 1, brushParams, () => schedulePaint()) };
+    const active = () => layers[P.layer];
+    // One undo order across both layers: Ctrl+Z takes back the last stroke, wherever it went.
+    const undoOrder = [], redoOrder = [];
+    let paintOn = false, paintAR = 0, adjust = null, tintCv = null, praf = 0;
+    const pctx = paintCv.getContext("2d");
+    const ring = root.querySelector(".nkd-pv-brush");
+    const btnPaint = root.querySelector(".nkd-pv-btn-paint");
+    const sizeIn = root.querySelector(".nkd-pv-in-size"), hardIn = root.querySelector(".nkd-pv-in-hard");
+    const pb = (c) => root.querySelector(c);
+
+    function fitLayers() {
+        const nw = img.naturalWidth, nh = img.naturalHeight;
+        if (!nw || !nh) return;
+        const k = Math.min(1, PAINT_MAX_SIDE / Math.max(nw, nh));
+        const w = Math.max(1, Math.round(nw * k)), h = Math.max(1, Math.round(nh * k));
+        const sameShape = paintAR && Math.abs(nw / nh - paintAR) < 0.01;
+        for (const L of Object.values(layers)) {
+            if (!sameShape) L.resize(w, h, false);
+            else if (w > L.width) L.resize(w, h, true);   // a small live frame came first
+        }
+        if (!sameShape) { undoOrder.length = 0; redoOrder.length = 0; }
+        paintAR = nw / nh;
+        paintCv.width = layers.mask.width; paintCv.height = layers.mask.height;
+        apply(); drawPaint(); syncPaint();
+    }
+
+    function schedulePaint() {
+        if (praf) return;
+        const w = root.ownerDocument.defaultView || window;   // a hidden main tab throttles its own rAF
+        praf = w.requestAnimationFrame(() => { praf = 0; drawPaint(); syncPaint(); });
+    }
+
+    function drawPaint() {
+        const W = paintCv.width, H = paintCv.height;
+        pctx.globalCompositeOperation = "source-over"; pctx.globalAlpha = 1;
+        pctx.clearRect(0, 0, W, H);
+        const rv = layers.reveal, mk = layers.mask, b = curRef ? refBox() : null;
+        if ((rv.hasStrokes || rv.stroking) && b) {
+            const k = W / img.naturalWidth;
+            pctx.drawImage(refImg, b.x * k, b.y * k, b.w * k, b.h * k);
+            pctx.globalCompositeOperation = "destination-in";
+            pctx.drawImage(rv.current(), 0, 0);
+            pctx.globalCompositeOperation = "source-over";
+        }
+        if (mk.hasStrokes || mk.stroking) {
+            if (!tintCv || tintCv.width !== W || tintCv.height !== H) {
+                tintCv = root.ownerDocument.createElement("canvas"); tintCv.width = W; tintCv.height = H;
+            }
+            const t = tintCv.getContext("2d");
+            t.globalCompositeOperation = "source-over"; t.clearRect(0, 0, W, H);
+            t.drawImage(mk.current(), 0, 0);
+            t.globalCompositeOperation = "source-in";
+            t.fillStyle = colorIn.value; t.fillRect(0, 0, W, H);   // the mask overlay's colour
+            pctx.globalAlpha = 0.5; pctx.drawImage(tintCv, 0, 0); pctx.globalAlpha = 1;
+        }
+    }
+
+    function syncPaint() {
+        root.classList.toggle("painting", paintOn);
+        btnPaint.classList.toggle("active", paintOn);
+        if (P.layer === "reveal" && !curRef) P.layer = "mask";   // nothing to reveal any more
+        pb(".nkd-pv-btn-lmask").classList.toggle("on", P.layer === "mask");
+        pb(".nkd-pv-btn-lreveal").classList.toggle("on", P.layer === "reveal");
+        pb(".nkd-pv-btn-lreveal").disabled = !curRef;
+        pb(".nkd-pv-btn-tbrush").classList.toggle("on", P.tool === "brush");
+        pb(".nkd-pv-btn-terase").classList.toggle("on", P.tool === "eraser");
+        pb(".nkd-pv-btn-pundo").disabled = !undoOrder.length;
+        pb(".nkd-pv-btn-pclear").disabled = !active().hasStrokes;
+        sizeIn.value = String(P.size); hardIn.value = String(P.hardness);
+        if (!paintOn) ring.classList.remove("on");
+    }
+
+    const savePrefs = () => {
+        try { localStorage.setItem("nkd_pv_brush_size", String(P.size)); localStorage.setItem("nkd_pv_brush_hard", String(P.hardness)); } catch { /* ignore */ }
+    };
+    const setPaint = (on) => { paintOn = on; syncPaint(); };
+    const undoPaint = () => { const n = undoOrder.pop(); if (n) { layers[n].undo(); redoOrder.push(n); } syncPaint(); };
+    const redoPaint = () => { const n = redoOrder.pop(); if (n) { layers[n].redo(); undoOrder.push(n); } syncPaint(); };
+    const swapLayer = () => { if (curRef) { P.layer = P.layer === "mask" ? "reveal" : "mask"; syncPaint(); } };
+
+    btnPaint.addEventListener("click", () => setPaint(!paintOn));
+    pb(".nkd-pv-btn-lmask").addEventListener("click", () => { P.layer = "mask"; syncPaint(); });
+    pb(".nkd-pv-btn-lreveal").addEventListener("click", () => { P.layer = "reveal"; syncPaint(); });
+    pb(".nkd-pv-btn-tbrush").addEventListener("click", () => { P.tool = "brush"; syncPaint(); });
+    pb(".nkd-pv-btn-terase").addEventListener("click", () => { P.tool = "eraser"; syncPaint(); });
+    pb(".nkd-pv-btn-pundo").addEventListener("click", undoPaint);
+    pb(".nkd-pv-btn-pclear").addEventListener("click", () => {
+        if (active().clear()) { undoOrder.push(P.layer); redoOrder.length = 0; schedulePaint(); }
+    });
+    // Sliders hand the keyboard back to the viewer, or B/E/[ ] would go dead after a drag.
+    sizeIn.addEventListener("input", () => { P.size = Number(sizeIn.value); savePrefs(); });
+    hardIn.addEventListener("input", () => { P.hardness = Number(hardIn.value); savePrefs(); });
+    for (const el of [sizeIn, hardIn]) el.addEventListener("change", () => root.focus({ preventScroll: true }));
+
+    /** Image px under the pointer -> active layer px. */
+    const toLayer = (e) => {
+        const rc = wrap.getBoundingClientRect(), k = active().width / img.naturalWidth;
+        return [((e.clientX - rc.left) - tx) / scale * k, ((e.clientY - rc.top) - ty) / scale * k];
+    };
+    const layerRadius = (e) => radiusFor(P.size, e) * active().width / img.naturalWidth;
+    function moveRing(e) {
+        if (!paintOn || !img.naturalWidth) return;
+        const rc = root.getBoundingClientRect(), d = Math.max(3, P.size * scale);
+        ring.style.left = (e.clientX - rc.left) + "px"; ring.style.top = (e.clientY - rc.top) + "px";
+        ring.style.width = ring.style.height = d + "px";
+        ring.style.borderStyle = P.tool === "eraser" ? "dashed" : "solid";
+        ring.classList.add("on");
+    }
+    /** pointerdown in paint mode. True when the brush took the event (else it pans). */
+    function paintDown(e) {
+        if (!img.naturalWidth) return false;
+        if (e.button === 2 && e.altKey) {
+            adjust = { x: e.clientX, y: e.clientY, size0: P.size, hard0: P.hardness };
+        } else if (e.button === 0 && !e.altKey) {
+            if (P.layer === "reveal" && !curRef) return true;
+            const [x, y] = toLayer(e);
+            active().begin(x, y, layerRadius(e));
+            schedulePaint();
+        } else return false;
+        e.preventDefault();
+        wrap.setPointerCapture(e.pointerId);
+        return true;
+    }
+    function paintMove(e) {
+        moveRing(e);
+        if (adjust) {
+            const a = adjustBrush(adjust.size0, adjust.hard0, e.clientX - adjust.x, e.clientY - adjust.y, scale);
+            P.size = a.size; P.hardness = a.hardness; syncPaint();
+        } else if (active().stroking) {
+            const [x, y] = toLayer(e);
+            active().to(x, y, layerRadius(e));
+            schedulePaint();
+        }
+    }
+    function paintUp() {
+        if (adjust) { adjust = null; savePrefs(); }
+        const L = active();
+        if (L.stroking) { L.end(); undoOrder.push(P.layer); redoOrder.length = 0; }
+    }
+    wrap.addEventListener("contextmenu", e => { if (paintOn) e.preventDefault(); });
+    wrap.addEventListener("pointerleave", () => ring.classList.remove("on"));
+
+    const blobOf = (cv) => new Promise((res) => cv.toBlob(res, "image/png"));
+    /** What you see, at full resolution: the picture with Reveal baked in, and the Mask as a
+     *  separate PNG whose alpha is 0 where painted (the convention core LoadImage reads). */
+    // A send is seconds on a big picture (encode + upload): say so, and refuse a second one.
+    let sending = false;
+    const loopBtns = [pb(".nkd-pv-btn-loop"), pb(".nkd-pv-btn-looprun")];
+    const loopLbls = loopBtns.map(b => b.querySelector(".nkd-pv-lbl").textContent);
+    const setSending = (on) => {
+        sending = on;
+        loopBtns.forEach((b, i) => { b.disabled = on; b.querySelector(".nkd-pv-lbl").textContent = on ? "Sending…" : loopLbls[i]; });
+    };
+    async function sendLoop(run) {
+        if (!onSendToLoad || !img.naturalWidth || sending) return;
+        setSending(true);
+        let sent = false;
+        try { sent = await buildAndSend(run); } finally { setSending(false); }
+        // The paint went with the picture: the Load Image holds it now (and core's mask
+        // editor can keep editing it there). The next result starts clean.
+        if (sent) {
+            for (const L of Object.values(layers)) L.resize(1, 1, false);
+            paintAR = 0; undoOrder.length = 0; redoOrder.length = 0;
+            fitLayers();
+        }
+    }
+    async function buildAndSend(run) {
+        const nw = img.naturalWidth, nh = img.naturalHeight, doc = root.ownerDocument;
+        const canvas = () => { const c = doc.createElement("canvas"); c.width = nw; c.height = nh; return c; };
+        const rv = layers.reveal, mk = layers.mask, b = curRef ? refBox() : null;
+        let image;
+        if (rv.hasStrokes && b) {
+            const out = canvas(), oc = out.getContext("2d");
+            oc.drawImage(img, 0, 0);
+            const t = canvas(), tc = t.getContext("2d");
+            tc.drawImage(refImg, b.x, b.y, b.w, b.h);
+            tc.globalCompositeOperation = "destination-in";
+            tc.drawImage(rv.layer, 0, 0, nw, nh);
+            oc.drawImage(t, 0, 0);
+            image = await blobOf(out);
+        } else {
+            // Nothing baked in: the render's own bytes, no re-encode (the slow half of a send).
+            image = await fetch(img.src).then(r => r.blob());
+        }
+        let mask = null;
+        if (mk.hasStrokes) {
+            const m = canvas(), mc = m.getContext("2d");
+            mc.fillStyle = "#000"; mc.fillRect(0, 0, nw, nh);
+            mc.globalCompositeOperation = "destination-out";
+            mc.drawImage(mk.layer, 0, 0, nw, nh);
+            mask = await blobOf(m);
+        }
+        if (!image) return false;
+        return onSendToLoad({ image, mask, run });
+    }
+    pb(".nkd-pv-btn-loop").addEventListener("click", () => sendLoop(false));
+    pb(".nkd-pv-btn-looprun").addEventListener("click", () => sendLoop(true));
+
+    // ComfyUI's graph undo listens on window in CAPTURE (it sees Ctrl+Z before this root) and
+    // only stands aside while focus is in an editable element. So while Ctrl is held in paint
+    // mode the root IS editable: Ctrl+Z undoes the stroke, not the graph (which also tore this
+    // viewer down). beforeinput is cancelled, so nothing can ever be typed into it.
+    const editable = (on) => on ? root.setAttribute("contenteditable", "true") : root.removeAttribute("contenteditable");
+    root.addEventListener("keydown", e => { if (paintOn && (e.key === "Control" || e.key === "Meta")) editable(true); });
+    root.addEventListener("keyup", e => { if (e.key === "Control" || e.key === "Meta") editable(false); });
+    root.addEventListener("blur", () => editable(false));
+    root.addEventListener("beforeinput", e => e.preventDefault());
+
+    root.addEventListener("keydown", e => {
+        if (typing(e)) return;
+        const k = e.key, mod = e.ctrlKey || e.metaKey;
+        if (!mod && !e.altKey && (k === "p" || k === "P")) { e.preventDefault(); setPaint(!paintOn); return; }
+        if (!mod && !e.altKey && (k === "l" || k === "L")) { e.preventDefault(); sendLoop(e.shiftKey); return; }
+        if (!paintOn) return;
+        if (mod && (k === "z" || k === "Z")) { e.shiftKey ? redoPaint() : undoPaint(); }
+        else if (mod && (k === "y" || k === "Y")) redoPaint();
+        else if (mod || e.altKey) return;
+        else if (k === "b" || k === "B") P.tool = "brush";
+        else if (k === "e" || k === "E") P.tool = "eraser";
+        else if (k === "x" || k === "X") swapLayer();
+        else if (k === "[") { P.size = stepSize(P.size, -1); savePrefs(); }
+        else if (k === "]") { P.size = stepSize(P.size, 1); savePrefs(); }
+        else return;
+        e.preventDefault(); e.stopPropagation();
+        syncPaint();
+    });
+    syncPaint();
 
     // Fit Window button — resizes the panel (floating mode) or the OS window (popup mode)
     function fitWindow() {
@@ -752,7 +1069,7 @@ function createViewerDOM(opts = {}) {
     if (onQueue) root.querySelector(".nkd-pv-btn-run").addEventListener("click", () => onQueue());
 
     root.querySelector(".nkd-pv-btn-copy").addEventListener("click", () => copyImageToClipboard(img.src, root.ownerDocument.defaultView || window));
-    if (onSendToLoad) root.querySelector(".nkd-pv-btn-load").addEventListener("click", () => onSendToLoad());
+    if (onSendToLoad) root.querySelector(".nkd-pv-btn-load").addEventListener("click", () => sendLoop(false));
 
     root.querySelector(".nkd-pv-btn-fit").addEventListener("click", fit);
     root.querySelector(".nkd-pv-btn-100").addEventListener("click", () => {
@@ -833,6 +1150,7 @@ function createViewerDOM(opts = {}) {
     // Pointer capture instead of document listeners: nothing to remove, and it keeps working
     // when the viewer is moved into another window.
     wrap.addEventListener("pointerdown", e => {
+        if (paintOn && paintDown(e)) return;
         if (e.button !== 0 && e.button !== 1) return;
         e.preventDefault();
         panning = true; sx = e.clientX; sy = e.clientY; stx = tx; sty = ty;
@@ -864,6 +1182,7 @@ function createViewerDOM(opts = {}) {
             const rc = wrap.getBoundingClientRect();
             readPixel(e.clientX - rc.left, e.clientY - rc.top);
         }
+        if (paintOn && !panning) { paintMove(e); return; }
         if (!panning) return;
         tx = stx + (e.clientX - sx); ty = sty + (e.clientY - sy); userView = true; apply();
     });
@@ -872,10 +1191,11 @@ function createViewerDOM(opts = {}) {
         const rc = wrap.getBoundingClientRect(), cx = rc.width / 2, cy = rc.height / 2, r = 1 / scale;
         tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = 1; userView = true; apply();
     });
-    const endPan = () => { panning = false; root.classList.remove("panning"); };
+    const endPan = () => { paintUp(); panning = false; root.classList.remove("panning"); };
     wrap.addEventListener("pointerup", endPan);
     wrap.addEventListener("pointercancel", endPan);
     wrap.addEventListener("dblclick", e => {
+        if (paintOn) return;   // two dabs, not a zoom
         const rect = wrap.getBoundingClientRect();
         if (Math.abs(scale - 1.0) < 0.001) fit();
         else {
@@ -988,8 +1308,13 @@ class PopupWin {
         }
     }
 
-    /** Send this window's current image to the target Load Image node. */
-    _sendOwnToLoad() { sendImageToLoadImage(this.currentUrl); }
+    /** The viewer's picture (+ painted mask) to the target Load Image; `run` closes the loop
+     *  by queueing this preview's branch, which now starts from that Load Image. */
+    async _sendOwnToLoad({ image, mask, run }) {
+        const sent = await sendToLoadImage({ image, mask });
+        if (sent && run) this._queueOwnNode();
+        return sent;
+    }
 
     /** Save into the active project. Bridged into the separate realms the same way the
      *  Run button is: those documents cannot reach `app`/`api` on their own. */
@@ -1287,7 +1612,7 @@ class PopupWin {
             imgMeta: this.currentMeta,
             apiBase: location.origin,
             onQueue: () => this._queueOwnNode(),
-            onSendToLoad: () => this._sendOwnToLoad(),
+            onSendToLoad: (p) => this._sendOwnToLoad(p),
             onSave: () => this._saveOwn(),
             fitWindowOnLoad: this._fitOnOpen,
         });
@@ -1475,7 +1800,7 @@ class PopupWin {
             imgMeta: this.currentMeta,
             apiBase: location.origin,
             onQueue: () => this._queueOwnNode(),
-            onSendToLoad: () => this._sendOwnToLoad(),
+            onSendToLoad: (p) => this._sendOwnToLoad(p),
             onSave: () => this._saveOwn(),
             fitWindowOnLoad: this._fitOnOpen,
         });

@@ -5941,6 +5941,184 @@ function registerVideoViewer() {
     }
   });
 }
+const SIZE_MAX = 400;
+const coreRadius = (r, hardness) => r * (0.5 + 0.5 * hardness);
+const fringeBlur = (r, hardness) => r * (1 - hardness) * 0.3;
+function radiusFor(size, e) {
+  if (e.pointerType === "pen" && e.pressure > 0) size *= 0.25 + 0.75 * e.pressure;
+  return size / 2;
+}
+function stepSize(size, dir) {
+  return dir < 0 ? Math.max(1, Math.round(size * 0.9) || 1) : Math.min(SIZE_MAX, Math.max(size + 1, Math.round(size * 1.1)));
+}
+function adjustBrush(size0, hard0, dx, dy, scale2) {
+  return {
+    size: Math.max(1, Math.min(SIZE_MAX, Math.round(size0 + dx / scale2))),
+    hardness: Math.max(0, Math.min(1, hard0 + dy / 150))
+  };
+}
+function hexToRgb(hex) {
+  const h = hex.replace("#", "");
+  if (h.length !== 6) return [255, 255, 255];
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+function mkCanvas(w, h, doc = document) {
+  const c = doc.createElement("canvas");
+  c.width = Math.max(1, w);
+  c.height = Math.max(1, h);
+  return c;
+}
+class BrushLayer {
+  // brush radius of the stroke in progress, for the blur at composite time
+  /** `onChange` runs after a committed stroke, undo or redo: the owner saves and redraws. */
+  constructor(w, h, params, onChange = () => {
+  }, doc = document, undoBudget = 256 * 1024 * 1024) {
+    __publicField(this, "layer");
+    __publicField(this, "stroke");
+    __publicField(this, "comp");
+    __publicField(this, "hasStrokes", false);
+    __publicField(this, "stroking", false);
+    __publicField(this, "undoStack", []);
+    __publicField(this, "redoStack", []);
+    __publicField(this, "last", null);
+    __publicField(this, "strokeR", 0);
+    this.params = params;
+    this.onChange = onChange;
+    this.doc = doc;
+    this.undoBudget = undoBudget;
+    this.layer = mkCanvas(w, h, doc);
+    this.stroke = mkCanvas(w, h, doc);
+    this.comp = mkCanvas(w, h, doc);
+  }
+  get width() {
+    return this.layer.width;
+  }
+  get height() {
+    return this.layer.height;
+  }
+  get canUndo() {
+    return this.undoStack.length > 0;
+  }
+  get canRedo() {
+    return this.redoStack.length > 0;
+  }
+  /** New size. The strokes are rescaled when `keep`; undo history is dropped either way
+   *  (its snapshots are the old size). */
+  resize(w, h, keep = true) {
+    if (this.width === w && this.height === h) return;
+    const old = this.layer;
+    this.layer = mkCanvas(w, h, this.doc);
+    if (keep && this.hasStrokes) this.layer.getContext("2d").drawImage(old, 0, 0, w, h);
+    else this.hasStrokes = false;
+    this.stroke = mkCanvas(w, h, this.doc);
+    this.comp = mkCanvas(w, h, this.doc);
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
+  }
+  /** Replace the layer with a picture, scaled to the layer. */
+  load(img) {
+    const lctx = this.layer.getContext("2d");
+    lctx.clearRect(0, 0, this.width, this.height);
+    lctx.drawImage(img, 0, 0, this.width, this.height);
+    this.hasStrokes = true;
+  }
+  begin(x, y, r) {
+    this.stroking = true;
+    this.last = null;
+    this.strokeR = 0;
+    this.to(x, y, r);
+  }
+  to(x, y, r) {
+    if (!this.stroking) return;
+    const p = this.params();
+    const sctx = this.stroke.getContext("2d");
+    const [cr, cg, cb] = hexToRgb(p.tool === "eraser" ? "#000000" : p.color);
+    sctx.strokeStyle = sctx.fillStyle = `rgb(${cr},${cg},${cb})`;
+    sctx.lineCap = sctx.lineJoin = "round";
+    const rc = Math.max(0.5, coreRadius(r, p.hardness));
+    this.strokeR = Math.max(this.strokeR, r);
+    if (!this.last) {
+      sctx.beginPath();
+      sctx.arc(x, y, rc, 0, Math.PI * 2);
+      sctx.fill();
+    } else {
+      sctx.lineWidth = rc * 2;
+      sctx.beginPath();
+      sctx.moveTo(this.last[0], this.last[1]);
+      sctx.lineTo(x, y);
+      sctx.stroke();
+    }
+    this.last = [x, y];
+  }
+  /** Bake the stroke in progress into the layer. */
+  end() {
+    if (!this.stroking) return;
+    this.stroking = false;
+    this.last = null;
+    this.snapshot();
+    this.composite(this.comp.getContext("2d"), true);
+    const lctx = this.layer.getContext("2d");
+    lctx.clearRect(0, 0, this.width, this.height);
+    lctx.drawImage(this.comp, 0, 0);
+    this.stroke.getContext("2d").clearRect(0, 0, this.width, this.height);
+    this.hasStrokes = true;
+    this.onChange();
+  }
+  /** layer ⊕ current stroke, with the brush opacity - the same op end() bakes in. */
+  composite(target, withStroke) {
+    target.globalCompositeOperation = "source-over";
+    target.globalAlpha = 1;
+    target.clearRect(0, 0, this.width, this.height);
+    target.drawImage(this.layer, 0, 0);
+    if (!withStroke) return;
+    const p = this.params();
+    target.globalAlpha = p.opacity;
+    target.globalCompositeOperation = p.tool === "eraser" ? "destination-out" : "source-over";
+    const blur = fringeBlur(this.strokeR, p.hardness);
+    target.filter = blur >= 0.5 ? `blur(${blur.toFixed(1)}px)` : "none";
+    target.drawImage(this.stroke, 0, 0);
+    target.filter = "none";
+    target.globalCompositeOperation = "source-over";
+    target.globalAlpha = 1;
+  }
+  /** What to draw on screen right now: the live composite mid-stroke, else the layer. */
+  current() {
+    if (!this.stroking) return this.layer;
+    this.composite(this.comp.getContext("2d"), true);
+    return this.comp;
+  }
+  /** Wipe the layer (undoable). False when there was nothing to wipe. */
+  clear() {
+    if (!this.hasStrokes) return false;
+    this.snapshot();
+    this.layer.getContext("2d").clearRect(0, 0, this.width, this.height);
+    this.hasStrokes = false;
+    return true;
+  }
+  undo() {
+    this.restore(this.undoStack, this.redoStack);
+  }
+  redo() {
+    this.restore(this.redoStack, this.undoStack);
+  }
+  snapshot() {
+    const lctx = this.layer.getContext("2d");
+    this.undoStack.push(lctx.getImageData(0, 0, this.width, this.height));
+    this.redoStack.length = 0;
+    const per = this.width * this.height * 4;
+    const max = Math.max(3, Math.min(20, Math.floor(this.undoBudget / per)));
+    while (this.undoStack.length > max) this.undoStack.shift();
+  }
+  restore(from, to) {
+    const img = from.pop();
+    if (!img) return;
+    const lctx = this.layer.getContext("2d");
+    to.push(lctx.getImageData(0, 0, this.width, this.height));
+    lctx.putImageData(img, 0, 0);
+    this.hasStrokes = true;
+    this.onChange();
+  }
+}
 const NODE_NAME = "NKDTimeline";
 const EXT_NAME = "NKD.PreviewTools.Timeline";
 const AUDIO_NODE_NAME = "NKDAudioTimeline";
@@ -6565,10 +6743,14 @@ registerVideoViewer();
 registerTrackedWidgets();
 registerProjectTopbar();
 export {
+  BrushLayer,
+  adjustBrush,
   config,
   ensureStyles,
   loadConfig,
   mountDomWidget,
   projectChip,
-  saveToProject
+  radiusFor,
+  saveToProject,
+  stepSize
 };
