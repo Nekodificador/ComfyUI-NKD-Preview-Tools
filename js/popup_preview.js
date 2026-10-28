@@ -6,7 +6,7 @@ import { api } from "../../scripts/api.js";
 // registerExtension calls still run exactly once.
 import {
     config as nkdConfig, ensureStyles, loadConfig, mountDomWidget, projectChip,
-    saveToProject, BrushLayer, adjustBrush, radiusFor, stepSize,
+    saveToProject, BrushLayer, adjustBrush, radiusFor, stepSize, findAlign, alignBox,
 } from "./nkd_timeline.js";
 
 const NODE_TYPE = "NKDPopupPreviewNode";
@@ -423,7 +423,7 @@ const VIEWER_CSS = `
 .nkd-pv-seg .nkd-pv-vbtn{border-radius:0}
 .nkd-pv-seg .nkd-pv-vbtn:first-child{border-radius:6px 0 0 6px}
 .nkd-pv-seg .nkd-pv-vbtn:last-child{border-radius:0 6px 6px 0;margin-left:-1px}
-.nkd-pv-vbtn.on,.nkd-pv-btn-paint.active{background:rgba(30,60,90,0.95);border-color:rgba(74,180,255,0.6);color:#cfe8ff}
+.nkd-pv-vbtn.on,.nkd-pv-btn-paint.active,.nkd-pv-btn-align.active{background:rgba(30,60,90,0.95);border-color:rgba(74,180,255,0.6);color:#cfe8ff}
 .nkd-pv-vbtn:disabled{opacity:0.35;cursor:default}
 .nkd-pv-scrub{flex:none;height:28px;display:inline-flex;align-items:center;gap:5px;padding:0 8px;border-radius:6px;font:12px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:rgba(255,255,255,0.5);cursor:ew-resize;user-select:none;touch-action:none}
 .nkd-pv-scrub:hover{background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.75)}
@@ -446,6 +446,7 @@ const ICON = {
     more:  '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>',
     cmp:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>',
     folder:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+    align: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>',
     brush: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18.4 2.6a2 2 0 0 1 2.9 2.9L11 15.8l-2.9-2.9z"/><path d="M8.1 12.9c-2.2 0-4 1.8-4 4 0 1.3-.7 2.3-2.1 3 4.4.6 8-1 8.9-4.1"/></svg>',
     eraser:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 21h10M5.6 15.6l8.5-8.5a2 2 0 0 1 2.8 0l2 2a2 2 0 0 1 0 2.8L11 19.8a2 2 0 0 1-1.4.6H8.4a2 2 0 0 1-1.4-.6l-1.4-1.4a2 2 0 0 1 0-2.8z"/><path d="M9 12l5 5"/></svg>',
     undo:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg>',
@@ -512,6 +513,7 @@ function createViewerDOM(opts = {}) {
                 <div><span class="k">Space</span> hold reference</div>
                 <div><span class="k">M</span> mask overlay (peek)</div>
                 <div><span class="k">V</span> compare: flash / wipe / diff</div>
+                <div><span class="k">A</span> align reference (shift + zoom)</div>
                 <div><span class="k">S</span> save &middot; <span class="k">C</span> copy image</div>
                 <hr>
                 <div><span class="k">P</span> paint: restore / mask</div>
@@ -552,6 +554,7 @@ function createViewerDOM(opts = {}) {
                 <button class="nkd-pv-btn-paint nkd-pv-vbtn" title="Paint the previous render back in, or a mask to regenerate (P)">${ICON.brush}<span class="nkd-pv-lbl">Paint</span></button>
                 <button class="nkd-pv-btn-hold nkd-pv-vbtn" title="Hold to show reference image (Space)" style="display:${refUrl ? '' : 'none'}">${ICON.swap}<span class="nkd-pv-lbl">Hold for Ref</span></button>
                 <button class="nkd-pv-btn-cmp nkd-pv-vbtn" title="Compare mode (V): Flash / Wipe / Diff" style="display:none">${ICON.cmp}<span class="nkd-pv-lbl">Flash</span></button>
+                <button class="nkd-pv-btn-align nkd-pv-vbtn" title="Align the reference onto this render: shift + zoom (A)" style="display:none">${ICON.align}<span class="nkd-pv-lbl">Align</span></button>
                 <span class="nkd-pv-mask-ctl" style="display:${maskUrl ? '' : 'none'}">
                     <button class="nkd-pv-btn-mask nkd-pv-vbtn" title="Toggle the reference mask overlay — hold M to peek">${ICON.mask}<span class="nkd-pv-lbl">Mask</span></button>
                     <input type="color" class="nkd-pv-mask-color" title="Overlay colour">
@@ -615,16 +618,22 @@ function createViewerDOM(opts = {}) {
         maskOv.style.transform = img.style.transform;
     }
 
-    /** Where the reference sits over the image, in image px: contained, centred. Shared by
-     *  the on-screen layer and the Restore bake, so what is sent is what was seen. */
-    function refBox() {
+    // Align: shift + zoom that lays the reference over the render (edit models move the
+    // picture a few px). `alignKey` is the image pair it was measured on.
+    let align = null, alignKey = "";
+    /** Where the reference sits over the image, in image px: contained, centred, then
+     *  aligned. Shared by the on-screen layer and the Restore bake, so what is sent is what
+     *  was seen. */
+    function refBox(aligned = true) {
         const cw = img.naturalWidth, ch = img.naturalHeight;
         const rw = refImg.naturalWidth, rh = refImg.naturalHeight;
         if (!cw || !ch || !rw || !rh) return null;
         const cAR = cw / ch, rAR = rw / rh;
-        if (Math.abs(cAR - rAR) < 1e-3) return { x: 0, y: 0, w: cw, h: ch };
-        if (rAR > cAR) return { x: 0, y: (ch - cw / rAR) / 2, w: cw, h: cw / rAR };
-        return { x: (cw - ch * rAR) / 2, y: 0, w: ch * rAR, h: ch };
+        let b;
+        if (Math.abs(cAR - rAR) < 1e-3) b = { x: 0, y: 0, w: cw, h: ch };
+        else if (rAR > cAR) b = { x: 0, y: (ch - cw / rAR) / 2, w: cw, h: cw / rAR };
+        else b = { x: (cw - ch * rAR) / 2, y: 0, w: ch * rAR, h: ch };
+        return aligned && align ? alignBox(b, align, cw, ch) : b;
     }
 
     function applyRefTransform(rendering) {
@@ -764,6 +773,54 @@ function createViewerDOM(opts = {}) {
         syncCmp();
     };
     cmpBtn.addEventListener("click", cycleCmp);
+
+    // ── Align (A): measure the reference against THIS render, then click again to drop it.
+    // A new render keeps the alignment (same model, same drift) until A measures again.
+    const alignBtn = root.querySelector(".nkd-pv-btn-align"), alignLbl = alignBtn.querySelector(".nkd-pv-lbl");
+    let aligning = false;
+    function syncAlign() {
+        alignBtn.style.display = curRef ? "" : "none";
+        alignBtn.classList.toggle("active", !!align);
+        alignLbl.textContent = aligning ? "Aligning…" : align ? "Aligned" : "Align";
+        alignBtn.title = align
+            ? `Aligned: x ${Math.round(align.dx * img.naturalWidth)} px, y ${Math.round(align.dy * img.naturalHeight)} px, zoom ${(align.s * 100).toFixed(1)}% - A again to turn off, or to re-measure a new render`
+            : "Align the reference onto this render: shift + zoom (A)";
+    }
+    /** Both pictures as luminance at one pyramid level, in the render's frame. */
+    function lumLevel(long, base) {
+        const nw = img.naturalWidth, nh = img.naturalHeight, k = long / Math.max(nw, nh);
+        const w = Math.max(8, Math.round(nw * k)), h = Math.max(8, Math.round(nh * k));
+        const c = root.ownerDocument.createElement("canvas"); c.width = w; c.height = h;
+        const x = c.getContext("2d", { willReadFrequently: true });
+        x.imageSmoothingQuality = "high";
+        const read = () => {
+            const d = x.getImageData(0, 0, w, h).data, o = new Float32Array(w * h);
+            for (let i = 0, j = 0; i < o.length; i++, j += 4) o[i] = 0.2126 * d[j] + 0.7152 * d[j + 1] + 0.0722 * d[j + 2];
+            return o;
+        };
+        x.drawImage(img, 0, 0, w, h);
+        const a = read();
+        const box = { x: base.x * w / nw, y: base.y * h / nh, w: base.w * w / nw, h: base.h * h / nh };
+        x.clearRect(0, 0, w, h);
+        x.drawImage(refImg, box.x, box.y, box.w, box.h);
+        return { a, b: read(), w, h, box };
+    }
+    function toggleAlign() {
+        if (!curRef || aligning || !img.naturalWidth || !refImg.naturalWidth) return;
+        const key = img.src + "|" + refImg.src;
+        if (align && key === alignKey) { align = null; syncAlign(); apply(); schedulePaint(); return; }
+        // Half a second of search: show it first, or the click looks dead.
+        aligning = true; syncAlign();
+        (root.ownerDocument.defaultView || window).setTimeout(() => {
+            try {
+                const base = refBox(false);
+                align = findAlign(lumLevel(256, base), lumLevel(1024, base));
+                alignKey = key;
+            } catch (e) { console.warn("[NKD Popup Preview] align failed", e); }
+            aligning = false; syncAlign(); apply(); schedulePaint();
+        }, 30);
+    }
+    alignBtn.addEventListener("click", toggleAlign);
     // The viewer can live in a PiP or OS window, so tick on the window that owns it now.
     let sweepRaf = 0;
     const sweepTo = (to) => {
@@ -830,17 +887,19 @@ function createViewerDOM(opts = {}) {
         curRef  = rUrl  || null;
         curMask = mUrl  || null;
         btnHold.style.display = curRef ? "" : "none";
-        if (curRef) { if (refImg.src !== curRef) refImg.src = curRef; }
-        else { holding = false; latched = false; root.classList.remove("holding-ref"); btnHold.classList.remove("active"); }
+        // A different reference has its own drift: the old alignment would be a guess.
+        if (curRef) { if (refImg.src !== curRef) { refImg.src = curRef; align = null; } }
+        else {
+            align = null; holding = false; latched = false; root.classList.remove("holding-ref"); btnHold.classList.remove("active"); }
         root.querySelector(".nkd-pv-mask-ctl").style.display = curMask ? "" : "none";
         if (curMask) { maskOv.style.webkitMaskImage = `url("${curMask}")`; maskOv.style.maskImage = `url("${curMask}")`; }
         else { maskOn = peeking = false; root.classList.remove("holding-mask", "mask-on"); btnMask.classList.remove("active"); }
-        syncCmp();
+        syncCmp(); syncAlign();
         apply();
         schedulePaint();   // Restore draws the reference, and needs one to exist
     };
     if (curRef) refImg.src = curRef;
-    syncCmp();
+    syncCmp(); syncAlign();
     if (curMask) { maskOv.style.webkitMaskImage = `url("${curMask}")`; maskOv.style.maskImage = `url("${curMask}")`; }
 
     // ── Paint: the inpainting loop, with the NKD Paint brush (brush.ts) ─────────────────────
@@ -1289,6 +1348,7 @@ function createViewerDOM(opts = {}) {
         if (typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
         if (e.key === "Escape") root.querySelector(".nkd-pv-btn-close").click();
         if ((e.key === "v" || e.key === "V") && curRef) cycleCmp();
+        if ((e.key === "a" || e.key === "A") && !e.shiftKey && curRef) toggleAlign();
         if (e.shiftKey && e.key.startsWith("Arrow")) {
             e.preventDefault();
             const step = 60;

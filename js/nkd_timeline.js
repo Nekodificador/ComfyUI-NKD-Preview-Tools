@@ -6119,6 +6119,66 @@ class BrushLayer {
     this.onChange();
   }
 }
+const IDENTITY = { dx: 0, dy: 0, s: 1 };
+function score(L, t, stride) {
+  const { a, b, w, h, box } = L;
+  const cx = w / 2, cy = h / 2, ox = cx + t.dx * w, oy = cy + t.dy * h, inv = 1 / t.s;
+  const x0 = box.x, y0 = box.y, x1 = box.x + box.w - 1, y1 = box.y + box.h - 1;
+  let n = 0, sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0, total = 0;
+  for (let y = stride >> 1; y < h; y += stride) {
+    const qy = cy + (y - oy) * inv;
+    for (let x = stride >> 1; x < w; x += stride) {
+      total++;
+      const qx = cx + (x - ox) * inv;
+      if (qx < x0 || qy < y0 || qx >= x1 || qy >= y1) continue;
+      const ix = qx | 0, iy = qy | 0, fx = qx - ix, fy = qy - iy, i = iy * w + ix;
+      const top = b[i] + (b[i + 1] - b[i]) * fx;
+      const bot = b[i + w] + (b[i + w + 1] - b[i + w]) * fx;
+      const vb2 = top + (bot - top) * fy, va2 = a[y * w + x];
+      n++;
+      sa += va2;
+      sb += vb2;
+      saa += va2 * va2;
+      sbb += vb2 * vb2;
+      sab += va2 * vb2;
+    }
+  }
+  if (n < total * 0.5) return -Infinity;
+  const cov = sab - sa * sb / n, va = saa - sa * sa / n, vb = sbb - sb * sb / n;
+  return va > 0 && vb > 0 ? cov / Math.sqrt(va * vb) : -Infinity;
+}
+function refine(L, t, shift, shiftStep, scale2, scaleStep, stride) {
+  let best = t, bestS = -Infinity;
+  for (let s = t.s - scale2; s <= t.s + scale2 + 1e-9; s += scaleStep) {
+    for (let y = -shift; y <= shift + 1e-9; y += shiftStep) {
+      for (let x = -shift; x <= shift + 1e-9; x += shiftStep) {
+        const c = { dx: t.dx + x / L.w, dy: t.dy + y / L.h, s };
+        const v = score(L, c, stride);
+        if (v > bestS) {
+          bestS = v;
+          best = c;
+        }
+      }
+    }
+  }
+  return best;
+}
+function findAlign(small, large) {
+  let t = refine(small, IDENTITY, 12, 2, 0.06, 0.01, 2);
+  t = refine(large, t, 8, 2, 0.01, 25e-4, 4);
+  t = refine(large, t, 2, 0.5, 25e-4, 625e-6, 4);
+  t = refine(large, t, 0.5, 0.125, 6e-4, 3e-4, 4);
+  return t;
+}
+function alignBox(b, t, cw, ch) {
+  const cx = cw / 2, cy = ch / 2;
+  return {
+    x: cx + t.dx * cw + t.s * (b.x - cx),
+    y: cy + t.dy * ch + t.s * (b.y - cy),
+    w: b.w * t.s,
+    h: b.h * t.s
+  };
+}
 const NODE_NAME = "NKDTimeline";
 const EXT_NAME = "NKD.PreviewTools.Timeline";
 const AUDIO_NODE_NAME = "NKDAudioTimeline";
@@ -6745,8 +6805,10 @@ registerProjectTopbar();
 export {
   BrushLayer,
   adjustBrush,
+  alignBox,
   config,
   ensureStyles,
+  findAlign,
   loadConfig,
   mountDomWidget,
   projectChip,

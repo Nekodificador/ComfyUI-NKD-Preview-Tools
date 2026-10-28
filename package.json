@@ -6,7 +6,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite build --watch",
-    "test": "node --test tests/timeline_model.mjs tests/waveform.mjs"
+    "test": "node --test tests/timeline_model.mjs tests/waveform.mjs tests/align.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.24.0",

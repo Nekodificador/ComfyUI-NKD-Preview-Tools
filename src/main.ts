@@ -896,3 +896,4 @@ export { ensureStyles } from "./timeline/styles";
 export { mountDomWidget } from "./domHost";
 // The popup viewer's paint mode. brush.ts is a verbatim copy of NKD Basic Tools' (its Paint node).
 export { BrushLayer, adjustBrush, radiusFor, stepSize } from "./brush";
+export { findAlign, alignBox } from "./align";

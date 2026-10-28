@@ -30,6 +30,7 @@ The node passes `image` through untouched, so it can sit inline in a chain (say 
 - **Space** shows the reference while held. A quick click on the button pins it until you click again.
 - **V** switches between flash, wipe (drag the divider) and difference.
 - In wipe mode **Space** sweeps the divider across: over to the reference on press, back to the render on release.
+- **Align** (**A**) lays the reference over the render when an edit model has shifted or zoomed the picture by a few pixels, so a wipe has no seam and Restore leaves no step. It measures once, in about a second, and the tooltip shows the shift and zoom it found. **A** again turns it off; on a new render it measures again.
 - **M** shows the mask overlay while held.
 
 ## Painting a fix and running it again
@@ -46,7 +47,7 @@ Fix a result without leaving the viewer, and feed it straight back into the work
 - Every send is a new file (`input/nkd_loop/loop_<node>_v001.png`, `_v002`…), so earlier passes stay in the Load Image's list.
 - With more than one Load Image in the graph, right-click the one to feed and choose **Set as NKD image target**.
 
-Restore is inspired by the Erase mode of Image Compare A/B in [ComfyUI-AusBoss](https://github.com/ausboss/ComfyUI-AusBoss).
+Restore and Align are inspired by the Erase and Align modes of Image Compare A/B in [ComfyUI-AusBoss](https://github.com/ausboss/ComfyUI-AusBoss).
 
 ## Batches
 
@@ -74,6 +75,7 @@ Shortcuts only act while the pointer is over the viewer.
 - **0** or **F**: fit to window. **1**: 100%.
 - **Shift** with the arrow keys: pan.
 - **S**: save. **C**: copy.
+- **V**: compare mode. **A**: align the reference.
 - **P**: paint. **L**: to Load Image. **Shift+L**: to Load Image and run.
 - **Shift+Q**: run this node.
 - **Esc**: close.
