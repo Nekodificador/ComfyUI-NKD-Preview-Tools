@@ -4693,6 +4693,8 @@ function registerProjectTopbar() {
 }
 const TRACKED_PROP = "nkdTracked";
 const VIEWER = "NKDVideoViewer";
+const POPUP = "NKDPopupPreviewNode";
+const CONSUMERS = /* @__PURE__ */ new Set([VIEWER, POPUP]);
 const tracked = (node) => {
   var _a;
   return Array.isArray((_a = node == null ? void 0 : node.properties) == null ? void 0 : _a[TRACKED_PROP]) ? node.properties[TRACKED_PROP] : [];
@@ -4731,7 +4733,7 @@ function syncLabelWidgets() {
   }
   const json = list.length ? JSON.stringify(list) : "";
   for (const n of nodes) {
-    if (n.comfyClass !== VIEWER) continue;
+    if (!CONSUMERS.has(n.comfyClass)) continue;
     const w = (_b = n.widgets) == null ? void 0 : _b.find((x) => x.name === "labels");
     if (w && w.value !== json) {
       w.value = json;
@@ -4750,14 +4752,17 @@ function toggleTrack(node, name) {
   syncLabelWidgets();
   (_a = node.setDirtyCanvas) == null ? void 0 : _a.call(node, true, true);
 }
-const listable = (w) => !!(w == null ? void 0 : w.name) && !w.hidden && ["string", "number", "boolean"].includes(typeof w.value);
+const listable = (w) => {
+  var _a;
+  return !!(w == null ? void 0 : w.name) && ((_a = w.options) == null ? void 0 : _a.serialize) !== false && ["string", "number", "boolean"].includes(typeof w.value);
+};
 function registerTrackedWidgets() {
   app.registerExtension({
     name: "NKD.TrackedWidgets",
     getNodeMenuItems(node) {
       var _a, _b;
       const widgets = (node.widgets ?? []).filter(listable);
-      if (!widgets.length || node.comfyClass === VIEWER) return [];
+      if (!widgets.length || CONSUMERS.has(node.comfyClass)) return [];
       const cur = tracked(node);
       const items = [];
       const under = (_b = (_a = app.canvas) == null ? void 0 : _a.getWidgetAtCursor) == null ? void 0 : _b.call(_a);

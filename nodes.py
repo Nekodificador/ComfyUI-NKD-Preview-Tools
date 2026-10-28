@@ -402,20 +402,32 @@ class NKDPopupPreviewNode(io.ComfyNode):
                     "mask", optional=True,
                     tooltip="Optional mask — shown as a tinted overlay in the viewer. "
                             "Wins over the global NKD Reference mask."),
+                # Hidden and written by the right-click "Track widget" mark (src/labels.ts),
+                # same list the Video Viewer gets. The values are burned into the PREVIEW
+                # only, so Save/Copy keep them (a test still says what made it) while the
+                # `image` output stays clean.
+                io.String.Input("labels", default=""),
             ],
             # Pass-through so the preview can sit inline in a chain instead of dangling.
             outputs=[io.Image.Output(display_name="image", tooltip="The input image, untouched.")],
             is_output_node=True,
             not_idempotent=True,
-            hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
+            hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo, io.Hidden.unique_id],
         )
 
     @classmethod
-    def execute(cls, image, reference=None, mask=None):
+    def execute(cls, image, reference=None, mask=None, labels=""):
         ref_item = _save_reference_png(reference)[1] if reference is not None else None
         mask_item = _save_reference_mask_png(mask)[1] if mask is not None else None
+        # Our own call count is this pass's position in a swept list (see nkd_video).
+        counts = nkd_video._pass_counts()
+        key = str(cls.hidden.unique_id)
+        pass_index = counts.get(key, 0)
+        counts[key] = pass_index + 1
+        lines = nkd_video.label_lines(labels, cls.hidden.prompt, pass_index)
+        shown = nkd_video.burn_labels(image, lines) if lines else image
         return io.NodeOutput(
-            image, ui=NKDPopupUI(ui.PreviewImage(image, cls=cls), ref_item, mask_item))
+            image, ui=NKDPopupUI(ui.PreviewImage(shown, cls=cls), ref_item, mask_item))
 
 
 # ── Extension ─────────────────────────────────────────────────────────────────

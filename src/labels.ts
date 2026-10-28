@@ -17,6 +17,10 @@ import { type MenuItem, openMenu } from "./projects";
 
 export const TRACKED_PROP = "nkdTracked";
 const VIEWER = "NKDVideoViewer";
+const POPUP = "NKDPopupPreviewNode";
+/** Nodes with a hidden `labels` input: the viewer burns the values into `_labeled`, the
+ *  popup burns them into its preview still. */
+const CONSUMERS = new Set([VIEWER, POPUP]);
 
 const tracked = (node: any): string[] =>
   Array.isArray(node?.properties?.[TRACKED_PROP]) ? node.properties[TRACKED_PROP] : [];
@@ -74,7 +78,7 @@ export function syncLabelWidgets(): void {
   }
   const json = list.length ? JSON.stringify(list) : "";
   for (const n of nodes) {
-    if (n.comfyClass !== VIEWER) continue;
+    if (!CONSUMERS.has(n.comfyClass)) continue;
     const w = n.widgets?.find((x: any) => x.name === "labels");
     if (w && w.value !== json) {
       w.value = json;
@@ -96,18 +100,21 @@ function toggleTrack(node: any, name: string): void {
   node.setDirtyCanvas?.(true, true);
 }
 
-/** Widgets worth offering: literal values a run consumes. DOM/tracking widgets, and
- *  widgets converted to inputs (their value is not here any more), are not. */
+/** Widgets worth offering: literal values the PROMPT carries, since that is where the
+ *  backend reads them. Hidden ones count (LoRA Control's `blocks` is a hidden STRING its
+ *  panel writes); a DOM widget with `serialize: false` never reaches the prompt, so a mark
+ *  on it would burn nothing (that panel itself was offered instead of `blocks`). */
 const listable = (w: any): boolean =>
-  !!w?.name && !w.hidden && ["string", "number", "boolean"].includes(typeof w.value);
+  !!w?.name && w.options?.serialize !== false
+  && ["string", "number", "boolean"].includes(typeof w.value);
 
 export function registerTrackedWidgets(): void {
   comfyApp.registerExtension({
     name: "NKD.TrackedWidgets",
     getNodeMenuItems(node: any) {
       const widgets = (node.widgets ?? []).filter(listable);
-      // The viewer is excluded: tracking the tracker only produces noise about itself.
-      if (!widgets.length || node.comfyClass === VIEWER) return [];
+      // The consumers are excluded: tracking the tracker only produces noise about itself.
+      if (!widgets.length || CONSUMERS.has(node.comfyClass)) return [];
       const cur = tracked(node);
       const items: any[] = [];
       // The promote-widget gesture: name the widget under the pointer. No official hook

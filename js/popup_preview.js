@@ -2163,6 +2163,18 @@ app.registerExtension({
 
             const panel = buildNodePanel(this);
 
+            // `labels` (hidden, written by the Track widget marks in src/labels.ts) is a schema
+            // input, so it is created FIRST - but saved workflows hold the widgets above
+            // positionally. Move it LAST, before configure() applies widgets_values.
+            const lw = this.widgets.find(w => w.name === "labels");
+            if (lw) {
+                this.widgets.splice(this.widgets.indexOf(lw), 1);
+                this.widgets.push(lw);
+                lw.hidden = true;
+                if (lw.options) lw.options.hidden = true;
+                lw.computeSize = () => [0, -4];
+            }
+
             // Let the node be dragged TALLER than the panel, so ComfyUI's own preview (drawn
             // above the panel from nodeOutputs) grows like a normal Preview Image. The DOM
             // host pins height to its content on every resize — right for the timeline's
