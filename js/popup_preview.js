@@ -334,9 +334,9 @@ const VIEWER_CSS = `
 .nkd-pv-viewer-root.holding-ref .nkd-pv-refclip,.nkd-pv-viewer-root.cmp-wipe .nkd-pv-refclip,.nkd-pv-viewer-root.cmp-diff .nkd-pv-refclip{display:block}
 .nkd-pv-viewer-root.cmp-diff .nkd-pv-refclip{mix-blend-mode:difference}
 .nkd-pv-viewer-root.holding-ref .nkd-pv-refclip{clip-path:none !important;mix-blend-mode:normal !important}
-.nkd-pv-wipe{position:absolute;top:0;bottom:0;width:16px;margin-left:-8px;z-index:4;display:none;cursor:ew-resize;touch-action:none}
-.nkd-pv-wipe::before{content:"";position:absolute;left:7px;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.85);box-shadow:0 0 6px rgba(0,0,0,0.6)}
-.nkd-pv-wipe::after{content:"";position:absolute;left:0;top:50%;margin-top:-8px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 0 6px rgba(0,0,0,0.6)}
+.nkd-pv-wipe{position:absolute;top:0;bottom:0;width:28px;margin-left:-14px;z-index:4;display:none;cursor:ew-resize;touch-action:none}
+.nkd-pv-wipe::before{content:"";position:absolute;left:13px;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.85);box-shadow:0 0 6px rgba(0,0,0,0.6)}
+.nkd-pv-wipe::after{content:"";position:absolute;left:6px;top:50%;margin-top:-8px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 0 6px rgba(0,0,0,0.6)}
 .nkd-pv-viewer-root.cmp-wipe .nkd-pv-wipe{display:block}
 .nkd-pv-viewer-root.holding-ref .nkd-pv-wipe{display:none}
 .nkd-pv-viewer-root:focus{outline:none}
@@ -753,7 +753,8 @@ function createViewerDOM(opts = {}) {
         root.classList.toggle("cmp-diff", !!curRef && cmpMode === "diff");
         cmpBtn.style.display = curRef ? "" : "none";
         cmpBtn.querySelector(".nkd-pv-lbl").textContent = cmpMode[0].toUpperCase() + cmpMode.slice(1);
-        wipeEl.style.left = (wipeX * 100) + "%";
+        // Clamped so a divider parked at an edge by the Space sweep keeps its whole grip in view.
+        wipeEl.style.left = `clamp(14px, ${wipeX * 100}%, calc(100% - 14px))`;
         // Reference layer sits on top and reads left = before, right = after.
         refClip.style.clipPath = curRef && cmpMode === "wipe" ? `inset(0 ${(1 - wipeX) * 100}% 0 0)` : "";
     };
