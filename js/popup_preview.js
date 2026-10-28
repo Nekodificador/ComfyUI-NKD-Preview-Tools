@@ -208,7 +208,7 @@ async function uploadToInput(blob, name, extra = {}) {
 }
 
 /**
- * The inpainting loop's return trip: the viewer's picture (Reveal already baked in) goes to
+ * The inpainting loop's return trip: the viewer's picture (Restore already baked in) goes to
  * input/nkd_loop/ as a new VERSION for the target Load Image, and the painted Mask becomes
  * that file's alpha through core's own /upload/mask - the same route the core mask editor
  * takes, so LoadImage hands it out as its MASK and the mask editor can keep editing it.
@@ -514,8 +514,8 @@ function createViewerDOM(opts = {}) {
                 <div><span class="k">V</span> compare: flash / wipe / diff</div>
                 <div><span class="k">S</span> save &middot; <span class="k">C</span> copy image</div>
                 <hr>
-                <div><span class="k">P</span> paint: reveal / mask</div>
-                <div><span class="k">B / E</span> brush / erase &middot; <span class="k">X</span> reveal &harr; mask</div>
+                <div><span class="k">P</span> paint: restore / mask</div>
+                <div><span class="k">B / E</span> brush / erase &middot; <span class="k">X</span> restore &harr; mask</div>
                 <div><span class="k">[ ]</span> size &middot; <span class="k">Alt+right drag</span> size / hardness</div>
                 <div><span class="k">Ctrl+Z</span> undo stroke &middot; <span class="k">Middle drag</span> pan</div>
                 <div><span class="k">L</span> to Load Image &middot; <span class="k">Shift+L</span> load &amp; run</div>
@@ -529,7 +529,7 @@ function createViewerDOM(opts = {}) {
         <div class="nkd-pv-info"><span class="nkd-pv-dims"></span><button class="nkd-pv-zoom" title="Zoom - click for 100%"></button><span class="nkd-pv-px"></span></div>
         <div class="nkd-pv-paint-row">
             <span class="nkd-pv-seg">
-                <button class="nkd-pv-btn-lreveal nkd-pv-vbtn" title="Paint where the reference / previous render comes back (X swaps)">${ICON.swap}<span class="nkd-pv-lbl">Reveal</span></button>
+                <button class="nkd-pv-btn-lrestore nkd-pv-vbtn" title="Paint where the reference / previous render comes back (X swaps)">${ICON.swap}<span class="nkd-pv-lbl">Restore</span></button>
                 <button class="nkd-pv-btn-lmask nkd-pv-vbtn" title="Paint what to regenerate - sent as the Load Image's mask (X swaps)">${ICON.mask}<span class="nkd-pv-lbl">Mask</span></button>
             </span>
             <span class="nkd-pv-seg">
@@ -549,7 +549,7 @@ function createViewerDOM(opts = {}) {
         </div>
         <div class="nkd-pv-bar">
             <div class="nkd-pv-bar-group nkd-pv-bar-left">
-                <button class="nkd-pv-btn-paint nkd-pv-vbtn" title="Paint a mask to regenerate, or reveal the reference (P)">${ICON.brush}<span class="nkd-pv-lbl">Paint</span></button>
+                <button class="nkd-pv-btn-paint nkd-pv-vbtn" title="Paint the previous render back in, or a mask to regenerate (P)">${ICON.brush}<span class="nkd-pv-lbl">Paint</span></button>
                 <button class="nkd-pv-btn-hold nkd-pv-vbtn" title="Hold to show reference image (Space)" style="display:${refUrl ? '' : 'none'}">${ICON.swap}<span class="nkd-pv-lbl">Hold for Ref</span></button>
                 <button class="nkd-pv-btn-cmp nkd-pv-vbtn" title="Compare mode (V): Flash / Wipe / Diff" style="display:none">${ICON.cmp}<span class="nkd-pv-lbl">Flash</span></button>
                 <span class="nkd-pv-mask-ctl" style="display:${maskUrl ? '' : 'none'}">
@@ -616,7 +616,7 @@ function createViewerDOM(opts = {}) {
     }
 
     /** Where the reference sits over the image, in image px: contained, centred. Shared by
-     *  the on-screen layer and the Reveal bake, so what is sent is what was seen. */
+     *  the on-screen layer and the Restore bake, so what is sent is what was seen. */
     function refBox() {
         const cw = img.naturalWidth, ch = img.naturalHeight;
         const rw = refImg.naturalWidth, rh = refImg.naturalHeight;
@@ -813,7 +813,7 @@ function createViewerDOM(opts = {}) {
         else { maskOn = peeking = false; root.classList.remove("holding-mask", "mask-on"); btnMask.classList.remove("active"); }
         syncCmp();
         apply();
-        schedulePaint();   // Reveal draws the reference, and needs one to exist
+        schedulePaint();   // Restore draws the reference, and needs one to exist
     };
     if (curRef) refImg.src = curRef;
     syncCmp();
@@ -821,19 +821,19 @@ function createViewerDOM(opts = {}) {
 
     // ── Paint: the inpainting loop, with the NKD Paint brush (brush.ts) ─────────────────────
     // Two layers stretched over the image: MASK (what to regenerate; sent as the Load Image's
-    // alpha, which core LoadImage turns into its MASK output) and REVEAL (where the reference /
+    // alpha, which core LoadImage turns into its MASK output) and RESTORE (where the reference /
     // previous render comes back; baked into the picture sent). The layers keep image-relative
     // geometry, so a small live preview frame does not wipe them - only a change of shape does.
     const PAINT_MAX_SIDE = 2048;   // same cap as NKD Paint; the mask is scaled up on send
     const num = (k, d) => { const v = parseFloat(localStorage.getItem(k)); return Number.isFinite(v) ? v : d; };
     const P = { size: num("nkd_pv_brush_size", 60), hardness: num("nkd_pv_brush_hard", 0.6),
-                // Reveal leads: masks are easy to paint anywhere in the workflow, bringing
+                // Restore leads: masks are easy to paint anywhere in the workflow, bringing
                 // the previous render back is what only this viewer can do. `want` is the
                 // choice; `layer` is what is usable (no reference yet = Mask).
-                tool: "brush", want: "reveal", layer: "mask" };
+                tool: "brush", want: "restore", layer: "mask" };
     const brushParams = () => ({ size: P.size, opacity: 1, hardness: P.hardness, tool: P.tool, color: "#ffffff" });
     const layers = { mask: new BrushLayer(1, 1, brushParams, () => schedulePaint()),
-                     reveal: new BrushLayer(1, 1, brushParams, () => schedulePaint()) };
+                     restore: new BrushLayer(1, 1, brushParams, () => schedulePaint()) };
     const active = () => layers[P.layer];
     // One undo order across both layers: Ctrl+Z takes back the last stroke, wherever it went.
     const undoOrder = [], redoOrder = [];
@@ -870,7 +870,7 @@ function createViewerDOM(opts = {}) {
         const W = paintCv.width, H = paintCv.height;
         pctx.globalCompositeOperation = "source-over"; pctx.globalAlpha = 1;
         pctx.clearRect(0, 0, W, H);
-        const rv = layers.reveal, mk = layers.mask, b = curRef ? refBox() : null;
+        const rv = layers.restore, mk = layers.mask, b = curRef ? refBox() : null;
         if ((rv.hasStrokes || rv.stroking) && b) {
             const k = W / img.naturalWidth;
             pctx.drawImage(refImg, b.x * k, b.y * k, b.w * k, b.h * k);
@@ -895,10 +895,10 @@ function createViewerDOM(opts = {}) {
         root.classList.toggle("painting", paintOn);
         btnPaint.classList.toggle("active", paintOn);
         // Never switch under a stroke in progress: its end must land on the layer it began on.
-        if (!layers[P.layer].stroking) P.layer = curRef ? P.want : "mask";   // nothing to reveal yet
+        if (!layers[P.layer].stroking) P.layer = curRef ? P.want : "mask";   // nothing to restore yet
         pb(".nkd-pv-btn-lmask").classList.toggle("on", P.layer === "mask");
-        pb(".nkd-pv-btn-lreveal").classList.toggle("on", P.layer === "reveal");
-        pb(".nkd-pv-btn-lreveal").disabled = !curRef;
+        pb(".nkd-pv-btn-lrestore").classList.toggle("on", P.layer === "restore");
+        pb(".nkd-pv-btn-lrestore").disabled = !curRef;
         pb(".nkd-pv-btn-tbrush").classList.toggle("on", P.tool === "brush");
         pb(".nkd-pv-btn-terase").classList.toggle("on", P.tool === "eraser");
         pb(".nkd-pv-btn-pundo").disabled = !undoOrder.length;
@@ -916,11 +916,11 @@ function createViewerDOM(opts = {}) {
     const setPaint = (on) => { paintOn = on; syncPaint(); syncStrip(); };
     const undoPaint = () => { const n = undoOrder.pop(); if (n) { layers[n].undo(); redoOrder.push(n); } syncPaint(); };
     const redoPaint = () => { const n = redoOrder.pop(); if (n) { layers[n].redo(); undoOrder.push(n); } syncPaint(); };
-    const swapLayer = () => { if (curRef) { P.want = P.want === "mask" ? "reveal" : "mask"; syncPaint(); } };
+    const swapLayer = () => { if (curRef) { P.want = P.want === "mask" ? "restore" : "mask"; syncPaint(); } };
 
     btnPaint.addEventListener("click", () => setPaint(!paintOn));
     pb(".nkd-pv-btn-lmask").addEventListener("click", () => { P.want = "mask"; syncPaint(); });
-    pb(".nkd-pv-btn-lreveal").addEventListener("click", () => { P.want = "reveal"; syncPaint(); });
+    pb(".nkd-pv-btn-lrestore").addEventListener("click", () => { P.want = "restore"; syncPaint(); });
     pb(".nkd-pv-btn-tbrush").addEventListener("click", () => { P.tool = "brush"; syncPaint(); });
     pb(".nkd-pv-btn-terase").addEventListener("click", () => { P.tool = "eraser"; syncPaint(); });
     pb(".nkd-pv-btn-pundo").addEventListener("click", undoPaint);
@@ -966,7 +966,7 @@ function createViewerDOM(opts = {}) {
         if (e.button === 2 && e.altKey) {
             adjust = { x: e.clientX, y: e.clientY, size0: P.size, hard0: P.hardness };
         } else if (e.button === 0 && !e.altKey) {
-            if (P.layer === "reveal" && !curRef) return true;
+            if (P.layer === "restore" && !curRef) return true;
             const [x, y] = toLayer(e);
             active().begin(x, y, layerRadius(e));
             schedulePaint();
@@ -995,7 +995,7 @@ function createViewerDOM(opts = {}) {
     wrap.addEventListener("pointerleave", () => ring.classList.remove("on"));
 
     const blobOf = (cv) => new Promise((res) => cv.toBlob(res, "image/png"));
-    /** What you see, at full resolution: the picture with Reveal baked in, and the Mask as a
+    /** What you see, at full resolution: the picture with Restore baked in, and the Mask as a
      *  separate PNG whose alpha is 0 where painted (the convention core LoadImage reads). */
     // A send is seconds on a big picture (encode + upload): say so, and refuse a second one.
     let sending = false;
@@ -1021,7 +1021,7 @@ function createViewerDOM(opts = {}) {
     async function buildAndSend(run) {
         const nw = img.naturalWidth, nh = img.naturalHeight, doc = root.ownerDocument;
         const canvas = () => { const c = doc.createElement("canvas"); c.width = nw; c.height = nh; return c; };
-        const rv = layers.reveal, mk = layers.mask, b = curRef ? refBox() : null;
+        const rv = layers.restore, mk = layers.mask, b = curRef ? refBox() : null;
         let image;
         if (rv.hasStrokes && b) {
             const out = canvas(), oc = out.getContext("2d");
