@@ -16,7 +16,7 @@ import {
   type Clip, type FitMode, type QuantizeMode, type Timeline,
   QUANTIZE_FREE,
   BLEND_MODES, type BlendMode, type ImportMode,
-  clampFades, levelStops, snapGainToDb, clipsAt, cropToRange, effectiveCount, fitRect, materialRange, moveClip,
+  clampFades, levelStops, snapGainToDb, clipsAt, cropToRange, effectiveCount, fitRect, panField, materialRange, moveClip,
   moveClipToLane, MAX_GAIN,
   type CutEdge,
   adaptCanvas, canvasFor, clampClipsToSources, clipExtent, cutStops, expandClipsToSources,
@@ -290,6 +290,15 @@ export class TimelineEditor {
   private waveDb = false;
   /** Default ON (Neko, 2026-08-19): the band is why the toggle exists; session-only. */
   private showClipWave = true;
+  /** Reframe overlay: sits over the whole widget so the cropped overflow can be drawn
+   *  OUTSIDE the monitor, where it actually is. Never takes pointer events. */
+  private readonly guide: HTMLCanvasElement;
+  private overPreview = false;
+  private reframing = false;
+  /** What the last preview draw placed for the reframe target - the guide reuses it
+   *  instead of asking the pool for the picture a second time. */
+  private framed: { clip: Clip; img: CanvasImageSource; r: { x: number; y: number;
+                    w: number; h: number }; w: number; h: number } | null = null;
   /** Scratch canvas for tinting the mask; reused so playback does not allocate. */
   private readonly tintCanvas = document.createElement("canvas");
   /** Last quantise/fps pair we warned about, so the toast fires on CHANGE only. */
@@ -349,11 +358,18 @@ export class TimelineEditor {
     this.status = document.createElement("span");
     this.status.className = "nkd-tl-status";
 
+    this.guide = document.createElement("canvas");
+    this.guide.className = "nkd-tl-guide";
+
     this.buildBar();
     // The preview canvas still EXISTS when there is no picture - `renderPreview` and the
     // resize path both write to it unconditionally - it simply never enters the DOM.
     if (this.audioOnly) this.root.append(this.canvas, this.bar);
-    else this.root.append(this.preview, this.canvas, this.bar);
+    else this.root.append(this.preview, this.canvas, this.bar, this.guide);
+    this.preview.addEventListener("pointerdown", this.onPreviewDown);
+    this.preview.addEventListener("pointermove", this.onPreviewHover);
+    this.preview.addEventListener("pointerleave", this.onPreviewHover);
+    this.preview.addEventListener("dblclick", this.onPreviewReset);
     this.applyTimelineHeight();
 
     this.canvas.addEventListener("pointerdown", this.onDown);
@@ -1179,6 +1195,16 @@ export class TimelineEditor {
           on: () => {
             this.pushUndo();
             moveClipToLane(this.tl, c, toMask);
+            this.host.commit();
+          },
+        });
+      }
+      if (c.pan && hit.lane !== "audio") {
+        items.push({
+          label: "Reset framing (centre)",
+          on: () => {
+            this.pushUndo();
+            delete c.pan;
             this.host.commit();
           },
         });
@@ -2265,7 +2291,10 @@ export class TimelineEditor {
       // unambiguous, so it only shows when there is room to spare beside the name.
       const label = (src?.label ?? `${c.src} (no source)`)
         + (soundOnly && w > 150 ? "  ·  audio only" : "");
-      ctx.fillText(this.ellipsise(ctx, label, w - 12), x + 5, y + CLIP_HEAD_H / 2);
+      const badge = !!c.pan && lane !== "audio" && w > 44 && h > CLIP_HEAD_H + 4;
+      ctx.fillText(this.ellipsise(ctx, label, w - (badge ? 30 : 12)), x + 5,
+        y + CLIP_HEAD_H / 2);
+      if (badge) this.drawPanBadge(ctx, c.pan!, x + w - 18, y, selected);
     }
     // Frame-rate warning: without it the resampling happens silently.
     const info = src?.info;
@@ -2522,6 +2551,22 @@ export class TimelineEditor {
     return Math.round(Math.max(lo, Math.min(hi, seen)));
   }
 
+  /**
+   * "This clip is reframed", in the header. The pack's own rule: a setting that changes
+   * the render must not be invisible, and a reframe only showed while hovering the
+   * monitor. The glyph IS the setting - a frame with the kept window drawn where it sits.
+   */
+  private drawPanBadge(ctx: CanvasRenderingContext2D, pan: [number, number],
+                       x: number, y: number, selected: boolean): void {
+    const bw = 12, bh = 8, iw = 5, ih = 4;
+    const bx = x, by = y + Math.round((CLIP_HEAD_H - bh) / 2);
+    ctx.strokeStyle = selected ? "#0d1b24" : "#ffd60a";
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx + 0.5, by + 0.5, bw, bh);
+    ctx.fillRect(bx + 1.5 + (bw - 1 - iw) * pan[0], by + 1.5 + (bh - 1 - ih) * pan[1], iw, ih);
+  }
+
   /** Where the speaker sits vertically: in the clip BODY, out of the title band. One
    *  definition, so the drawing and the hit box can never drift apart. */
   private muteCentreY(lane: Lane, track: number): number {
@@ -2675,6 +2720,8 @@ export class TimelineEditor {
     ctx.rect(0, 0, w, h);   // cover overflows the frame; the backend crops, so do we
     ctx.clip();
     let painted = false;
+    const target = this.reframeTarget();
+    this.framed = null;
     for (const clip of stack) {
       const src = this.host.sourceFor(clip.src);
       if (!src) continue;
@@ -2687,7 +2734,8 @@ export class TimelineEditor {
       const iw = (img as HTMLVideoElement).videoWidth || (img as HTMLCanvasElement).width;
       const ih = (img as HTMLVideoElement).videoHeight || (img as HTMLCanvasElement).height;
       if (!iw || !ih) continue;
-      const r = fitRect(iw, ih, w, h, this.host.getFit());
+      const r = fitRect(iw, ih, w, h, this.host.getFit(), clip.pan);
+      if (clip === target) this.framed = { clip, img, r, w, h };
       const blend = trackBlend(this.tl, clip.track);
       // The lowest layer always draws straight: blending against the initial black would
       // make `multiply` erase it. Same rule the backend applies.
@@ -2699,7 +2747,141 @@ export class TimelineEditor {
     if (this.maskOverlay) this.drawMaskOverlay(ctx, w, h);
     ctx.globalCompositeOperation = "source-over";
     ctx.restore();
+    this.drawGuide();
   }
+
+  // ── Reframe (drag on the monitor) ───────────────────────────────────────────
+
+  /** The clip a drag on the monitor moves: a selected one under the playhead, else the
+   *  top picture - the one you are looking at. */
+  private reframeTarget(): Clip | null {
+    const under = clipsAt(this.tl, this.playhead).filter((c) => !c.audioOnly);
+    return under.find((c) => this.selection.has(c.id)) ?? under[0] ?? null;
+  }
+
+  /** Slack per axis in monitor px (negative = cropped overflow, positive = bands). */
+  private slack(f: NonNullable<typeof this.framed>): [number, number] {
+    const sx = f.w - f.r.w, sy = f.h - f.r.h;
+    return [Math.abs(sx) > 0.5 ? sx : 0, Math.abs(sy) > 0.5 ? sy : 0];
+  }
+
+  /**
+   * While the pointer is on the monitor: the whole source as a faint ghost with a dashed
+   * outline (so the cropped part is visible where it really lies, beside the frame), and
+   * a rail through the frame along the axis that can move, with a knob at the current
+   * position. Hidden otherwise - a permanent overlay would sit on the timeline.
+   */
+  private drawGuide(): void {
+    const g = this.guide;
+    const f = this.framed;
+    const [sx, sy] = f ? this.slack(f) : [0, 0];
+    const show = (this.overPreview || this.reframing) && f && (sx || sy);
+    this.preview.style.cursor = show ? (sx ? "ew-resize" : "ns-resize") : "";
+    if (!show || !f) {
+      g.style.display = "none";
+      return;
+    }
+    g.style.display = "block";
+    const W = this.root.clientWidth, H = this.root.clientHeight;
+    const s = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+    if (g.width !== Math.round(W * s) || g.height !== Math.round(H * s)) {
+      g.width = Math.round(W * s);
+      g.height = Math.round(H * s);
+    }
+    const ctx = g.getContext("2d")!;
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    // The preview's border is 1px; its client box starts inside it.
+    const ox = this.preview.offsetLeft + this.preview.clientLeft;
+    const oy = this.preview.offsetTop + this.preview.clientTop;
+    const x = ox + f.r.x, y = oy + f.r.y;
+    ctx.globalAlpha = 0.28;
+    ctx.drawImage(f.img, x, y, f.r.w, f.r.h);
+    ctx.globalAlpha = 1;
+    ctx.clearRect(ox, oy, f.w, f.h);            // the real frame shows through untouched
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = "rgba(255, 214, 10, 0.9)";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x, y, f.r.w, f.r.h);
+    ctx.setLineDash([]);
+    // Rail + knob. The knob tracks the PICTURE, so it moves with the pointer: under
+    // cover the picture's offset runs opposite to pan (the slack is negative).
+    const p = f.clip.pan ?? [0.5, 0.5];
+    const pan = [sx < 0 ? 1 - p[0] : p[0], sy < 0 ? 1 - p[1] : p[1]];
+    ctx.strokeStyle = "rgba(255, 214, 10, 0.75)";
+    ctx.fillStyle = "#ffd60a";
+    ctx.beginPath();
+    if (sx) {
+      const ry = oy + f.h / 2, kx = ox + 8 + (f.w - 16) * pan[0];
+      ctx.moveTo(ox + 8, ry); ctx.lineTo(ox + f.w - 8, ry); ctx.stroke();
+      ctx.beginPath(); ctx.arc(kx, ry, 5, 0, Math.PI * 2);
+    } else {
+      const rx = ox + f.w / 2, ky = oy + 8 + (f.h - 16) * pan[1];
+      ctx.moveTo(rx, oy + 8); ctx.lineTo(rx, oy + f.h - 8); ctx.stroke();
+      ctx.beginPath(); ctx.arc(rx, ky, 5, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
+
+  private onPreviewHover = (e: PointerEvent): void => {
+    const over = e.type !== "pointerleave";
+    if (over === this.overPreview) return;
+    this.overPreview = over;
+    this.requestRender();
+  };
+
+  private onPreviewDown = (e: PointerEvent): void => {
+    if (e.button !== 0) return;
+    const f = this.framed;
+    const [sx, sy] = f ? this.slack(f) : [0, 0];
+    if (!f || !(sx || sy)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    this.pushUndo();
+    const clip = f.clip;
+    const pan0 = clip.pan ?? [0.5, 0.5];
+    // Screen px -> monitor px: the widget is scaled by the graph's zoom transform.
+    const k = this.preview.clientWidth / Math.max(1, this.preview.getBoundingClientRect().width);
+    const x0 = e.clientX, y0 = e.clientY;
+    const cv = this.preview;
+    cv.setPointerCapture(e.pointerId);
+    this.reframing = true;
+    const move = (m: PointerEvent) => {
+      // The picture follows the pointer: its offset is slack x pan, so pan moves by
+      // (pointer delta / slack). Under cover the slack is negative, which is what makes
+      // dragging right reveal the LEFT of the shot.
+      const at = (p0: number, sl: number, d: number) =>
+        sl ? Math.min(1, Math.max(0, p0 + (d * k) / sl)) : p0;
+      const p: [number, number] = [at(pan0[0], sx, m.clientX - x0),
+                                   at(pan0[1], sy, m.clientY - y0)];
+      const pan = panField(p).pan;
+      if (pan) clip.pan = pan;
+      else delete clip.pan;
+      this.requestRender();
+    };
+    const up = () => {
+      cv.removeEventListener("pointermove", move);
+      cv.removeEventListener("pointerup", up);
+      cv.removeEventListener("pointercancel", up);
+      this.reframing = false;
+      this.host.commit();
+      this.requestRender();
+    };
+    cv.addEventListener("pointermove", move);
+    cv.addEventListener("pointerup", up);
+    cv.addEventListener("pointercancel", up);
+  };
+
+  /** Double-click the monitor: back to centred. */
+  private onPreviewReset = (e: MouseEvent): void => {
+    const clip = this.framed?.clip;
+    if (!clip?.pan) return;
+    e.stopPropagation();
+    this.pushUndo();
+    delete clip.pan;
+    this.host.commit();
+    this.requestRender();
+  };
 
   /**
    * Tint the mask lane over the picture, so what the mask actually covers is visible
@@ -2744,7 +2926,7 @@ export class TimelineEditor {
     tctx.clearRect(0, 0, tc.width, tc.height);
     tctx.fillStyle = "#000";
     tctx.fillRect(0, 0, tc.width, tc.height);
-    const r = fitRect(iw, ih, tc.width, tc.height, this.host.getFit());
+    const r = fitRect(iw, ih, tc.width, tc.height, this.host.getFit(), top.pan);
     tctx.drawImage(img, r.x, r.y, r.w, r.h);
     tctx.globalCompositeOperation = "multiply";   // white -> red, black stays black
     tctx.fillStyle = "#ff3b30";
@@ -2819,8 +3001,41 @@ export class TimelineEditor {
         + "Ctrl for fine";
       return;
     }
+    if (this.overPreview && this.framed && !this.audioOnly) {
+      const [sx, sy] = this.slack(this.framed);
+      if (sx || sy) {
+        this.status.textContent = "Reframe · drag the picture, double-click to centre";
+        return;
+      }
+    }
+    // The size the render will ACTUALLY have. Ratio + megapixels + multiple (or As Source)
+    // resolve to a number nobody typed, and without it a wrong resolution - the As Source
+    // bug of 2026-09-24 - is invisible until the render comes out.
+    let res = "";
+    if (!this.audioOnly) {
+      const [ow, oh] = this.host.getOutSize();
+      res = ` · ${ow}×${oh}`;
+    }
     this.status.textContent =
-      `f ${this.playhead}${shuttle}${sel}${mk} · ${count} frames${q} · ${secs.toFixed(2)}s @ ${fps} fps`;
+      `f ${this.playhead}${shuttle}${sel}${mk} · ${count} frames${q}${this.roundUpNote(raw, count)}`
+      + `${res} · ${secs.toFixed(2)}s @ ${fps} fps`;
+  }
+
+  /**
+   * When the model rounds the count UP past the material (MiniMax H3's 17n+5, or any
+   * family's floor on a very short range), those extra frames are gaps: the model will
+   * GENERATE them. The amber band shows where, but not why - and "why is there a gap at
+   * the end" is exactly the question someone who does not know the grid will ask.
+   */
+  private roundUpNote(raw: number, count: number): string {
+    if (count <= raw || this.audioOnly) return "";
+    const start = this.host.getStartFrame();
+    const pics = this.tl.clips.filter((c) => !c.audioOnly);
+    let n = 0;
+    for (let f = start + raw; f < start + count; f++) {
+      if (!pics.some((c) => f >= c.start && f < c.start + c.length)) n++;
+    }
+    return n ? ` · +${n} generated (model rounds up)` : "";
   }
 
   destroy(): void {

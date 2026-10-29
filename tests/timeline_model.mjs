@@ -123,6 +123,16 @@ test("fitRect — parity with fit_frames, and what the preview draws", () => {
   }
   // Degenerate input must not produce NaN.
   assert.deepEqual(M.fitRect(0, 0, 64, 64, "contain"), { x: 0, y: 0, w: 64, h: 64 });
+  // pan reframes inside the slack - same asserts as test_fit_frames in Python.
+  assert.equal(M.fitRect(200, 100, 64, 64, "cover", [0, 0.5]).x, 0);      // left edge
+  assert.equal(M.fitRect(200, 100, 64, 64, "cover", [1, 0.5]).x, -64);    // right edge
+  assert.equal(M.fitRect(200, 100, 64, 64, "contain", [0.5, 0]).y, 0);    // hugs top
+  // Parse/serialise: centred is omitted, out-of-range clamps, survives a round trip.
+  const tl = M.parseTimeline(JSON.stringify({ clips: [
+    { src: "media_0", length: 5, pan: [-1, 2] }, { src: "media_0", length: 5, pan: [0.5, 0.5] },
+  ] }));
+  assert.deepEqual(tl.clips.map((c) => c.pan), [[0, 1], undefined]);
+  assert.deepEqual(M.parseTimeline(M.serialiseTimeline(tl)).clips[0].pan, [0, 1]);
 });
 
 test("sourceFrame — resampling between different frame rates", () => {

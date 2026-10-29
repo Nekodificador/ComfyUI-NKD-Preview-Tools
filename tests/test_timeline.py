@@ -24,7 +24,7 @@ from comfy_api.latest import Types  # noqa: E402
 
 from nkd_timeline import (  # noqa: E402
     ASPECT_MODES, BLEND_MODES, QUANTIZE_MODES, NKDTimeline, _to_mask, _to_rgb,
-    blend_pixels, resolve_resolution,
+    _parse_clips, blend_pixels, hold_index, resolve_resolution,
     build_sources, classify,
     AudioEnv, audio_env, clip_gain_ramp,
     clip_bound_indices, fit_frames, gather_window, marker_indices, mix_audio,
@@ -247,6 +247,20 @@ def test_fit_frames():
     tall[:, 50:150, :, :] = 1.0
     assert float(fit_frames(tall, 64, 64, "cover").min()) > 0.99
 
+    # `pan` reframes inside the slack. Left edge of a 2:1 source under cover keeps the
+    # left square; under contain the picture hugs the top and the band goes below.
+    # Twin of the fitRect pan asserts in timeline_model.mjs.
+    halves = torch.zeros((1, 100, 200, 3))
+    halves[:, :, :100, :] = 1.0                 # left half white
+    assert float(fit_frames(halves, 64, 64, "cover", (0.0, 0.5)).min()) > 0.99
+    assert float(fit_frames(halves, 64, 64, "cover", (1.0, 0.5)).max()) < 0.01
+    top = fit_frames(torch.ones((1, 100, 200, 3)), 64, 64, "contain", (0.5, 0.0))
+    assert float(top[0, 0, 32, 0]) == 1.0 and float(top[0, 63, 32, 0]) == 0.0
+    # Parsing: absent = centred, out-of-range clamps, junk falls back.
+    raw = [{"src": "media_0", "length": 5}, {"src": "media_0", "length": 5, "pan": [-1, 2]},
+           {"src": "media_0", "length": 5, "pan": "x"}]
+    assert [c["pan"] for c in _parse_clips(raw)] == [(0.5, 0.5), (0.0, 1.0), (0.5, 0.5)]
+
     # A large reduction takes the `area` path and a small one takes bicubic; both must
     # still land on the requested size and stay in range.
     for src_wh, dst in (((3, 2160, 3840, 3), (832, 480)), ((3, 520, 900, 3), (832, 480))):
@@ -412,6 +426,42 @@ def test_gaps_are_black_and_the_flat_lanes_cost_nothing():
         model="free", quantize_n=8, clip_audio=False)
     assert outs(r2)["mask"].stride() == (16, 4, 1)
     assert float(outs(r2)["mask"][0].min()) > 0.0
+
+
+def test_raw_fill_modes():
+    """A guide asks the model for every frame it is given, so the black tail the model's
+    grid adds (or any gap) comes back black. With the toggle, `raw_images` holds the last
+    real frame instead (the first one, at the head) - and `images` keeps its black gaps,
+    because for inpainting black + mask is the right answer."""
+    t = torch.tensor
+    assert hold_index(t([True, True])) is None                     # nothing to fill
+    assert hold_index(t([False, False])) is None                   # nothing to fill WITH
+    assert hold_index(t([False, True, False, False, True, False])).tolist() == [1, 1, 1, 1, 4, 4]
+
+    seq = torch.arange(1, 7, dtype=torch.float32).div(10).view(6, 1, 1, 1).expand(6, 4, 4, 3)
+    tl = _dumps({
+        "clips": [{"src": "media_0", "track": 0, "start": 2, "trimIn": 0, "length": 6}],
+        "masks": [], "audio": [], "ui": {"playhead": 0}})
+
+    def run(fill):
+        return outs(NKDTimeline.execute(
+            media={"media_0": seq.contiguous()}, timeline=tl, import_mode="stack", fps=24.0,
+            start_frame=0, frame_count=12, width=4, height=4, fit="stretch",
+            aspect_ratio="Custom", megapixels=1.0, size_multiple=16, model="free",
+            quantize_n=8, clip_audio=False, raw_fill=fill))
+
+    off, on = run("black"), run("hold last frame")
+    assert float(off["raw_images"][11].abs().max()) == 0.0         # default unchanged
+    raw = on["raw_images"]
+    assert raw.shape[0] == 12
+    for f, want in ((0, 0.1), (1, 0.1), (2, 0.1), (7, 0.6), (8, 0.6), (11, 0.6)):
+        assert abs(float(raw[f].mean()) - want) < 1e-6, f          # head: first, tail: last
+    assert float(on["images"][11].abs().max()) == 0.0, "images must keep its black gaps"
+    # trim tail: ends at the last real frame (7); the HEAD gap stays, or every frame after
+    # it would shift and a guide is placed by index.
+    trim = run("trim tail")["raw_images"]
+    assert trim.shape[0] == 8
+    assert float(trim[0].abs().max()) == 0.0 and abs(float(trim[7].mean()) - 0.6) < 1e-6
 
 
 def test_generate_mask_unions_the_lane_and_the_gaps():

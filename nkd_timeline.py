@@ -260,6 +260,11 @@ def _parse_clips(raw_list: Any) -> list[dict]:
             "muted": bool(c.get("muted")),
             "audioOnly": bool(c.get("audioOnly")),
             "markers": markers,
+            # Reframe anchor inside `fit`'s slack, 0..1 per axis; centred when absent.
+            # Twin of `panField` in model.ts.
+            "pan": tuple(min(1.0, max(0.0, _float(v, 0.5))) for v in (
+                list(c["pan"]) if isinstance(c.get("pan"), (list, tuple)) else []
+            ) + [0.5, 0.5])[:2],
             **_fade_fields(c, length),
         })
     out.sort(key=lambda c: (c["track"], c["start"]))
@@ -611,6 +616,28 @@ def audio_env(clip: dict, a: int, fps: float, sr: int) -> AudioEnv:
     )
 
 
+# What `raw_images` puts where no clip wrote a picture. Only raw_images: for inpainting,
+# black + the `coverage`/`generate` masks is the right answer and `images` keeps it.
+RAW_FILL_BLACK = "black"
+RAW_FILL_HOLD = "hold last frame"
+RAW_FILL_TRIM = "trim tail"
+RAW_FILL_MODES = [RAW_FILL_BLACK, RAW_FILL_HOLD, RAW_FILL_TRIM]
+
+
+def hold_index(written: torch.Tensor) -> Optional[torch.Tensor]:
+    """Frame index that fills every unwritten frame from the last written one before it
+    (from the first written one, for a leading gap). None when there is nothing to fill -
+    or nothing to fill it WITH, where black is the only honest answer."""
+    if bool(written.all()) or not bool(written.any()):
+        return None
+    n = written.shape[0]
+    pos = torch.arange(n)
+    # Running max of "index where written, -1 elsewhere" = last written frame so far.
+    last = torch.where(written, pos, torch.full_like(pos, -1)).cummax(0).values
+    first = int(written.nonzero()[0])
+    return torch.where(last < 0, torch.full_like(pos, first), last)
+
+
 # ── Resolution fitting ────────────────────────────────────────────────────────
 
 def _resize(chw: torch.Tensor, width: int, height: int) -> torch.Tensor:
@@ -646,12 +673,16 @@ def _resize(chw: torch.Tensor, width: int, height: int) -> torch.Tensor:
     return comfy.utils.common_upscale(chw, width, height, "lanczos", "disabled")
 
 
-def fit_frames(t: torch.Tensor, width: int, height: int, mode: str) -> torch.Tensor:
+def fit_frames(t: torch.Tensor, width: int, height: int, mode: str,
+               pan: tuple = (0.5, 0.5)) -> torch.Tensor:
     """`t` is [N,H,W,C] (or [N,H,W] for a mask) in 0..1. Returns the same rank, resized.
 
     The editor's preview mirrors these three modes exactly, so what you scrub is what
-    gets rendered.
+    gets rendered. `pan` (0..1 per axis) places the picture inside the slack - which part
+    of the overflow `cover` keeps, where in the bands `contain` sits. `int()` floors, so
+    0.5 lands exactly where the old `// 2` did.
     """
+    px, py = pan
     if t.shape[1] == height and t.shape[2] == width:
         return t                     # BEFORE the mask branch: a mask that already fits
                                      # must not pay for a 3x channel copy to learn that.
@@ -661,7 +692,8 @@ def fit_frames(t: torch.Tensor, width: int, height: int, mode: str) -> torch.Ten
         # (utils.py:1062, "the below API is strict"), so a [N,H,W,1] tensor returns rank 3
         # and every shape downstream breaks. The RGB path is the well-trodden one and the
         # extra channels cost nothing measurable at mask sizes.
-        return fit_frames(t.unsqueeze(-1).repeat(1, 1, 1, 3), width, height, mode)[..., 0]
+        return fit_frames(t.unsqueeze(-1).repeat(1, 1, 1, 3), width, height, mode,
+                          pan)[..., 0]
     chw = t.movedim(-1, 1)  # the resizers want [N,C,H,W]
     if mode == "cover":
         # Crop to the output aspect first, then resize once. Going through
@@ -670,7 +702,7 @@ def fit_frames(t: torch.Tensor, width: int, height: int, mode: str) -> torch.Ten
         src_h, src_w = chw.shape[-2], chw.shape[-1]
         keep_w = min(src_w, int(round(src_h * width / height)))
         keep_h = min(src_h, int(round(src_w * height / width)))
-        x, y = (src_w - keep_w) // 2, (src_h - keep_h) // 2
+        x, y = int((src_w - keep_w) * px), int((src_h - keep_h) * py)
         out = _resize(chw[:, :, y:y + keep_h, x:x + keep_w], width, height)
     elif mode == "stretch":
         out = _resize(chw, width, height)
@@ -681,8 +713,8 @@ def fit_frames(t: torch.Tensor, width: int, height: int, mode: str) -> torch.Ten
         inner_h = max(1, int(round(src_h * scale)))
         inner = _resize(chw, inner_w, inner_h)
         out = torch.zeros((chw.shape[0], chw.shape[1], height, width), dtype=chw.dtype)
-        y = (height - inner_h) // 2
-        x = (width - inner_w) // 2
+        y = int((height - inner_h) * py)
+        x = int((width - inner_w) * px)
         out[:, :, y:y + inner_h, x:x + inner_w] = inner
     return out.movedim(1, -1).clamp(0.0, 1.0)
 
@@ -1097,6 +1129,18 @@ class NKDTimeline(io.ComfyNode):
                                          "clip 2 in… NKD Freeze Frames then freezes each "
                                          "cut's boundary frames without marking them by "
                                          "hand."),
+                # Appended last, same rule.
+                io.Combo.Input("raw_fill", options=RAW_FILL_MODES, default=RAW_FILL_BLACK,
+                               display_name="raw_images fill",
+                               tooltip="What 'raw_images' puts where there is no material. "
+                                       "black: as 'images'. hold last frame: repeat the "
+                                       "last real frame (the first one, at the head) - use "
+                                       "this for guides, a black tail asks the model for "
+                                       "black. trim tail: end the batch at the last real "
+                                       "frame, gaps in the middle stay black; careful, "
+                                       "MiniMax H3's Add Guide trims a guide DOWN to 17n+5, "
+                                       "so 20 frames become 5. 'images' and the masks are "
+                                       "unaffected."),
             ],
             # ORDER DELIBERATELY REBUILT (Neko, 2026-08-09) - a ONE-OFF break.
             #
@@ -1160,7 +1204,9 @@ class NKDTimeline(io.ComfyNode):
                 io.Image.Output(display_name="raw_images",
                                 tooltip="The timeline cut as-is: every clip contributes "
                                         "its picture, including audio-only clips. Gaps "
-                                        "with no material are black. Use as reference "
+                                        "with no material follow 'raw_images fill' "
+                                        "(black by default; 'hold last frame' for "
+                                        "guides). Use as reference "
                                         "for models that need the original video."),
             ],
             # unique_id: needed to address the push below at THIS node's editor.
@@ -1186,7 +1232,8 @@ class NKDTimeline(io.ComfyNode):
                 aspect_ratio: str, width: int, height: int, megapixels: float,
                 size_multiple: int, fit: str, fps: float, model: str, quantize_n: int,
                 start_frame: int, frame_count: int, clip_audio: bool,
-                clip_markers: bool = False) -> io.NodeOutput:
+                clip_markers: bool = False,
+                raw_fill: str = RAW_FILL_BLACK) -> io.NodeOutput:
         del import_mode   # placement happens in the editor; the backend reads the result
         sources, auds = build_sources(media)
 
@@ -1296,7 +1343,7 @@ class NKDTimeline(io.ComfyNode):
                         heard[lo_i:hi_i] = 1.0
                     sample_rate = got or sample_rate
                 continue
-            fitted = fit_frames(_to_rgb(frames), width, height, fit)
+            fitted = fit_frames(_to_rgb(frames), width, height, fit, clip.get("pan", (0.5, 0.5)))
             mode = track_blend(tl["tracks"], clip["track"])
             if mode == "normal":
                 out[lo_i:hi_i] = fitted
@@ -1337,7 +1384,7 @@ class NKDTimeline(io.ComfyNode):
                 if frames is None:
                     continue
                 lo_i, hi_i = a - start_frame, b - start_frame
-                fitted = fit_frames(_to_rgb(frames), width, height, fit)
+                fitted = fit_frames(_to_rgb(frames), width, height, fit, clip.get("pan", (0.5, 0.5)))
                 mode = track_blend(tl["tracks"], clip["track"])
                 if mode == "normal":
                     raw_out[lo_i:hi_i] = fitted
@@ -1351,6 +1398,21 @@ class NKDTimeline(io.ComfyNode):
                 raw_out[(~raw_written).nonzero().flatten()] = 0.0
         else:
             raw_out = out
+            raw_written = written
+        if raw_fill == RAW_FILL_TRIM and bool(raw_written.any()):
+            # Tail only: dropping a head or a middle gap would shift every frame after it,
+            # and a guide is placed by frame index.
+            raw_out = raw_out[:int(raw_written.nonzero()[-1]) + 1]      # a view, no copy
+        elif raw_fill == RAW_FILL_HOLD:
+            idx = hold_index(raw_written)
+            if idx is not None:
+                if raw_out is out:
+                    # ponytail: a full copy of the batch - it must not write through into
+                    # 'images'. Only paid with the toggle on and a gap present.
+                    raw_out = out[idx]
+                else:                               # already our own clone: fill in place
+                    miss = ~raw_written
+                    raw_out[miss] = raw_out[idx[miss]]
 
         # The mask lane. A mask clip may point at ANY slot: a real MASK passes through, an
         # image or video is read as luminance. That is "use this video as a mask".
@@ -1365,7 +1427,7 @@ class NKDTimeline(io.ComfyNode):
             if frames is None:
                 continue
             mask_out[a - start_frame:b - start_frame] = fit_frames(
-                _to_mask(frames), width, height, fit).clamp(0.0, 1.0)
+                _to_mask(frames), width, height, fit, clip.get("pan", (0.5, 0.5))).clamp(0.0, 1.0)
 
         for ac in auclips:
             pbar.update(1)

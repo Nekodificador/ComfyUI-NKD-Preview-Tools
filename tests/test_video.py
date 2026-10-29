@@ -417,6 +417,42 @@ def test_gif_palette_survives_an_unrepresentative_first_frame():
     print("  ok  test_gif_palette_survives_an_unrepresentative_first_frame")
 
 
+def test_gif_only_stores_what_changed_and_can_be_scaled_down():
+    """The two size levers, asserted by file size, which is the whole point.
+
+    A noisy still background with a small moving square: what the delta path saves here
+    is everything that did NOT move. `disposal=2` made PIL store every frame whole, so
+    this used to be ~20x bigger. Second half: `max_size` has to actually come back
+    smaller, not just be accepted. Frame count is NOT asserted after scaling — PIL merges
+    frames that quantise to identical pixels, which is correct and also a saving.
+    """
+    torch.manual_seed(0)
+    n, h, w = 24, 160, 160
+    clip = torch.rand(1, h, w, 3).repeat(n, 1, 1, 1)
+    for i in range(n):
+        clip[i, 10 + i * 3:30 + i * 3, 20:40, :] = 0.0        # a square moves across
+
+    def whole_frames(path):                 # what disposal=2 used to force
+        master = _gif_palette(clip, 64)
+        fr = [PILImage.fromarray((f.clamp(0, 1) * 255).round().byte().numpy(), "RGB")
+              .quantize(palette=master, dither=PILImage.Dither.NONE) for f in clip]
+        fr[0].save(path, save_all=True, append_images=fr[1:], loop=0, duration=41,
+                   disposal=2)
+
+    with tempfile.TemporaryDirectory() as d:
+        delta, whole, small = (os.path.join(d, x) for x in
+                               ("delta.gif", "whole.gif", "small.gif"))
+        encode_gif(clip, delta, 24.0, 64, False, None)
+        whole_frames(whole)
+        assert os.path.getsize(delta) * 5 < os.path.getsize(whole), (
+            os.path.getsize(delta), os.path.getsize(whole))
+        encode_gif(clip, small, 24.0, 64, False, None, max_size=64)
+        with PILImage.open(small) as im:
+            assert im.size == (64, 64), im.size
+        assert os.path.getsize(small) < os.path.getsize(delta)
+    print("  ok  test_gif_only_stores_what_changed_and_can_be_scaled_down")
+
+
 def test_metadata_survives_the_container():
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "t.mp4")

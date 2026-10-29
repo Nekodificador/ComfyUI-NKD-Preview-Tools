@@ -19,8 +19,14 @@ const CSS = `
   font: 12px system-ui, sans-serif; color: #c8d0e0;
   outline: none;
   container-type: inline-size;
+  position: relative;   /* anchors the reframe guide */
+}
+.nkd-tl-guide {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; display: none;
 }
 .nkd-tl-preview {
+  touch-action: none;   /* dragging on the monitor reframes */
   /* max-width is set from JS (height cap x aspect) and margin auto centres it, so
      widening the node stretches the TIMELINE rather than the monitor. */
   width: 100%; display: block; margin: 0 auto;

@@ -54,6 +54,13 @@ export type Clip = {
    * `shiftMarkers`/`pruneMarkers`.
    */
   markers?: number[];
+  /**
+   * Reframe anchor, 0..1 per axis: where the picture sits inside the slack `fit` leaves -
+   * the cropped overflow under `cover`, the black bands under `contain`. 0 = left/top
+   * edge, 1 = right/bottom. Absent means centred, which is how every clip behaved before.
+   * Twin of the `pan` argument of `fit_frames` in Python.
+   */
+  pan?: [number, number];
 };
 
 export type AudioClip = {
@@ -632,9 +639,18 @@ function parseClipList(raw: any): Clip[] {
       ...(c.audioOnly ? { audioOnly: true } : {}),
       ...fadeFields(c, length),
       ...(markers.length ? { markers } : {}),
+      ...panField(c.pan),
     });
   }
   return out;
+}
+
+/** `pan` off raw JSON, clamped; centred means absent so old workflows load identically. */
+export function panField(raw: any): { pan?: [number, number] } {
+  if (!Array.isArray(raw)) return {};
+  const clamp = (v: any) => Math.round(Math.min(1, Math.max(0, num(v, 0.5))) * 1000) / 1000;
+  const pan: [number, number] = [clamp(raw[0]), clamp(raw[1])];
+  return pan[0] === 0.5 && pan[1] === 0.5 ? {} : { pan };
 }
 
 /** Never throws. Corrupt JSON degrades to an empty timeline, same as in Python. */
@@ -697,6 +713,7 @@ export function serialiseTimeline(t: Timeline): string {
     ...(c.fadeIn ? { fadeIn: c.fadeIn } : {}),
     ...(c.fadeOut ? { fadeOut: c.fadeOut } : {}),
     ...(c.markers?.length ? { markers: c.markers } : {}),
+    ...panField(c.pan),
   });
   return JSON.stringify({
     v: 1,
@@ -1200,7 +1217,8 @@ export type FitMode = "contain" | "cover" | "stretch";
 
 /** Destination rect for drawing a `sw x sh` source into a `dw x dh` output.
  *  The editor's preview uses this so what you scrub is what gets rendered. */
-export function fitRect(sw: number, sh: number, dw: number, dh: number, mode: FitMode):
+export function fitRect(sw: number, sh: number, dw: number, dh: number, mode: FitMode,
+                        pan: readonly [number, number] = [0.5, 0.5]):
     { x: number; y: number; w: number; h: number } {
   if (sw <= 0 || sh <= 0) return { x: 0, y: 0, w: dw, h: dh };
   if (mode === "stretch") return { x: 0, y: 0, w: dw, h: dh };
@@ -1209,5 +1227,7 @@ export function fitRect(sw: number, sh: number, dw: number, dh: number, mode: Fi
     : Math.min(dw / sw, dh / sh);  // contain: fit whole, remainder is black
   const w = sw * scale;
   const h = sh * scale;
-  return { x: (dw - w) / 2, y: (dh - h) / 2, w, h };
+  // `pan` places the picture inside the slack: negative under cover (overflow), positive
+  // under contain (bands). Same formula either way, same as `fit_frames`.
+  return { x: (dw - w) * pan[0] + 0, y: (dh - h) * pan[1] + 0, w, h };   // +0: no -0
 }

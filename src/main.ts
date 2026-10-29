@@ -10,7 +10,7 @@ import {
   type FitMode, type ImportMode, type QuantizeMode, type Timeline,
   firstStop, parseTimeline, quantizeCount, quantizeGrid, serialiseTimeline, slotInUse,
   viewState,
-  ASPECT_CUSTOM, QUANTIZE_CUSTOM, resolveResolution,
+  ASPECT_CUSTOM, ASPECT_SOURCE, QUANTIZE_CUSTOM, resolveResolution,
 } from "./timeline/model";
 import {
   PREVIEW_MAX_H, TimelineEditor, type KeyAction, type TimelineHost,
@@ -215,20 +215,26 @@ function makeHost(node: any, state: { tl: Timeline }, pool: () => VideoPool,
       // moment you pick 9:16 - no run needed. 'Custom' falls through to the widgets.
       // `As Source` needs the first clip's own size, which the editor already has cached
       // from the probe - so this one also resolves live, no run needed.
+      // Through `sourceFor`, NOT `srcCache`: a computed slot (a tensor from another node)
+      // lives in `strips`, and a slot nobody has resolved yet is not in the cache at all.
+      // Reading the cache directly found nothing in both cases and `As Source` fell back to
+      // whatever the hidden width/height widgets held - "stuck" on the previous size.
       const firstClip = state.tl.clips[0] ?? state.tl.masks[0];
-      const srcInfo = firstClip ? srcCache.get(firstClip.src)?.info : null;
-      const [w, h] = resolveResolution(
-        String(findW(node, "aspect_ratio")?.value ?? ASPECT_CUSTOM),
-        numW("megapixels", 1), Math.round(numW("width", 0)),
+      const srcInfo = firstClip ? host.sourceFor(firstClip.src)?.info : null;
+      const aspect = String(findW(node, "aspect_ratio")?.value ?? ASPECT_CUSTOM);
+      // `As Source` with no shape known yet (a tensor before its first run): the hidden
+      // width/height are NOT the answer - they are leftovers from `Custom`. Pass zeros so
+      // it falls through to what the backend reported, which resolved the real shape.
+      const noShape = aspect === ASPECT_SOURCE && !(srcInfo?.width && srcInfo?.height);
+      const [w, h] = noShape ? [0, 0] : resolveResolution(
+        aspect, numW("megapixels", 1), Math.round(numW("width", 0)),
         Math.round(numW("height", 0)), numW("size_multiple", 16),
         srcInfo?.width ?? 0, srcInfo?.height ?? 0);
       if (w > 0 && h > 0) return [w, h];
       if (reported && reported.width > 0 && reported.height > 0) {
         return [reported.width, reported.height];
       }
-      const first = state.tl.clips[0];
-      const info = first ? srcCache.get(first.src)?.info : null;
-      return info ? [info.width, info.height] : [16, 9];
+      return srcInfo ? [srcInfo.width, srcInfo.height] : [16, 9];
     },
     sourceFor(src: string) {
       // A computed slot describes itself; nothing upstream can be trusted to.

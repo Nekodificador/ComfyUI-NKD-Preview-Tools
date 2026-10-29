@@ -334,10 +334,17 @@ function parseClipList(raw) {
       ...c.muted ? { muted: true } : {},
       ...c.audioOnly ? { audioOnly: true } : {},
       ...fadeFields(c, length),
-      ...markers.length ? { markers } : {}
+      ...markers.length ? { markers } : {},
+      ...panField(c.pan)
     });
   }
   return out;
+}
+function panField(raw) {
+  if (!Array.isArray(raw)) return {};
+  const clamp = (v) => Math.round(Math.min(1, Math.max(0, num$1(v, 0.5))) * 1e3) / 1e3;
+  const pan = [clamp(raw[0]), clamp(raw[1])];
+  return pan[0] === 0.5 && pan[1] === 0.5 ? {} : { pan };
 }
 function parseTimeline(raw) {
   const out = emptyTimeline();
@@ -398,7 +405,8 @@ function serialiseTimeline(t) {
       ...c.gain !== void 0 && c.gain !== 1 ? { gain: c.gain } : {},
       ...c.fadeIn ? { fadeIn: c.fadeIn } : {},
       ...c.fadeOut ? { fadeOut: c.fadeOut } : {},
-      ...((_a = c.markers) == null ? void 0 : _a.length) ? { markers: c.markers } : {}
+      ...((_a = c.markers) == null ? void 0 : _a.length) ? { markers: c.markers } : {},
+      ...panField(c.pan)
     };
   };
   return JSON.stringify({
@@ -688,13 +696,13 @@ function placementFor(t, lane2, mode) {
   const start = lane2.filter((c) => c.track === 0).reduce((m, c) => Math.max(m, c.start + c.length), 0);
   return { start, track: 0 };
 }
-function fitRect(sw, sh, dw, dh, mode) {
+function fitRect(sw, sh, dw, dh, mode, pan = [0.5, 0.5]) {
   if (sw <= 0 || sh <= 0) return { x: 0, y: 0, w: dw, h: dh };
   if (mode === "stretch") return { x: 0, y: 0, w: dw, h: dh };
   const scale2 = mode === "cover" ? Math.max(dw / sw, dh / sh) : Math.min(dw / sw, dh / sh);
   const w = sw * scale2;
   const h = sh * scale2;
-  return { x: (dw - w) / 2, y: (dh - h) / 2, w, h };
+  return { x: (dw - w) * pan[0] + 0, y: (dh - h) * pan[1] + 0, w, h };
 }
 const ENV_BUCKET = 256;
 function buildEnvelope(buf) {
@@ -1569,6 +1577,14 @@ class TimelineEditor {
     __publicField(this, "waveDb", false);
     /** Default ON (Neko, 2026-08-19): the band is why the toggle exists; session-only. */
     __publicField(this, "showClipWave", true);
+    /** Reframe overlay: sits over the whole widget so the cropped overflow can be drawn
+     *  OUTSIDE the monitor, where it actually is. Never takes pointer events. */
+    __publicField(this, "guide");
+    __publicField(this, "overPreview", false);
+    __publicField(this, "reframing", false);
+    /** What the last preview draw placed for the reframe target - the guide reuses it
+     *  instead of asking the pool for the picture a second time. */
+    __publicField(this, "framed", null);
     /** Scratch canvas for tinting the mask; reused so playback does not allocate. */
     __publicField(this, "tintCanvas", document.createElement("canvas"));
     /** Last quantise/fps pair we warned about, so the toast fires on CHANGE only. */
@@ -1896,6 +1912,16 @@ class TimelineEditor {
             }
           });
         }
+        if (c.pan && hit.lane !== "audio") {
+          items.push({
+            label: "Reset framing (centre)",
+            on: () => {
+              this.pushUndo();
+              delete c.pan;
+              this.host.commit();
+            }
+          });
+        }
         if ((_a = c.markers) == null ? void 0 : _a.length) {
           items.push({
             label: `Clear ${c.markers.length} marker${c.markers.length > 1 ? "s" : ""}`,
@@ -2051,6 +2077,61 @@ class TimelineEditor {
       const raw = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
       this.panBy(raw / this.logicalWidth * this.viewFrames);
     });
+    __publicField(this, "onPreviewHover", (e) => {
+      const over = e.type !== "pointerleave";
+      if (over === this.overPreview) return;
+      this.overPreview = over;
+      this.requestRender();
+    });
+    __publicField(this, "onPreviewDown", (e) => {
+      if (e.button !== 0) return;
+      const f = this.framed;
+      const [sx, sy] = f ? this.slack(f) : [0, 0];
+      if (!f || !(sx || sy)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.pushUndo();
+      const clip = f.clip;
+      const pan0 = clip.pan ?? [0.5, 0.5];
+      const k = this.preview.clientWidth / Math.max(1, this.preview.getBoundingClientRect().width);
+      const x0 = e.clientX, y0 = e.clientY;
+      const cv = this.preview;
+      cv.setPointerCapture(e.pointerId);
+      this.reframing = true;
+      const move = (m) => {
+        const at = (p0, sl, d) => sl ? Math.min(1, Math.max(0, p0 + d * k / sl)) : p0;
+        const p = [
+          at(pan0[0], sx, m.clientX - x0),
+          at(pan0[1], sy, m.clientY - y0)
+        ];
+        const pan = panField(p).pan;
+        if (pan) clip.pan = pan;
+        else delete clip.pan;
+        this.requestRender();
+      };
+      const up = () => {
+        cv.removeEventListener("pointermove", move);
+        cv.removeEventListener("pointerup", up);
+        cv.removeEventListener("pointercancel", up);
+        this.reframing = false;
+        this.host.commit();
+        this.requestRender();
+      };
+      cv.addEventListener("pointermove", move);
+      cv.addEventListener("pointerup", up);
+      cv.addEventListener("pointercancel", up);
+    });
+    /** Double-click the monitor: back to centred. */
+    __publicField(this, "onPreviewReset", (e) => {
+      var _a;
+      const clip = (_a = this.framed) == null ? void 0 : _a.clip;
+      if (!(clip == null ? void 0 : clip.pan)) return;
+      e.stopPropagation();
+      this.pushUndo();
+      delete clip.pan;
+      this.host.commit();
+      this.requestRender();
+    });
     this.host = host;
     this.audioOnly = !!opts.audioOnly;
     this.transport = new Transport({
@@ -2085,9 +2166,15 @@ class TimelineEditor {
     this.bar.className = "nkd-tl-bar";
     this.status = document.createElement("span");
     this.status.className = "nkd-tl-status";
+    this.guide = document.createElement("canvas");
+    this.guide.className = "nkd-tl-guide";
     this.buildBar();
     if (this.audioOnly) this.root.append(this.canvas, this.bar);
-    else this.root.append(this.preview, this.canvas, this.bar);
+    else this.root.append(this.preview, this.canvas, this.bar, this.guide);
+    this.preview.addEventListener("pointerdown", this.onPreviewDown);
+    this.preview.addEventListener("pointermove", this.onPreviewHover);
+    this.preview.addEventListener("pointerleave", this.onPreviewHover);
+    this.preview.addEventListener("dblclick", this.onPreviewReset);
     this.applyTimelineHeight();
     this.canvas.addEventListener("pointerdown", this.onDown);
     this.canvas.addEventListener("pointermove", this.onHover);
@@ -3337,7 +3424,13 @@ class TimelineEditor {
       ctx.font = "10px system-ui, sans-serif";
       ctx.textBaseline = "middle";
       const label = ((src == null ? void 0 : src.label) ?? `${c.src} (no source)`) + (soundOnly && w > 150 ? "  ·  audio only" : "");
-      ctx.fillText(this.ellipsise(ctx, label, w - 12), x + 5, y + CLIP_HEAD_H / 2);
+      const badge = !!c.pan && lane2 !== "audio" && w > 44 && h > CLIP_HEAD_H + 4;
+      ctx.fillText(
+        this.ellipsise(ctx, label, w - (badge ? 30 : 12)),
+        x + 5,
+        y + CLIP_HEAD_H / 2
+      );
+      if (badge) this.drawPanBadge(ctx, c.pan, x + w - 18, y, selected);
     }
     const info = src == null ? void 0 : src.info;
     const fps = this.host.getFps();
@@ -3559,6 +3652,20 @@ class TimelineEditor {
     const seen = (Math.max(a, 0) + Math.min(b, this.logicalWidth)) / 2;
     return Math.round(Math.max(lo, Math.min(hi, seen)));
   }
+  /**
+   * "This clip is reframed", in the header. The pack's own rule: a setting that changes
+   * the render must not be invisible, and a reframe only showed while hovering the
+   * monitor. The glyph IS the setting - a frame with the kept window drawn where it sits.
+   */
+  drawPanBadge(ctx, pan, x, y, selected) {
+    const bw = 12, bh = 8, iw = 5, ih = 4;
+    const bx = x, by = y + Math.round((CLIP_HEAD_H - bh) / 2);
+    ctx.strokeStyle = selected ? "#0d1b24" : "#ffd60a";
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx + 0.5, by + 0.5, bw, bh);
+    ctx.fillRect(bx + 1.5 + (bw - 1 - iw) * pan[0], by + 1.5 + (bh - 1 - ih) * pan[1], iw, ih);
+  }
   /** Where the speaker sits vertically: in the clip BODY, out of the title band. One
    *  definition, so the drawing and the hit box can never drift apart. */
   muteCentreY(lane2, track) {
@@ -3685,6 +3792,8 @@ class TimelineEditor {
     ctx.rect(0, 0, w, h);
     ctx.clip();
     let painted = false;
+    const target = this.reframeTarget();
+    this.framed = null;
     for (const clip of stack) {
       const src = this.host.sourceFor(clip.src);
       if (!src) continue;
@@ -3696,7 +3805,8 @@ class TimelineEditor {
       const iw = img.videoWidth || img.width;
       const ih = img.videoHeight || img.height;
       if (!iw || !ih) continue;
-      const r = fitRect(iw, ih, w, h, this.host.getFit());
+      const r = fitRect(iw, ih, w, h, this.host.getFit(), clip.pan);
+      if (clip === target) this.framed = { clip, img, r, w, h };
       const blend = trackBlend(this.tl, clip.track);
       ctx.globalCompositeOperation = painted && blend !== "normal" ? blend : "source-over";
       ctx.drawImage(img, r.x, r.y, r.w, r.h);
@@ -3705,6 +3815,79 @@ class TimelineEditor {
     if (this.maskOverlay) this.drawMaskOverlay(ctx, w, h);
     ctx.globalCompositeOperation = "source-over";
     ctx.restore();
+    this.drawGuide();
+  }
+  // ── Reframe (drag on the monitor) ───────────────────────────────────────────
+  /** The clip a drag on the monitor moves: a selected one under the playhead, else the
+   *  top picture - the one you are looking at. */
+  reframeTarget() {
+    const under = clipsAt(this.tl, this.playhead).filter((c) => !c.audioOnly);
+    return under.find((c) => this.selection.has(c.id)) ?? under[0] ?? null;
+  }
+  /** Slack per axis in monitor px (negative = cropped overflow, positive = bands). */
+  slack(f) {
+    const sx = f.w - f.r.w, sy = f.h - f.r.h;
+    return [Math.abs(sx) > 0.5 ? sx : 0, Math.abs(sy) > 0.5 ? sy : 0];
+  }
+  /**
+   * While the pointer is on the monitor: the whole source as a faint ghost with a dashed
+   * outline (so the cropped part is visible where it really lies, beside the frame), and
+   * a rail through the frame along the axis that can move, with a knob at the current
+   * position. Hidden otherwise - a permanent overlay would sit on the timeline.
+   */
+  drawGuide() {
+    const g = this.guide;
+    const f = this.framed;
+    const [sx, sy] = f ? this.slack(f) : [0, 0];
+    const show = (this.overPreview || this.reframing) && f && (sx || sy);
+    this.preview.style.cursor = show ? sx ? "ew-resize" : "ns-resize" : "";
+    if (!show || !f) {
+      g.style.display = "none";
+      return;
+    }
+    g.style.display = "block";
+    const W = this.root.clientWidth, H = this.root.clientHeight;
+    const s = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+    if (g.width !== Math.round(W * s) || g.height !== Math.round(H * s)) {
+      g.width = Math.round(W * s);
+      g.height = Math.round(H * s);
+    }
+    const ctx = g.getContext("2d");
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const ox = this.preview.offsetLeft + this.preview.clientLeft;
+    const oy = this.preview.offsetTop + this.preview.clientTop;
+    const x = ox + f.r.x, y = oy + f.r.y;
+    ctx.globalAlpha = 0.28;
+    ctx.drawImage(f.img, x, y, f.r.w, f.r.h);
+    ctx.globalAlpha = 1;
+    ctx.clearRect(ox, oy, f.w, f.h);
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = "rgba(255, 214, 10, 0.9)";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x, y, f.r.w, f.r.h);
+    ctx.setLineDash([]);
+    const p = f.clip.pan ?? [0.5, 0.5];
+    const pan = [sx < 0 ? 1 - p[0] : p[0], sy < 0 ? 1 - p[1] : p[1]];
+    ctx.strokeStyle = "rgba(255, 214, 10, 0.75)";
+    ctx.fillStyle = "#ffd60a";
+    ctx.beginPath();
+    if (sx) {
+      const ry = oy + f.h / 2, kx = ox + 8 + (f.w - 16) * pan[0];
+      ctx.moveTo(ox + 8, ry);
+      ctx.lineTo(ox + f.w - 8, ry);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(kx, ry, 5, 0, Math.PI * 2);
+    } else {
+      const rx = ox + f.w / 2, ky = oy + 8 + (f.h - 16) * pan[1];
+      ctx.moveTo(rx, oy + 8);
+      ctx.lineTo(rx, oy + f.h - 8);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(rx, ky, 5, 0, Math.PI * 2);
+    }
+    ctx.fill();
   }
   /**
    * Tint the mask lane over the picture, so what the mask actually covers is visible
@@ -3741,7 +3924,7 @@ class TimelineEditor {
     tctx.clearRect(0, 0, tc.width, tc.height);
     tctx.fillStyle = "#000";
     tctx.fillRect(0, 0, tc.width, tc.height);
-    const r = fitRect(iw, ih, tc.width, tc.height, this.host.getFit());
+    const r = fitRect(iw, ih, tc.width, tc.height, this.host.getFit(), top.pan);
     tctx.drawImage(img, r.x, r.y, r.w, r.h);
     tctx.globalCompositeOperation = "multiply";
     tctx.fillStyle = "#ff3b30";
@@ -3796,7 +3979,35 @@ class TimelineEditor {
       this.status.textContent = `Volume · ${db} dB · drag up and down, Shift snaps to ${GAIN_DB_STEP} dB, Ctrl for fine`;
       return;
     }
-    this.status.textContent = `f ${this.playhead}${shuttle}${sel}${mk} · ${count} frames${q} · ${secs.toFixed(2)}s @ ${fps} fps`;
+    if (this.overPreview && this.framed && !this.audioOnly) {
+      const [sx, sy] = this.slack(this.framed);
+      if (sx || sy) {
+        this.status.textContent = "Reframe · drag the picture, double-click to centre";
+        return;
+      }
+    }
+    let res = "";
+    if (!this.audioOnly) {
+      const [ow, oh] = this.host.getOutSize();
+      res = ` · ${ow}×${oh}`;
+    }
+    this.status.textContent = `f ${this.playhead}${shuttle}${sel}${mk} · ${count} frames${q}${this.roundUpNote(raw, count)}${res} · ${secs.toFixed(2)}s @ ${fps} fps`;
+  }
+  /**
+   * When the model rounds the count UP past the material (MiniMax H3's 17n+5, or any
+   * family's floor on a very short range), those extra frames are gaps: the model will
+   * GENERATE them. The amber band shows where, but not why - and "why is there a gap at
+   * the end" is exactly the question someone who does not know the grid will ask.
+   */
+  roundUpNote(raw, count) {
+    if (count <= raw || this.audioOnly) return "";
+    const start = this.host.getStartFrame();
+    const pics = this.tl.clips.filter((c) => !c.audioOnly);
+    let n = 0;
+    for (let f = start + raw; f < start + count; f++) {
+      if (!pics.some((c) => f >= c.start && f < c.start + c.length)) n++;
+    }
+    return n ? ` · +${n} generated (model rounds up)` : "";
   }
   destroy() {
     this.disposed = true;
@@ -3824,8 +4035,14 @@ const CSS = `
   font: 12px system-ui, sans-serif; color: #c8d0e0;
   outline: none;
   container-type: inline-size;
+  position: relative;   /* anchors the reframe guide */
+}
+.nkd-tl-guide {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; display: none;
 }
 .nkd-tl-preview {
+  touch-action: none;   /* dragging on the monitor reframes */
   /* max-width is set from JS (height cap x aspect) and margin auto centres it, so
      widening the node stretches the TIMELINE rather than the monitor. */
   width: 100%; display: block; margin: 0 auto;
@@ -6343,11 +6560,13 @@ function makeHost(node, state, pool, audioOnly = false) {
      * 3. The first clip's own size, so a fresh node still previews something sane.
      */
     getOutSize() {
-      var _a, _b, _c;
+      var _a, _b;
       const firstClip = state.tl.clips[0] ?? state.tl.masks[0];
-      const srcInfo = firstClip ? (_a = srcCache.get(firstClip.src)) == null ? void 0 : _a.info : null;
-      const [w, h] = resolveResolution(
-        String(((_b = findW(node, "aspect_ratio")) == null ? void 0 : _b.value) ?? ASPECT_CUSTOM),
+      const srcInfo = firstClip ? (_a = host.sourceFor(firstClip.src)) == null ? void 0 : _a.info : null;
+      const aspect = String(((_b = findW(node, "aspect_ratio")) == null ? void 0 : _b.value) ?? ASPECT_CUSTOM);
+      const noShape = aspect === ASPECT_SOURCE && !((srcInfo == null ? void 0 : srcInfo.width) && (srcInfo == null ? void 0 : srcInfo.height));
+      const [w, h] = noShape ? [0, 0] : resolveResolution(
+        aspect,
         numW("megapixels", 1),
         Math.round(numW("width", 0)),
         Math.round(numW("height", 0)),
@@ -6359,9 +6578,7 @@ function makeHost(node, state, pool, audioOnly = false) {
       if (reported && reported.width > 0 && reported.height > 0) {
         return [reported.width, reported.height];
       }
-      const first = state.tl.clips[0];
-      const info = first ? (_c = srcCache.get(first.src)) == null ? void 0 : _c.info : null;
-      return info ? [info.width, info.height] : [16, 9];
+      return srcInfo ? [srcInfo.width, srcInfo.height] : [16, 9];
     },
     sourceFor(src) {
       const strip = strips.get(src);
