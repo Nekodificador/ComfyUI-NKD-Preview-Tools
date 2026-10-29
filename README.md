@@ -58,3 +58,7 @@ viewing from now on.
 - **Pop-up Blocker** (Popup Preview): Your web browser might block the window from opening the first time you use this node. If this happens, please check your browser's address bar and make sure to **allow pop-ups** for the URL or localhost where ComfyUI is running.
 
 [Changelog](docs/changelog.md)
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).
