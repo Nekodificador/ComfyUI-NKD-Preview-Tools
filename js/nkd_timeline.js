@@ -461,10 +461,12 @@ function timelineSpan(t) {
   }
   return end;
 }
-function materialRange(t) {
+function materialRange(t, withAudio = false) {
   let start = Infinity;
   let end = 0;
-  for (const lane2 of [t.clips, t.masks]) {
+  const lanes = [t.clips, t.masks];
+  if (withAudio) lanes.push(t.audio);
+  for (const lane2 of lanes) {
     for (const c of lane2) {
       start = Math.min(start, c.start);
       end = Math.max(end, c.start + c.length);
@@ -2353,6 +2355,12 @@ class TimelineEditor {
           "pi-refresh",
           "Reload the connected media (after changing a file)",
           () => this.reloadSources()
+        ),
+        mdi(
+          "mdi-restore",
+          "pi-replay",
+          "Reset the timeline: drop every cut, mask and blend and lay the connected media out again (Ctrl+Z undoes it)",
+          () => this.resetTimeline()
         )
       ),
       group(icon("pi-undo", "Undo (Ctrl+Z)", () => this.undo())),
@@ -2721,7 +2729,7 @@ class TimelineEditor {
    * BE a region to generate: sometimes you just want the excess gone.
    */
   trimToMaterial() {
-    const r = materialRange(this.tl);
+    const r = materialRange(this.tl, this.audioOnly);
     if (!r) {
       this.say("No material on the timeline — nothing to fit the range to");
       return;
@@ -2848,6 +2856,30 @@ class TimelineEditor {
    * material when it turns out shorter, so swapping a three-minute track for a ten-second
    * one does not leave a clip reading the last frame forever.
    */
+  /**
+   * Start over: every cut, trim, mask clip, blend, fade and marker goes, and the
+   * connected media is laid out again exactly as on a fresh connection (same placement
+   * code, so import_mode and the image/sound pairing apply). The range goes back to
+   * auto. Undoable - the clips are; the range widgets are not in the undo snapshot.
+   */
+  resetTimeline() {
+    var _a, _b;
+    this.pushUndo();
+    const t = this.tl;
+    t.clips = [];
+    t.masks = [];
+    t.audio = [];
+    t.tracks = [];
+    t.ui.playhead = 0;
+    this.selection.clear();
+    if (!this.host.isStartFrameLinked()) this.host.setStartFrame(0);
+    this.host.setFrameCount(0);
+    this.host.commit();
+    (_b = (_a = this.host).resyncSlots) == null ? void 0 : _b.call(_a);
+    this.zoomFit();
+    this.say("Timeline reset — Ctrl+Z to undo");
+    this.requestRender();
+  }
   reloadSources() {
     this.host.reloadSources();
     this.retightenToSources();
@@ -3069,6 +3101,8 @@ class TimelineEditor {
     const t = JSON.parse(json);
     const live = this.tl;
     live.clips = t.clips;
+    live.masks = t.masks;
+    live.tracks = t.tracks;
     live.audio = t.audio;
     live.ui = t.ui;
     this.host.commit();
@@ -6904,6 +6938,7 @@ function registerTimelineNode(v) {
           editor.pool.releaseUnused(refs);
           editor.requestRender();
         };
+        host.resyncSlots = syncSlots;
         const origConn = node.onConnectionsChange;
         node.onConnectionsChange = function(...args) {
           const r = origConn == null ? void 0 : origConn.apply(this, args);

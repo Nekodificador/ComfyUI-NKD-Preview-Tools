@@ -790,10 +790,16 @@ export function timelineSpan(t: Timeline): number {
 /** First frame covered by any picture lane, and the last. Used by "trim to material",
  *  which crops the output range to what actually exists instead of leaving gaps that
  *  turn into mask. Returns null when there is nothing at all. */
-export function materialRange(t: Timeline): { start: number; end: number } | null {
+export function materialRange(
+  t: Timeline, withAudio = false,
+): { start: number; end: number } | null {
   let start = Infinity;
   let end = 0;
-  for (const lane of [t.clips, t.masks]) {
+  // Picture only in the video Timeline: a long music bed must not stretch the range.
+  // The Audio Timeline passes `withAudio` - there the sound IS the material.
+  const lanes: { start: number; length: number }[][] = [t.clips, t.masks];
+  if (withAudio) lanes.push(t.audio);
+  for (const lane of lanes) {
     for (const c of lane) {
       start = Math.min(start, c.start);
       end = Math.max(end, c.start + c.length);

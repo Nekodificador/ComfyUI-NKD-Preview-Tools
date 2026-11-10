@@ -22,6 +22,7 @@ import json
 import math
 import re
 import os
+from collections.abc import Mapping
 from typing import Any, NamedTuple, Optional
 
 import folder_paths
@@ -482,7 +483,9 @@ def classify(obj: Any) -> Optional[str]:
     """
     if obj is None:
         return None
-    if isinstance(obj, dict):
+    # Mapping, not dict: VHS Load Video hands its AUDIO out as a lazy Mapping, and a
+    # dict-only check dropped the whole audio lane (silent mix, all-white audio_mask).
+    if isinstance(obj, Mapping):
         return "audio" if "waveform" in obj else None
     if torch.is_tensor(obj):
         if obj.ndim == 4:

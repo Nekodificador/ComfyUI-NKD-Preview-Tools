@@ -392,6 +392,9 @@ test("materialRange — what 'trim to material' crops to", () => {
   const onlyAudio = M.emptyTimeline();
   onlyAudio.audio = [{ id: "a", src: "audio_0", start: 0, trimIn: 0, length: 99, gain: 1 }];
   assert.equal(M.materialRange(onlyAudio), null);
+  // ...except in the Audio Timeline, where sound is the only material there is.
+  onlyAudio.audio.push({ id: "b", src: "audio_0", start: 120, trimIn: 0, length: 30, gain: 1 });
+  assert.deepEqual(M.materialRange(onlyAudio, true), { start: 0, end: 150 });
 });
 
 test("cutStops — where a latent begins, which is not where a count is valid", () => {

@@ -78,6 +78,8 @@ export interface TimelineHost {
   onSeek(): void;
   /** Drop every cached view of the connected media and re-resolve from scratch. */
   reloadSources(): void;
+  /** Place every connected source that no clip uses yet, as on a fresh connection. */
+  resyncSlots?(): void;
   /** Source length in SOURCE frames, or null while unknown. */
   srcFramesFor(src: string): number | null;
   /** Length of a source's DECODED SOUND in timeline frames, or null until it lands. What
@@ -544,6 +546,10 @@ export class TimelineEditor {
           () => this.host.conformToFirstClip()),
         icon("pi-refresh", "Reload the connected media (after changing a file)",
           () => this.reloadSources()),
+        mdi("mdi-restore", "pi-replay",
+          "Reset the timeline: drop every cut, mask and blend and lay the connected "
+          + "media out again (Ctrl+Z undoes it)",
+          () => this.resetTimeline()),
       ),
       group(icon("pi-undo", "Undo (Ctrl+Z)", () => this.undo())),
       this.status,
@@ -1471,7 +1477,7 @@ export class TimelineEditor {
    * BE a region to generate: sometimes you just want the excess gone.
    */
   private trimToMaterial(): void {
-    const r = materialRange(this.tl);
+    const r = materialRange(this.tl, this.audioOnly);
     if (!r) {
       this.say("No material on the timeline — nothing to fit the range to");
       return;
@@ -1622,6 +1628,27 @@ export class TimelineEditor {
    * material when it turns out shorter, so swapping a three-minute track for a ten-second
    * one does not leave a clip reading the last frame forever.
    */
+  /**
+   * Start over: every cut, trim, mask clip, blend, fade and marker goes, and the
+   * connected media is laid out again exactly as on a fresh connection (same placement
+   * code, so import_mode and the image/sound pairing apply). The range goes back to
+   * auto. Undoable - the clips are; the range widgets are not in the undo snapshot.
+   */
+  resetTimeline(): void {
+    this.pushUndo();
+    const t = this.tl;
+    t.clips = []; t.masks = []; t.audio = []; t.tracks = [];
+    t.ui.playhead = 0;
+    this.selection.clear();
+    if (!this.host.isStartFrameLinked()) this.host.setStartFrame(0);
+    this.host.setFrameCount(0);
+    this.host.commit();
+    this.host.resyncSlots?.();
+    this.zoomFit();
+    this.say("Timeline reset — Ctrl+Z to undo");
+    this.requestRender();
+  }
+
   reloadSources(): void {
     this.host.reloadSources();
     this.retightenToSources();
@@ -1859,6 +1886,8 @@ export class TimelineEditor {
     const t = JSON.parse(json);
     const live = this.tl;
     live.clips = t.clips;
+    live.masks = t.masks;      // without these two, undo could not bring back a mask
+    live.tracks = t.tracks;    // lane or a blend mode - nor anything a reset threw away
     live.audio = t.audio;
     live.ui = t.ui;
     this.host.commit();

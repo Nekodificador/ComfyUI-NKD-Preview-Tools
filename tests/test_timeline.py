@@ -975,6 +975,15 @@ def test_muted_zones_export_as_mask_and_ranges():
     vals = [float(v) for v in ranges.split(",")]
     assert len(vals) % 2 == 0                                          # MVEx-parseable
     assert vals == [0.0, round(5 / 24, 3)], vals
+    # VHS Load Video hands AUDIO out as a lazy Mapping, not a dict. It must still count
+    # as sound, or the whole lane drops out and the audio mask comes out all white.
+    from types import MappingProxyType
+    r3 = NKDTimeline.execute(
+        media={"media_0": seq, "media_1": MappingProxyType(voice)}, timeline=tl,
+        import_mode="stack", fps=24.0, start_frame=0, frame_count=10, width=4, height=4,
+        fit="stretch", aspect_ratio="Custom", megapixels=1.0, size_multiple=16,
+        model="free", quantize_n=8, clip_audio=False)
+    assert outs(r3)["audio_ranges"] == ranges
     # No sound anywhere (image only, clip_audio off): everything is silence to regenerate.
     r2 = NKDTimeline.execute(
         media={"media_0": seq}, timeline=_dumps({

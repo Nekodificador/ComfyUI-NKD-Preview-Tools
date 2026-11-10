@@ -15,6 +15,7 @@ cannot go through `VideoFromComponents.save_to`, which is wired to h264/mp4/aac
 """
 
 import json
+from collections.abc import Mapping
 import os
 import re
 import shutil
@@ -288,7 +289,7 @@ def parse_trim(text: str, frames: int) -> tuple[int, int] | None:
 
 def trim_audio(audio: dict | None, a: int, b: int, fps: float) -> dict | None:
     """The stretch of `audio` under frames a..b."""
-    if not isinstance(audio, dict) or audio.get("waveform") is None:
+    if not isinstance(audio, Mapping) or audio.get("waveform") is None:
         return audio
     rate = audio["sample_rate"]
     s0, s1 = round(a * rate / fps), round((b + 1) * rate / fps)
@@ -1216,7 +1217,7 @@ class NKDVideoViewer(io.ComfyNode):
             if audio is None:
                 audio = media_audio
 
-        src_audio = audio.get("waveform") if isinstance(audio, dict) else None
+        src_audio = audio.get("waveform") if isinstance(audio, Mapping) else None
         # Everything that changes the BYTES. Destination settings (filename_prefix,
         # versioning, version, numbering, save_output) are deliberately absent - that is the
         # whole point: they move the file, they do not re-render it.

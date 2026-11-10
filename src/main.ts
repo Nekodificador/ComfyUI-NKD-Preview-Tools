@@ -720,6 +720,8 @@ comfyApp.registerExtension({
         editor.requestRender();
       };
 
+      host.resyncSlots = syncSlots;
+
       const origConn = node.onConnectionsChange;
       node.onConnectionsChange = function (this: any, ...args: any[]) {
         const r = origConn?.apply(this, args);
