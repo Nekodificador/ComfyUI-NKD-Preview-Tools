@@ -2133,9 +2133,18 @@ async function saveImage(popup, node) {
     if (!ref) return _noImageToast();
     let prefix = undefined;
     const cfg = nkdConfig();
+    // A WIRED field has no value in the browser, so the executed one (carried back in the
+    // UI payload) wins there; unwired, the widget wins, so editing the name and pressing
+    // Save still works without re-running.
+    // One entry per image (nodes.py), so the still on screen picks its own name - a swept
+    // list concatenates both lists in step.
+    const names = app.nodeOutputs?.[node?.id]?.nkd_name;
+    const run  = names?.[popup?.index ?? 0] || names?.[0];
     const wv   = (n) => node?.widgets?.find((w) => w.name === n)?.value;
-    const pfx  = String(wv("filename_prefix") || "").trim();   // per-node folder override
-    const name = String(wv("filename") || "").trim();          // per-node file name
+    const fv   = (n, k) => (node?.inputs?.find((i) => i.name === n)?.link != null && run)
+        ? run[k] : wv(n);
+    const pfx  = String(fv("filename_prefix", "prefix") || "").trim();
+    const name = String(fv("filename", "filename") || "").trim();
     // Node fields win over the global project prefix; empty falls back to it. Same
     // folder/name join as the video viewer's `_resolve_prefix`.
     let base = pfx || (cfg ? cfg.image_prefix : undefined);
@@ -2591,17 +2600,11 @@ app.registerExtension({
             // why the panel below has no picture of its own.
             this.onExecuted = function () {};
 
-            // Native filename_prefix / filename widgets, a per-node override of the global
-            // project prefix (empty = use the global). Frontend-only widgets, NOT schema
-            // inputs: the save runs entirely in the frontend, so there is no reason to feed
-            // them to the backend and put them in the cache signature. They still serialise
-            // into widgets_values and travel with the workflow. The DOM panel widget is
-            // serialize:false, so these two are the only serialised widgets — positions stable.
-            this.addWidget("text", "filename_prefix", "%project%/%category%/", () => {},
-                { tooltip: "Folder for the saved still (tokens: %project% %category% %node% " +
-                           "%date:yyyy-MM-dd%). Empty uses the active project's prefix." });
-            this.addWidget("text", "filename", "NKD", () => {},
-                { tooltip: "File name for the saved still. Empty keeps the prefix's own name." });
+            // filename_prefix / filename are SCHEMA inputs (nodes.py), so they come with a
+            // socket and can be wired like the Video Viewer's. The save still runs in the
+            // frontend; a wired value arrives back through the UI payload (`nkd_name`).
+            // They are created before open_on_run, and `labels` is moved last below, so the
+            // serialised order stays [prefix, filename, open_on_run, labels] — unchanged.
 
             this.addWidget("toggle", "open_on_run", false, () => {},
                 { tooltip: "Open the viewer by itself when you press Run, with the live preview. " +

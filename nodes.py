@@ -360,10 +360,11 @@ class NKDPopupUI(_UIOutput):
     neither key is emitted and the viewer falls back to the global slot, unchanged.
     """
 
-    def __init__(self, images_ui, ref=None, mask=None):
+    def __init__(self, images_ui, ref=None, mask=None, name=None):
         self._images = images_ui
         self._ref = ref
         self._mask = mask
+        self._name = name
 
     def as_dict(self):
         d = dict(self._images.as_dict())   # {"images": [...]}
@@ -371,6 +372,16 @@ class NKDPopupUI(_UIOutput):
             d["nkd_ref"] = [self._ref]
         if self._mask:
             d["nkd_mask"] = [self._mask]
+        if self._name:
+            # The RESOLVED folder/name of this run. A LINKED value does not exist in the
+            # browser (it is produced while the graph runs), so the save path has to come
+            # back with the UI payload - which survives a cache hit and a reload, unlike a
+            # send_sync push (verified: re-queueing a cache hit still saves the wired name).
+            # ONE ENTRY PER IMAGE, so the list stays the same length as `images` and the
+            # viewer can index it by the still it is showing: the core CONCATENATES these
+            # lists across the passes of a swept list, and a single `[0]` would then save
+            # every pass under the first one's name.
+            d["nkd_name"] = [self._name] * max(1, len(d.get("images") or []))
         return d
 
 
@@ -407,6 +418,19 @@ class NKDPopupPreviewNode(io.ComfyNode):
                 # only, so Save/Copy keep them (a test still says what made it) while the
                 # `image` output stays clean.
                 io.String.Input("labels", default=""),
+                # Real schema inputs so they can be WIRED (a frontend-only widget has no
+                # socket). The save still runs in the frontend; the executed value travels
+                # back in the UI payload above. NO cache cost: the frontend puts EVERY
+                # widget in the prompt whether or not the schema declares it (verified:
+                # the frontend-only `open_on_run` is in `graphToPrompt().output[id].inputs`
+                # too), so these two were already in the signature.
+                io.String.Input(
+                    "filename_prefix", default="%project%/%category%/", optional=True,
+                    tooltip="Folder for the saved still (tokens: %project% %category% %node% "
+                            "%date:yyyy-MM-dd%). Empty uses the active project's prefix."),
+                io.String.Input(
+                    "filename", default="NKD", optional=True,
+                    tooltip="File name for the saved still. Empty keeps the prefix's own name."),
             ],
             # Pass-through so the preview can sit inline in a chain instead of dangling.
             outputs=[io.Image.Output(display_name="image", tooltip="The input image, untouched.")],
@@ -416,7 +440,8 @@ class NKDPopupPreviewNode(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, image, reference=None, mask=None, labels=""):
+    def execute(cls, image, reference=None, mask=None, labels="",
+                filename_prefix="%project%/%category%/", filename="NKD"):
         ref_item = _save_reference_png(reference)[1] if reference is not None else None
         mask_item = _save_reference_mask_png(mask)[1] if mask is not None else None
         # Our own call count is this pass's position in a swept list (see nkd_video).
@@ -427,7 +452,9 @@ class NKDPopupPreviewNode(io.ComfyNode):
         lines = nkd_video.label_lines(labels, cls.hidden.prompt, pass_index)
         shown = nkd_video.burn_labels(image, lines) if lines else image
         return io.NodeOutput(
-            image, ui=NKDPopupUI(ui.PreviewImage(shown, cls=cls), ref_item, mask_item))
+            image, ui=NKDPopupUI(ui.PreviewImage(shown, cls=cls), ref_item, mask_item,
+                                 {"prefix": str(filename_prefix or ""),
+                                  "filename": str(filename or "")}))
 
 
 # ── Extension ─────────────────────────────────────────────────────────────────
