@@ -407,6 +407,8 @@ const VIEWER_CSS = `
 .nkd-pv-viewer-root.painting .nkd-pv-vwrap{cursor:none}
 .nkd-pv-brush{position:absolute;z-index:7;display:none;pointer-events:none;border-radius:50%;border:1px solid rgba(255,255,255,0.9);box-shadow:0 0 0 1px rgba(0,0,0,0.7);transform:translate(-50%,-50%);}
 .nkd-pv-brush.on{display:block}
+.nkd-pv-brush-core{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border-radius:50%;border:1px dashed rgba(255,255,255,0.7);}
+.nkd-pv-brush.nkd-pv-src{border-style:dashed;opacity:0.85}
 /* Paint mode: a SOLID strip on top, so no tool ever sits over the pixels being painted.
    The image area shrinks by its height and refits; the top overlays move down with it. */
 .nkd-pv-viewer-root{--pv-strip:0px}
@@ -433,6 +435,7 @@ const VIEWER_CSS = `
 // Inline SVG icons (consistent stroke, currentColor) — replaces emoji/box glyphs
 // that rendered at inconsistent sizes and baselines across platforms.
 const ICON = {
+    stamp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6v5l-1 3h6v5H4v-5h6L9 8zM5 20h14"/></svg>',
     run:   '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
     fit:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>',
     win:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
@@ -500,7 +503,8 @@ function createViewerDOM(opts = {}) {
         <div class="nkd-pv-live-badge"></div>
         <div class="nkd-pv-count"></div>
         <div class="nkd-pv-wipe"></div>
-        <div class="nkd-pv-brush"></div>
+        <div class="nkd-pv-brush"><div class="nkd-pv-brush-core"></div></div>
+        <div class="nkd-pv-brush nkd-pv-src"></div>
         <div class="nkd-pv-strip"></div>
         <div class="nkd-pv-help" title="Gestures & shortcuts">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.1 9.2a3 3 0 0 1 5.8 1c0 2-3 2.3-3 4"/><path d="M12 17h.01"/></svg>
@@ -518,6 +522,7 @@ function createViewerDOM(opts = {}) {
                 <hr>
                 <div><span class="k">P</span> paint: restore / mask</div>
                 <div><span class="k">B / E</span> brush / erase &middot; <span class="k">X</span> restore &harr; mask</div>
+                <div><span class="k">K / J</span> clone / heal &middot; <span class="k">Alt+click</span> clone source</div>
                 <div><span class="k">[ ]</span> size &middot; <span class="k">Alt+right drag</span> size / hardness</div>
                 <div><span class="k">Ctrl+Z</span> undo stroke &middot; <span class="k">Middle drag</span> pan</div>
                 <div><span class="k">L</span> to Load Image &middot; <span class="k">Shift+L</span> load &amp; run</div>
@@ -533,7 +538,9 @@ function createViewerDOM(opts = {}) {
             <span class="nkd-pv-seg">
                 <button class="nkd-pv-btn-lrestore nkd-pv-vbtn" title="Paint where the reference / previous render comes back (X swaps)">${ICON.swap}<span class="nkd-pv-lbl">Restore</span></button>
                 <button class="nkd-pv-btn-lmask nkd-pv-vbtn" title="Paint what to regenerate - sent as the Load Image's mask (X swaps)">${ICON.mask}<span class="nkd-pv-lbl">Mask</span></button>
+                <button class="nkd-pv-btn-lclone nkd-pv-vbtn" title="Copy pixels from another part of the picture (K): Alt+click the source, then paint. The offset holds until the next Alt+click. Baked into the picture sent">${ICON.stamp}<span class="nkd-pv-lbl">Clone</span></button>
             </span>
+            <button class="nkd-pv-btn-heal nkd-pv-vbtn" title="Heal (J): on release the clone keeps its texture and takes the light and colour around it" style="display:none"><span class="nkd-pv-lbl">Heal</span></button>
             <span class="nkd-pv-seg">
                 <button class="nkd-pv-btn-tbrush nkd-pv-vbtn" title="Brush (B)">${ICON.brush}</button>
                 <button class="nkd-pv-btn-terase nkd-pv-vbtn" title="Eraser (E)">${ICON.eraser}</button>
@@ -913,16 +920,22 @@ function createViewerDOM(opts = {}) {
                 // Restore leads: masks are easy to paint anywhere in the workflow, bringing
                 // the previous render back is what only this viewer can do. `want` is the
                 // choice; `layer` is what is usable (no reference yet = Mask).
-                tool: "brush", want: "restore", layer: "mask" };
-    const brushParams = () => ({ size: P.size, opacity: 1, hardness: P.hardness, tool: P.tool, color: "#ffffff" });
+                tool: "brush", want: "restore", layer: "mask", heal: false };
+    // Clone: Alt+click sets the source (image px); the first stroke after it fixes the offset.
+    let cloneSrc = null, cloneOff = null, cloneNow = null, snapCv = null, cloneW = 0;
+    const brushParams = () => ({ size: P.size, opacity: 1, hardness: P.hardness, color: "#ffffff", clone: cloneNow,
+                                 tool: P.tool === "eraser" || P.layer !== "clone" ? P.tool : P.heal ? "heal" : "clone" });
+    // Mask and Restore are white masks; Clone holds pixels, at the picture's own size since
+    // they are baked into the picture sent (sized on first use, see fitClone).
     const layers = { mask: new BrushLayer(1, 1, brushParams, () => schedulePaint()),
-                     restore: new BrushLayer(1, 1, brushParams, () => schedulePaint()) };
+                     restore: new BrushLayer(1, 1, brushParams, () => schedulePaint()),
+                     clone: new BrushLayer(1, 1, brushParams, () => schedulePaint()) };
     const active = () => layers[P.layer];
     // One undo order across both layers: Ctrl+Z takes back the last stroke, wherever it went.
     const undoOrder = [], redoOrder = [];
     let paintOn = false, paintAR = 0, adjust = null, tintCv = null, praf = 0;
     const pctx = paintCv.getContext("2d");
-    const ring = root.querySelector(".nkd-pv-brush");
+    const ring = root.querySelector(".nkd-pv-brush"), srcRing = root.querySelector(".nkd-pv-src");
     const btnPaint = root.querySelector(".nkd-pv-btn-paint");
     const scSize = root.querySelector(".nkd-pv-sc-size b"), scHard = root.querySelector(".nkd-pv-sc-hard b");
     const pb = (c) => root.querySelector(c);
@@ -933,11 +946,21 @@ function createViewerDOM(opts = {}) {
         const k = Math.min(1, PAINT_MAX_SIDE / Math.max(nw, nh));
         const w = Math.max(1, Math.round(nw * k)), h = Math.max(1, Math.round(nh * k));
         const sameShape = paintAR && Math.abs(nw / nh - paintAR) < 0.01;
-        for (const L of Object.values(layers)) {
+        for (const L of [layers.mask, layers.restore]) {
             if (!sameShape) L.resize(w, h, false);
             else if (w > L.width) L.resize(w, h, true);   // a small live frame came first
         }
-        if (!sameShape) { undoOrder.length = 0; redoOrder.length = 0; }
+        // Clone pixels were copied from the picture that was here: a new one starts clean.
+        layers.clone.resize(1, 1, false);
+        for (const a of [undoOrder, redoOrder]) for (let i = a.length; i--;) if (a[i] === "clone") a.splice(i, 1);
+        if (!sameShape) { undoOrder.length = 0; redoOrder.length = 0; cloneSrc = cloneOff = null; }
+        // Same shape, other size (a live frame, then the render): the source point follows.
+        else if (cloneW && cloneW !== nw) {
+            const k = nw / cloneW;
+            if (cloneSrc) cloneSrc = [cloneSrc[0] * k, cloneSrc[1] * k];
+            if (cloneOff) cloneOff = [cloneOff[0] * k, cloneOff[1] * k];
+        }
+        cloneW = nw;
         paintAR = nw / nh;
         paintCv.width = layers.mask.width; paintCv.height = layers.mask.height;
         apply(); drawPaint(); syncPaint();
@@ -961,6 +984,8 @@ function createViewerDOM(opts = {}) {
             pctx.drawImage(rv.current(), 0, 0);
             pctx.globalCompositeOperation = "source-over";
         }
+        const cl = layers.clone;
+        if (cl.hasStrokes || cl.stroking) pctx.drawImage(cl.current(), 0, 0, W, H);
         if (mk.hasStrokes || mk.stroking) {
             if (!tintCv || tintCv.width !== W || tintCv.height !== H) {
                 tintCv = root.ownerDocument.createElement("canvas"); tintCv.width = W; tintCv.height = H;
@@ -978,8 +1003,11 @@ function createViewerDOM(opts = {}) {
         root.classList.toggle("painting", paintOn);
         btnPaint.classList.toggle("active", paintOn);
         // Never switch under a stroke in progress: its end must land on the layer it began on.
-        if (!layers[P.layer].stroking) P.layer = curRef ? P.want : "mask";   // nothing to restore yet
+        if (!layers[P.layer].stroking) P.layer = P.want === "restore" && !curRef ? "mask" : P.want;   // nothing to restore yet
         pb(".nkd-pv-btn-lmask").classList.toggle("on", P.layer === "mask");
+        pb(".nkd-pv-btn-lclone").classList.toggle("on", P.layer === "clone");
+        pb(".nkd-pv-btn-heal").style.display = P.layer === "clone" ? "" : "none";
+        pb(".nkd-pv-btn-heal").classList.toggle("on", P.heal);
         pb(".nkd-pv-btn-lrestore").classList.toggle("on", P.layer === "restore");
         pb(".nkd-pv-btn-lrestore").disabled = !curRef;
         pb(".nkd-pv-btn-tbrush").classList.toggle("on", P.tool === "brush");
@@ -987,6 +1015,7 @@ function createViewerDOM(opts = {}) {
         pb(".nkd-pv-btn-pundo").disabled = !undoOrder.length;
         pb(".nkd-pv-btn-pclear").disabled = !active().hasStrokes;
         scSize.textContent = String(P.size); scHard.textContent = P.hardness.toFixed(2);
+        if (!paintOn || P.layer !== "clone") srcRing.classList.remove("on");
         if (!paintOn) ring.classList.remove("on");
     }
 
@@ -1004,6 +1033,8 @@ function createViewerDOM(opts = {}) {
     btnPaint.addEventListener("click", () => setPaint(!paintOn));
     pb(".nkd-pv-btn-lmask").addEventListener("click", () => { P.want = "mask"; syncPaint(); });
     pb(".nkd-pv-btn-lrestore").addEventListener("click", () => { P.want = "restore"; syncPaint(); });
+    pb(".nkd-pv-btn-lclone").addEventListener("click", () => { P.want = "clone"; syncPaint(); });
+    pb(".nkd-pv-btn-heal").addEventListener("click", () => { P.heal = !P.heal; syncPaint(); });
     pb(".nkd-pv-btn-tbrush").addEventListener("click", () => { P.tool = "brush"; syncPaint(); });
     pb(".nkd-pv-btn-terase").addEventListener("click", () => { P.tool = "eraser"; syncPaint(); });
     pb(".nkd-pv-btn-pundo").addEventListener("click", undoPaint);
@@ -1041,15 +1072,71 @@ function createViewerDOM(opts = {}) {
         ring.style.left = (e.clientX - rc.left) + "px"; ring.style.top = (e.clientY - rc.top) + "px";
         ring.style.width = ring.style.height = d + "px";
         ring.style.borderStyle = P.tool === "eraser" ? "dashed" : "solid";
+        // Inner ring = where the dab stops being solid, as on NKD Paint's canvas.
+        const core = ring.firstElementChild;
+        core.style.display = P.hardness < 0.99 ? "" : "none";
+        core.style.width = core.style.height = Math.max(1, d * P.hardness) + "px";
         ring.classList.add("on");
+        moveSrc(e, d);
+    }
+    /** The dashed ring where Clone copies from: follows the pointer once the offset is set. */
+    function moveSrc(e, d) {
+        const on = P.layer === "clone" && (cloneOff || cloneSrc);
+        srcRing.classList.toggle("on", !!on);
+        if (!on) return;
+        const rr = root.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+        const [x, y] = cloneOff
+            ? [e.clientX - rr.left + cloneOff[0] * scale, e.clientY - rr.top + cloneOff[1] * scale]
+            : [wr.left - rr.left + tx + cloneSrc[0] * scale, wr.top - rr.top + ty + cloneSrc[1] * scale];
+        srcRing.style.left = x + "px"; srcRing.style.top = y + "px";
+        srcRing.style.width = srcRing.style.height = d + "px";
+    }
+    // Live TAESD frames are small data: URLs; cloning from one would bake in a blurry thumbnail.
+    const liveFrame = () => img.src.startsWith("data:");
+    function fitClone() {
+        const L = layers.clone, nw = img.naturalWidth, nh = img.naturalHeight;
+        if (L.width !== nw || L.height !== nh) L.resize(nw, nh, false);
+    }
+    /** The picture as it will be sent: the render, Restore's reference, then the Clone layer. */
+    function composeView(out) {
+        const nw = img.naturalWidth, nh = img.naturalHeight, doc = root.ownerDocument;
+        if (!out || out.width !== nw || out.height !== nh) { out = doc.createElement("canvas"); out.width = nw; out.height = nh; }
+        const oc = out.getContext("2d");
+        oc.clearRect(0, 0, nw, nh);
+        oc.drawImage(img, 0, 0);
+        const rv = layers.restore, b = curRef ? refBox() : null;
+        if (rv.hasStrokes && b) {
+            const t = doc.createElement("canvas"); t.width = nw; t.height = nh;
+            const tc = t.getContext("2d");
+            tc.drawImage(refImg, b.x, b.y, b.w, b.h);
+            tc.globalCompositeOperation = "destination-in";
+            tc.drawImage(rv.layer, 0, 0, nw, nh);
+            oc.drawImage(t, 0, 0);
+        }
+        if (layers.clone.hasStrokes) oc.drawImage(layers.clone.layer, 0, 0, nw, nh);
+        return out;
+    }
+    function startClone(pt) {
+        if (liveFrame() || !cloneSrc) {
+            app.extensionManager?.toast?.add?.({ severity: "info", summary: "Clone",
+                detail: cloneSrc ? "Wait for the render: live frames are too small to copy from." : "Alt+click where to copy from first.", life: 3000 });
+            return false;
+        }
+        if (!cloneOff) cloneOff = [cloneSrc[0] - pt[0], cloneSrc[1] - pt[1]];
+        snapCv = composeView(snapCv);
+        cloneNow = { src: snapCv, dx: cloneOff[0], dy: cloneOff[1] };
+        return true;
     }
     /** pointerdown in paint mode. True when the brush took the event (else it pans). */
     function paintDown(e) {
         if (!img.naturalWidth) return false;
         if (e.button === 2 && e.altKey) {
             adjust = { x: e.clientX, y: e.clientY, size0: P.size, hard0: P.hardness };
+        } else if (e.button === 0 && e.altKey && P.layer === "clone") {
+            fitClone(); cloneSrc = toLayer(e); cloneOff = null; moveRing(e);
         } else if (e.button === 0 && !e.altKey) {
             if (P.layer === "restore" && !curRef) return true;
+            if (P.layer === "clone") { fitClone(); if (P.tool !== "eraser" && !startClone(toLayer(e))) return true; }
             const [x, y] = toLayer(e);
             active().begin(x, y, layerRadius(e));
             schedulePaint();
@@ -1059,11 +1146,12 @@ function createViewerDOM(opts = {}) {
         return true;
     }
     function paintMove(e) {
-        moveRing(e);
         if (adjust) {
             const a = adjustBrush(adjust.size0, adjust.hard0, e.clientX - adjust.x, e.clientY - adjust.y, scale);
             P.size = a.size; P.hardness = a.hardness; syncPaint();
-        } else if (active().stroking) {
+        }
+        moveRing(e);   // after the adjust, so the rings show the size and hardness being set
+        if (!adjust && active().stroking) {
             const [x, y] = toLayer(e);
             active().to(x, y, layerRadius(e));
             schedulePaint();
@@ -1073,9 +1161,10 @@ function createViewerDOM(opts = {}) {
         if (adjust) { adjust = null; savePrefs(); }
         const L = active();
         if (L.stroking) { L.end(); undoOrder.push(P.layer); redoOrder.length = 0; }
+        cloneNow = null;
     }
     wrap.addEventListener("contextmenu", e => { if (paintOn) e.preventDefault(); });
-    wrap.addEventListener("pointerleave", () => ring.classList.remove("on"));
+    wrap.addEventListener("pointerleave", () => { ring.classList.remove("on"); srcRing.classList.remove("on"); });
 
     const blobOf = (cv) => new Promise((res) => cv.toBlob(res, "image/png"));
     /** What you see, at full resolution: the picture with Restore baked in, and the Mask as a
@@ -1106,15 +1195,8 @@ function createViewerDOM(opts = {}) {
         const canvas = () => { const c = doc.createElement("canvas"); c.width = nw; c.height = nh; return c; };
         const rv = layers.restore, mk = layers.mask, b = curRef ? refBox() : null;
         let image;
-        if (rv.hasStrokes && b) {
-            const out = canvas(), oc = out.getContext("2d");
-            oc.drawImage(img, 0, 0);
-            const t = canvas(), tc = t.getContext("2d");
-            tc.drawImage(refImg, b.x, b.y, b.w, b.h);
-            tc.globalCompositeOperation = "destination-in";
-            tc.drawImage(rv.layer, 0, 0, nw, nh);
-            oc.drawImage(t, 0, 0);
-            image = await blobOf(out);
+        if ((rv.hasStrokes && b) || layers.clone.hasStrokes) {
+            image = await blobOf(composeView());
         } else {
             // Nothing baked in: the render's own bytes, no re-encode (the slow half of a send).
             image = await fetch(img.src).then(r => r.blob());
@@ -1155,6 +1237,8 @@ function createViewerDOM(opts = {}) {
         else if (k === "b" || k === "B") P.tool = "brush";
         else if (k === "e" || k === "E") P.tool = "eraser";
         else if (k === "x" || k === "X") swapLayer();
+        else if (k === "k" || k === "K") { P.want = "clone"; P.heal = false; }
+        else if (k === "j" || k === "J") { P.want = "clone"; P.heal = true; }
         else if (k === "[") { P.size = stepSize(P.size, -1); savePrefs(); }
         else if (k === "]") { P.size = stepSize(P.size, 1); savePrefs(); }
         else return;
