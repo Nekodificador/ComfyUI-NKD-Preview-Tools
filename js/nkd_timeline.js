@@ -4452,11 +4452,12 @@ function guardWidgetOrder(nodeType, nodeName, version) {
     const r = origCreated == null ? void 0 : origCreated.apply(this, arguments);
     this.properties = this.properties || {};
     this.properties[PROP] = version;
+    this.__nkdDefaults = new Map((this.widgets ?? []).map((w) => [w.name, w.value]));
     return r;
   };
   const origConfigure = nodeType.prototype.onConfigure;
   nodeType.prototype.onConfigure = function(info) {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f, _g;
     const r = origConfigure == null ? void 0 : origConfigure.apply(this, arguments);
     const named = info == null ? void 0 : info.widgets_values_named;
     if (named && typeof named === "object" && !Array.isArray(named)) {
@@ -4467,8 +4468,16 @@ function guardWidgetOrder(nodeType, nodeName, version) {
           (_a = w.callback) == null ? void 0 : _a.call(w, val);
         }
       }
-    } else if (version > 1 && ((_b = info == null ? void 0 : info.properties) == null ? void 0 : _b[PROP]) !== version && Array.isArray(info == null ? void 0 : info.widgets_values) && info.widgets_values.length) {
-      (_e = (_d = (_c = app.extensionManager) == null ? void 0 : _c.toast) == null ? void 0 : _d.add) == null ? void 0 : _e.call(_d, {
+      for (const w of this.widgets ?? []) {
+        if (w.name in named || !((_b = this.__nkdDefaults) == null ? void 0 : _b.has(w.name))) continue;
+        const def = this.__nkdDefaults.get(w.name);
+        if (w.value !== def) {
+          w.value = def;
+          (_c = w.callback) == null ? void 0 : _c.call(w, def);
+        }
+      }
+    } else if (version > 1 && ((_d = info == null ? void 0 : info.properties) == null ? void 0 : _d[PROP]) !== version && Array.isArray(info == null ? void 0 : info.widgets_values) && info.widgets_values.length) {
+      (_g = (_f = (_e = app.extensionManager) == null ? void 0 : _e.toast) == null ? void 0 : _f.add) == null ? void 0 : _g.call(_f, {
         severity: "warn",
         summary: `😺${nodeName}`,
         detail: `"${this.title ?? nodeName}" was saved before a widget reorder: its values may have loaded into the wrong widgets. Delete and re-add the node, then re-check its settings.`,
@@ -4691,6 +4700,15 @@ function setSaveVersioning(v) {
 }
 async function saveToProject(ref, prefix) {
   const res = await api.fetchApi("/nkd/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...ref, prefix, versioning: saveVersioning() })
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+async function shareCopy(ref, prefix) {
+  const res = await api.fetchApi("/nkd/share", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...ref, prefix, versioning: saveVersioning() })
@@ -5342,6 +5360,12 @@ class VideoViewer {
     this.link = el("a", "nkd-tl-btn", bar);
     this.link.title = "Save a copy";
     this.link.appendChild(el("i", "pi pi-download"));
+    button(
+      bar,
+      "pi pi-share-alt",
+      "Save a copy without the workflow inside (_share), to post it",
+      () => void this.shareClean()
+    );
     this.chip = projectChip(bar);
     this.labelsChip = trackedChip(bar);
     this.status = el("div", "nkd-tl-status", bar);
@@ -5444,6 +5468,15 @@ class VideoViewer {
   /** Nominate the render on screen as the reference, so the next run can be wiped
    *  against it. Without this you would have to re-queue the graph through a Reference
    *  node just to nominate the thing you are already looking at. */
+  async shareClean() {
+    if (!this.ref) return;
+    try {
+      const saved = await shareCopy(this.ref);
+      this.flash(`share copy: ${saved.filename}`);
+    } catch {
+      this.flash("could not write the share copy");
+    }
+  }
   async setAsReference() {
     if (!this.ref) return;
     try {
@@ -5553,7 +5586,7 @@ class VideoViewer {
       });
       this.draw();
     };
-    this.popout = await openPopout(this.root, "😺NKD Video Viewer", restore);
+    this.popout = await openPopout(this.root, "😺NKD Video Viewer / Saver", restore);
     if (!this.popout) this.flash("the browser refused a floating window");
   }
   flash(text) {
@@ -7245,10 +7278,12 @@ export {
   config,
   ensureStyles,
   findAlign,
+  guardWidgetOrder,
   loadConfig,
   mountDomWidget,
   projectChip,
   radiusFor,
   saveToProject,
+  shareCopy,
   stepSize
 };

@@ -6,7 +6,8 @@ import { api } from "../../scripts/api.js";
 // registerExtension calls still run exactly once.
 import {
     config as nkdConfig, ensureStyles, loadConfig, mountDomWidget, projectChip,
-    saveToProject, BrushLayer, adjustBrush, radiusFor, stepSize, findAlign, alignBox,
+    saveToProject, shareCopy, BrushLayer, adjustBrush, radiusFor, stepSize, findAlign, alignBox,
+    guardWidgetOrder,
 } from "./nkd_timeline.js";
 
 const NODE_TYPE = "NKDPopupPreviewNode";
@@ -458,7 +459,7 @@ const ICON = {
 
 function createViewerDOM(opts = {}) {
     const { refUrl = null, labels = () => ({}), maskUrl = null, apiBase = null, onQueue = null, onSendToLoad = null,
-            onSave = null } = opts;
+            onSave = null, onShare = null } = opts;
     let fitWindowOnLoad = !!opts.fitWindowOnLoad;   // one-shot Fit Window on the first image
     // imgMeta is mutable — caller can update via root._nkdSetMeta(meta)
     let imgMeta = opts.imgMeta || null;
@@ -577,7 +578,7 @@ function createViewerDOM(opts = {}) {
                     <button class="nkd-pv-btn-run nkd-pv-vbtn" title="Queue this node (Shift+Q)" style="display:${onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-pv-lbl">Run</span></button>
                     <button class="nkd-pv-btn-copy nkd-pv-vbtn" title="Copy image to clipboard (C)">${ICON.copy}<span class="nkd-pv-lbl">Copy</span></button>
                     <button class="nkd-pv-btn-save nkd-pv-vbtn" title="Save into the active project's folder (S)">${ICON.folder}<span class="nkd-pv-lbl">Save</span></button>
-                    <span class="nkd-pv-more"><button class="nkd-pv-btn-more nkd-pv-vbtn" title="More">${ICON.more}</button><div class="nkd-pv-more-menu"><button class="nkd-pv-btn-adj nkd-pv-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-pv-lbl">Fit Window</span></button><button class="nkd-pv-btn-dl nkd-pv-vbtn" title="Download a copy through the browser">${ICON.save}<span class="nkd-pv-lbl">Download</span></button><button class="nkd-pv-btn-load nkd-pv-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-pv-lbl">To Load</span></button></div></span>
+                    <span class="nkd-pv-more"><button class="nkd-pv-btn-more nkd-pv-vbtn" title="More">${ICON.more}</button><div class="nkd-pv-more-menu"><button class="nkd-pv-btn-adj nkd-pv-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-pv-lbl">Fit Window</span></button><button class="nkd-pv-btn-share nkd-pv-vbtn" title="Save a copy without the workflow inside (_share), to post it" style="display:${onShare ? '' : 'none'}">${ICON.save}<span class="nkd-pv-lbl">Share copy</span></button><button class="nkd-pv-btn-dl nkd-pv-vbtn" title="Download a copy through the browser">${ICON.save}<span class="nkd-pv-lbl">Download</span></button><button class="nkd-pv-btn-load nkd-pv-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-pv-lbl">To Load</span></button></div></span>
                 </div>
             </div>
         </div>`;
@@ -1322,6 +1323,7 @@ function createViewerDOM(opts = {}) {
         document.body.removeChild(a);
     };
     root.querySelector(".nkd-pv-btn-dl").addEventListener("click", download);
+    root.querySelector(".nkd-pv-btn-share").addEventListener("click", () => void onShare?.());
 
     // Save — into the active project's folder. Falls back to the download when the host
     // could not hand us a saver, so the button is never a no-op.
@@ -1534,8 +1536,8 @@ class PopupWin {
     /** Save into the active project. Bridged into the separate realms the same way the
      *  Run button is: those documents cannot reach `app`/`api` on their own. */
 
-    _saveOwn() {
-        return saveImage(this, app.graph?.getNodeById(Number(this.nodeId)));
+    _saveOwn(share = false) {
+        return saveImage(this, app.graph?.getNodeById(Number(this.nodeId)), share);
     }
 
     /** A whole run's images. The previous run becomes the implicit A/B reference. */
@@ -1829,6 +1831,7 @@ class PopupWin {
             onQueue: () => this._queueOwnNode(),
             onSendToLoad: (p) => this._sendOwnToLoad(p),
             onSave: () => this._saveOwn(),
+            onShare: () => this._saveOwn(true),
             fitWindowOnLoad: this._fitOnOpen,
         });
         container.style.cssText = "width:100%;height:100%;";
@@ -2017,6 +2020,7 @@ class PopupWin {
             onQueue: () => this._queueOwnNode(),
             onSendToLoad: (p) => this._sendOwnToLoad(p),
             onSave: () => this._saveOwn(),
+            onShare: () => this._saveOwn(true),
             fitWindowOnLoad: this._fitOnOpen,
         });
     }
@@ -2222,18 +2226,67 @@ function downloadImage(popup) {
  * title. `applyTextReplacements` expands the core's own `%date:...%` for the same reason it
  * does at prompt-submit time.
  */
-async function saveImage(popup, node) {
-    const ref = node ? currentRef(node, popup) : popup?.currentMeta;
+async function saveImage(popup, node, share = false) {
+    popup?.ensureCurrent?.();
+    const items = popup?.items ?? [];
+    // A batch / list saves EVERY image, one after the other: awaited in turn so each save
+    // sees the file the previous one wrote and takes the next counter / version.
+    if (items.length > 1) {
+        let shown = null, n = 0;
+        try {
+            for (let i = 0; i < items.length; i++) {
+                const saved = await _saveOne(popup, node, share, items[i], i);
+                if (i === (popup.index ?? 0)) shown = saved;
+                n++;
+            }
+        } catch (err) {
+            app.extensionManager?.toast?.add?.({
+                severity: "error", summary: `Could not save (${n} of ${items.length} saved)`,
+                detail: String(err), life: 6000,
+            });
+        }
+        if (n === items.length) app.extensionManager?.toast?.add?.({
+            severity: "success", life: 4000,
+            summary: share ? `${n} share copies saved (no workflow inside)` : `${n} images saved`,
+            detail: shown ? `${shown.subfolder ? shown.subfolder + "/" : ""}` : "",
+        });
+        if (!share && shown) { popup.savedRef = shown; popup._notifyImage(); }
+        return shown;
+    }
+    // share: a copy with no workflow inside, next to the saved file if there is one
+    const ref = (share && popup?.savedRef) || (node ? currentRef(node, popup) : popup?.currentMeta);
     if (!ref) return _noImageToast();
+    try {
+        const saved = await _saveOne(popup, node, share, ref, popup?.index ?? 0);
+        app.extensionManager?.toast?.add?.({
+            severity: "success", summary: share ? "Share copy saved (no workflow inside)" : "Saved",
+            detail: `${saved.subfolder ? saved.subfolder + "/" : ""}${saved.filename}`,
+            life: 4000,
+        });
+        if (share) return saved;
+        popup.savedRef = saved;
+        popup._notifyImage();
+        return saved;
+    } catch (err) {
+        app.extensionManager?.toast?.add?.({
+            severity: "error", summary: "Could not save", detail: String(err), life: 6000,
+        });
+        return null;
+    }
+}
+
+/** Copy one /view item into the project. `i` is its place in the batch, which picks its
+ *  own executed name. Throws; the caller toasts. */
+async function _saveOne(popup, node, share, ref, i) {
     let prefix = undefined;
     const cfg = nkdConfig();
     // A WIRED field has no value in the browser, so the executed one (carried back in the
     // UI payload) wins there; unwired, the widget wins, so editing the name and pressing
     // Save still works without re-running.
-    // One entry per image (nodes.py), so the still on screen picks its own name - a swept
-    // list concatenates both lists in step.
-    const names = app.nodeOutputs?.[node?.id]?.nkd_name;
-    const run  = names?.[popup?.index ?? 0] || names?.[0];
+    // One entry per image (nodes.py), so each still picks its own name - a swept list
+    // concatenates both lists in step.
+    const names = popup?.runNames || app.nodeOutputs?.[node?.id]?.nkd_name;
+    const run  = names?.[i] || names?.[0];
     const wv   = (n) => node?.widgets?.find((w) => w.name === n)?.value;
     const fv   = (n, k) => (node?.inputs?.find((i) => i.name === n)?.link != null && run)
         ? run[k] : wv(n);
@@ -2251,22 +2304,7 @@ async function saveImage(popup, node) {
             prefix = window.comfyAPI?.utils?.applyTextReplacements?.(app, prefix) ?? prefix;
         } catch { /* older frontends: the token just stays literal */ }
     }
-    try {
-        const saved = await saveToProject(ref, prefix);
-        app.extensionManager?.toast?.add?.({
-            severity: "success", summary: "Saved",
-            detail: `${saved.subfolder ? saved.subfolder + "/" : ""}${saved.filename}`,
-            life: 4000,
-        });
-        popup.savedRef = saved;
-        popup._notifyImage();
-        return saved;
-    } catch (err) {
-        app.extensionManager?.toast?.add?.({
-            severity: "error", summary: "Could not save", detail: String(err), life: 6000,
-        });
-        return null;
-    }
+    return (share ? shareCopy : saveToProject)(ref, prefix);
 }
 
 /** The node's TITLE is the naming field, same rule as the video viewer's `%node%`. The
@@ -2324,7 +2362,10 @@ function _btn(bar, icon, title, on) {
 function buildNodePanel(node) {
     ensureStyles();
     void loadConfig();
-    const popup = getPopup(String(node.id));
+    // Resolved on every use, NOT captured here: the node is built before it is added to the
+    // graph, so its id is still -1 now and a captured popup is one no run ever fills (Save
+    // then only ever found images[0] through the nodeOutputs fallback).
+    const pop = () => getPopup(String(node.id));
 
     // NO thumbnail of our own: ComfyUI already renders the node's preview from
     // `app.nodeOutputs`, so a second copy is the same pixels decoded twice and a taller
@@ -2336,9 +2377,11 @@ function buildNodePanel(node) {
     const bar = _el("div", "nkd-tl-bar nkd-pp-bar", root);
     _btn(bar, "pi-external-link", "Open the viewer window", () => openViewer(node));
     _btn(bar, "pi-copy", "Copy the image to the clipboard",
-         () => copyImageToClipboard(popup.currentUrl || _refUrl(currentRef(node, popup))));
+         () => copyImageToClipboard(pop().currentUrl || _refUrl(currentRef(node, pop()))));
     _btn(bar, "pi-save", "Save into the active project's folder",
-         () => void saveImage(popup, node));
+         () => void saveImage(pop(), node));
+    _btn(bar, "pi-share-alt", "Save a copy without the workflow inside (_share), to post it",
+         () => void saveImage(pop(), node, true));
     const star = _btn(bar, "pi-star", "Set as the primary preview",
                       () => { setPrimary(isPrimary(node.id) ? null : node.id);
                               node.graph?.setDirtyCanvas(true, true); });
@@ -2364,24 +2407,23 @@ function buildNodePanel(node) {
     });
 
     const paint = () => {
-        const ref = popup.savedRef || currentRef(node, popup);
+        const ref = pop().savedRef || currentRef(node, pop());
         const where = ref
-            ? `${popup.savedRef ? "" : (ref.type || "temp") + "/"}${ref.subfolder ? ref.subfolder + "/" : ""}${ref.filename}`
+            ? `${pop().savedRef ? "" : (ref.type || "temp") + "/"}${ref.subfolder ? ref.subfolder + "/" : ""}${ref.filename}`
             : "no image yet";
         path.textContent = where;
-        path.dataset.full = popup.savedRef?.path || where;
+        path.dataset.full = pop().savedRef?.path || where;
     };
     paint();
     // The `executed` event does not fire for a cached node, nor on reload, so the panel
     // would sit on a stale line until the next real run. Cheap enough to re-read.
     const tick = setInterval(paint, 1000);
-    const offImage = popup.onImage(paint);
 
     const syncPrimary = () => star.classList.toggle("on", isPrimary(node.id));
     syncPrimary();
 
     node._nkdPanel = {
-        destroy: () => { clearInterval(tick); offImage(); chip.destroy(); mounted.release(); },
+        destroy: () => { clearInterval(tick); chip.destroy(); mounted.release(); },
     };
     requestAnimationFrame(() => mounted.resizeToContent());
     return { syncPrimary, refresh: paint };
@@ -2401,7 +2443,8 @@ function openViewer(node, { auto = false } = {}) {
 // the main window's clipboard rejects writes while another document has focus.
 async function pngBlob(url) {
     const blob = await fetch(url).then(r => r.blob());
-    if (blob.type === "image/png") return blob;
+    // Always re-encoded: the file from /view carries the workflow, and a copied image
+    // should be only the picture.
     const bmp = await createImageBitmap(blob);
     const c = Object.assign(document.createElement("canvas"), { width: bmp.width, height: bmp.height });
     c.getContext("2d").drawImage(bmp, 0, 0);
@@ -2541,8 +2584,21 @@ app.registerExtension({
             popup.setTitle(node.title || "Preview Window");
             popup._live(null);
             popup._runDone = true;   // later sampler frames of THIS run must not overwrite the result
+            // The run's own names, so a save fired from here does not depend on whether the
+            // core has written app.nodeOutputs before or after this listener.
+            popup.runNames = detail.output.nkd_name || null;
             popup.showBatch(detail.output.images);
             lastActiveId = String(node.id);
+            // auto_save: file the whole batch as soon as it lands. Keyed on the temp
+            // filenames, which are new on every real execution, so a re-sent cached result
+            // is not filed twice.
+            if (node.widgets?.find(w => w.name === "auto_save")?.value) {
+                const key = detail.output.images.map(it => it.filename).join("|");
+                if (key !== popup._autoSaved) {
+                    popup._autoSaved = key;
+                    void saveImage(popup, node);
+                }
+            }
         });
 
         // open_on_run opens when the run is QUEUED, not when it finishes: the Run click (or its
@@ -2703,6 +2759,12 @@ app.registerExtension({
             this.addWidget("toggle", "open_on_run", false, () => {},
                 { tooltip: "Open the viewer by itself when you press Run, with the live preview. " +
                            "Off by default: a window that appears on every run gets in the way." });
+            // Right under open_on_run, where it reads. guardWidgetOrder (below) restores
+            // older saves by name, so the shifted position costs nothing.
+            this.addWidget("toggle", "auto_save", false, () => {},
+                { tooltip: "Save every image into the project folder as soon as the run " +
+                           "finishes - the whole batch, not only the one on screen. Off: " +
+                           "nothing is kept until you press Save." });
 
             const panel = buildNodePanel(this);
 
@@ -2717,6 +2779,7 @@ app.registerExtension({
                 if (lw.options) lw.options.hidden = true;
                 lw.computeSize = () => [0, -4];
             }
+
 
             // Let the node be dragged TALLER than the panel, so ComfyUI's own preview (drawn
             // above the panel from nodeOutputs) grows like a normal Preview Image. The DOM
@@ -2763,6 +2826,11 @@ app.registerExtension({
             if (pos && pos[1] > 0 && !onWidget) openViewer(this);
             return r;
         };
+
+        // Saved values are restored BY NAME (widgets_values_named), so moving auto_save
+        // under open_on_run does not shift older saves. v2 = that reorder: a frontend too old
+        // to write the map gets the shared re-add-the-node warning instead.
+        guardWidgetOrder(nodeType, "NKD Popup Preview", 2);
 
         const origTitleChanged = nodeType.prototype.onTitleChanged;
         nodeType.prototype.onTitleChanged = function (title) {

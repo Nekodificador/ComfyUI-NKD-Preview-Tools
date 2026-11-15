@@ -1,8 +1,8 @@
-"""😺NKD same-origin gate for the routes that write project config.
+"""😺NKD cross-site gate for the routes that write project config.
 
-Any page open in the operator's browser can fire a plain request at localhost. Guards that
-`_is_same_origin` actually requires the browser-set
-`Sec-Fetch-Site: same-origin` header, and that a missing/forged header fails closed.
+Guards that `_is_cross_site` refuses only what the browser marks `cross-site`, the same
+policy as ComfyUI's own origin check: same-site (proxy, sibling subdomain) and a missing
+header pass, as they do for the rest of the API.
 
 Run: python tests/test_same_origin.py   (with ComfyUI's interpreter)
 """
@@ -44,20 +44,13 @@ class _FakeRequest:
         self.headers = headers or {}
 
 
-def test_same_origin_header_required():
-    assert nodes._is_same_origin(_FakeRequest({"Sec-Fetch-Site": "same-origin"})) is True
-
-
-def test_cross_site_header_rejected():
-    assert nodes._is_same_origin(_FakeRequest({"Sec-Fetch-Site": "cross-site"})) is False
-
-
-def test_missing_header_fails_closed():
-    assert nodes._is_same_origin(_FakeRequest()) is False
+def test_only_cross_site_refused():
+    for h in ({"Sec-Fetch-Site": "same-origin"}, {"Sec-Fetch-Site": "same-site"},
+              {"Sec-Fetch-Site": "none"}, {}):
+        assert nodes._is_cross_site(_FakeRequest(h)) is False, h
+    assert nodes._is_cross_site(_FakeRequest({"Sec-Fetch-Site": "cross-site"})) is True
 
 
 if __name__ == "__main__":
-    test_same_origin_header_required()
-    test_cross_site_header_rejected()
-    test_missing_header_fails_closed()
+    test_only_cross_site_refused()
     print("test_same_origin: all passed")

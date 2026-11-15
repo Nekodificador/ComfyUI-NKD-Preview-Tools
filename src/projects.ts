@@ -135,6 +135,18 @@ export async function saveToProject(ref: FileRef, prefix?: string): Promise<File
   return res.json();
 }
 
+/** Write a copy with no workflow inside (`..._share`), for posting in public. A file already
+ *  in output/ gets it alongside; a temp preview goes where Save would put it. */
+export async function shareCopy(ref: FileRef, prefix?: string): Promise<FileRef & { path: string }> {
+  const res = await api.fetchApi("/nkd/share", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...ref, prefix, versioning: saveVersioning() }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 // ── The chip ────────────────────────────────────────────────────────────────
 
 let openMenuEl: HTMLElement | null = null;

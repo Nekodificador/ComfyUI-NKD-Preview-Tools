@@ -898,10 +898,11 @@ registerProjectTopbar();
  * tree-shakes the code away and the popup's import resolves to undefined.
  */
 export {
-  projectChip, saveToProject, loadConfig, config,
+  projectChip, saveToProject, shareCopy, loadConfig, config,
 } from "./projects";
 export { ensureStyles } from "./timeline/styles";
 export { mountDomWidget } from "./domHost";
 // The popup viewer's paint mode. brush.ts is a verbatim copy of NKD Basic Tools' (its Paint node).
 export { BrushLayer, adjustBrush, radiusFor, stepSize } from "./brush";
 export { findAlign, alignBox } from "./align";
+export { guardWidgetOrder } from "./schemaGuard";

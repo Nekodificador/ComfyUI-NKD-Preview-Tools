@@ -492,13 +492,16 @@ def copy_with_metadata(src: str, dst: str, metadata: dict | None, ext: str) -> N
     and gif/webp/png never had the metadata to begin with. Those keep a plain copy, as
     does any file PyAV cannot remux (an old PyAV without `add_stream_from_template`).
     """
-    if not metadata or ext not in ("mp4", "mov"):
+    if not metadata or ext not in ("mp4", "mov") or not _remux(src, dst, ext, metadata):
         shutil.copy2(src, dst)
-        return
+
+
+def _remux(src: str, dst: str, ext: str, metadata: dict | None) -> bool:
+    """Packets only, no re-encode; the new file carries `metadata` and nothing else."""
     opts = {"movflags": "use_metadata_tags+faststart"} if ext == "mp4" else {}
     try:
         with av.open(src) as inp, av.open(dst, mode="w", options=opts) as out:
-            for k, v in metadata.items():
+            for k, v in (metadata or {}).items():
                 out.metadata[k] = json.dumps(v)
             pairs = {s.index: out.add_stream_from_template(s)
                      for s in inp.streams if s.type in ("video", "audio")}
@@ -507,9 +510,47 @@ def copy_with_metadata(src: str, dst: str, metadata: dict | None, ext: str) -> N
                     continue
                 packet.stream = pairs[packet.stream.index]
                 out.mux(packet)
+        return True
     except Exception as exc:
-        print(f"[NKD Video] metadata remux failed ({exc!r}); copying as-is")
-        shutil.copy2(src, dst)
+        print(f"[NKD Video] remux failed ({exc!r})")
+        return False
+
+
+def _strip_jpeg(src: str, dst: str) -> None:
+    """The same JPEG minus its APP1 (EXIF / XMP) and comment segments: no re-encode."""
+    data = open(src, "rb").read()
+    out, i = bytearray(data[:2]), 2
+    while i + 4 <= len(data) and data[i] == 0xFF and data[i + 1] != 0xDA:   # up to start-of-scan
+        size = 2 + int.from_bytes(data[i + 2:i + 4], "big")
+        if data[i + 1] not in (0xE1, 0xFE):
+            out += data[i:i + size]
+        i += size
+    with open(dst, "wb") as f:
+        f.write(out + data[i:])
+
+
+SHARE_SUFFIX = "_share"
+
+
+def copy_without_metadata(src: str, dst: str) -> None:
+    """A copy with nothing embedded - no prompt, no workflow - for posting a render in public.
+
+    Stills keep their exact pixels (PNG and WebP rewritten losslessly, a JPEG with its comment and
+    EXIF segments dropped and the image data untouched), videos are remuxed without re-encoding. Animated
+    stills and anything else are a plain copy: those never carried the graph to begin with.
+    A WebM's alpha does not survive the remux, same as in `copy_with_metadata`.
+    """
+    ext = os.path.splitext(src)[1].lower().lstrip(".")
+    if ext in ("jpg", "jpeg"):
+        return _strip_jpeg(src, dst)
+    if ext in ("png", "webp"):
+        with PILImage.open(src) as im:
+            if getattr(im, "n_frames", 1) == 1:
+                im.save(dst, exif=b"", **({"lossless": True} if ext == "webp" else {}))
+                return                           # PNG text chunks are only written when asked for
+    elif ext in ("mp4", "mov", "webm", "mkv") and _remux(src, dst, ext, None):
+        return
+    shutil.copy2(src, dst)
 
 
 PALETTE_SAMPLES = 16
@@ -833,7 +874,7 @@ class NKDVideoViewer(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="NKDVideoViewer",
-            display_name="😺NKD Video Viewer",
+            display_name="😺NKD Video Viewer / Saver",
             category="😺NKD Nodes/Preview",
             search_aliases=["video combine", "save video", "export video", "video viewer"],
             description=(

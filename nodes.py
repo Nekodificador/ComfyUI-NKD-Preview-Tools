@@ -192,16 +192,15 @@ def _resolve_view(body: dict) -> tuple[str, str, str, str]:
     return path, filename, subfolder, kind
 
 
-def _is_same_origin(request: web.Request) -> bool:
-    """Did this request come from ComfyUI's own page, not a third-party CSRF page?
+def _is_cross_site(request: web.Request) -> bool:
+    """Did the browser mark this request as coming from another site (a CSRF page)?
 
-    Any page open in the operator's browser can fire a plain request at localhost.
-    `Sec-Fetch-Site` is a fetch metadata header the browser itself attaches and JS cannot
-    override, so it's a real cross-origin signal.
-    Sent by every browser this pack already requires for its DOM widgets; missing it fails
-    closed rather than guessing.
+    `Sec-Fetch-Site` is set by the browser itself and JS cannot override it. Same policy as
+    ComfyUI's own origin check, so a deployment behind a proxy or on a sibling subdomain
+    (`same-site`) works here as it does for the rest of the API, and it still holds when
+    `--enable-cors-header` swaps that check out.
     """
-    return request.headers.get("Sec-Fetch-Site") == "same-origin"
+    return request.headers.get("Sec-Fetch-Site") == "cross-site"
 
 
 @routes.get("/nkd/project/config")
@@ -243,8 +242,8 @@ async def _nkd_project_save(request: web.Request) -> web.Response:
 @routes.post("/nkd/project/version")
 async def _nkd_project_version(request: web.Request) -> web.Response:
     """Pin / unpin / set-next on the shared version. Writes one integer to the config."""
-    if not _is_same_origin(request):
-        return web.Response(status=403, text="Same-origin requests only")
+    if _is_cross_site(request):
+        return web.Response(status=403, text="Cross-site requests are refused")
     try:
         body = await request.json()
         action = str(body.get("action") or "")
@@ -280,20 +279,60 @@ async def _nkd_save(request: web.Request) -> web.Response:
     except PermissionError as exc:
         return web.Response(status=403, text=str(exc))
 
-    cfg = nkd_projects.load()
-    prefix = nkd_video.resolve_tokens(
-        str(body.get("prefix") or cfg["image_prefix"]), nkd_projects.tokens())
-    ext = os.path.splitext(filename)[1] or ".png"
-    root = folder_paths.get_output_directory()
-    # Versioning matches the video viewer (off/auto/manual) so this copy no longer just
-    # stamps a bare counter — the frontend chip menu picks the mode.
-    full_folder, out_name, subfolder = nkd_video.save_target(
-        prefix, root, ext,
-        str(body.get("versioning") or "off"), int(body.get("version") or 1))
+    full_folder, out_name, subfolder = _project_target(body, os.path.splitext(filename)[1] or ".png")
     os.makedirs(full_folder, exist_ok=True)
     shutil.copy2(src, os.path.join(full_folder, out_name))
     return web.json_response({"filename": out_name, "subfolder": subfolder, "type": "output",
                               "path": os.path.join(full_folder, out_name)})
+
+
+def _project_target(body: dict, ext: str) -> tuple[str, str, str]:
+    """Where a preview lands in the active project: (full_folder, out_name, subfolder)."""
+    cfg = nkd_projects.load()
+    prefix = nkd_video.resolve_tokens(
+        str(body.get("prefix") or cfg["image_prefix"]), nkd_projects.tokens())
+    # Versioning matches the video viewer (off/auto/manual) so this copy no longer just
+    # stamps a bare counter — the frontend chip menu picks the mode.
+    return nkd_video.save_target(
+        prefix, folder_paths.get_output_directory(), ext,
+        str(body.get("versioning") or "off"), int(body.get("version") or 1))
+
+
+@routes.post("/nkd/share")
+async def _nkd_share(request: web.Request) -> web.Response:
+    """Write a copy with no workflow inside, named `..._share`, for posting in public.
+
+    A file that is already in output/ gets its copy next to it. A preview still in temp/
+    goes where Save would have put it, so the copy survives too.
+    """
+    if _is_cross_site(request):
+        return web.Response(status=403, text="Cross-site requests are refused")
+    try:
+        body = await request.json()
+    except Exception:
+        return web.Response(status=400, text="Expected JSON")
+    try:
+        src, filename, subfolder, kind = _resolve_view(body)
+    except ValueError as exc:
+        return web.Response(status=400, text=str(exc))
+    except PermissionError as exc:
+        return web.Response(status=403, text=str(exc))
+
+    stem, ext = os.path.splitext(filename)
+    if kind == "output":
+        full_folder = os.path.dirname(src)
+    else:
+        full_folder, out_name, subfolder = _project_target(body, ext or ".png")
+        stem = os.path.splitext(out_name)[0]
+    if not stem.endswith(nkd_video.SHARE_SUFFIX):       # sharing a share copy: same name
+        stem = stem.rstrip("_") + nkd_video.SHARE_SUFFIX
+    out_name = stem + ext
+    dst = os.path.join(full_folder, out_name)
+    os.makedirs(full_folder, exist_ok=True)
+    if os.path.abspath(dst) != os.path.abspath(src):
+        nkd_video.copy_without_metadata(src, dst)
+    return web.json_response({"filename": out_name, "subfolder": subfolder, "type": "output",
+                              "path": dst})
 
 
 class NKDReferenceImage(io.ComfyNode):

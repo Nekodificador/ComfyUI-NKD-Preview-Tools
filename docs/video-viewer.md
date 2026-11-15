@@ -1,4 +1,4 @@
-# 😺NKD Video Viewer
+# 😺NKD Video Viewer / Saver
 
 - **A player, not a thumbnail**: drag the scrub bar frame by frame, step with the arrows, shuttle with J/K/L, loop it, and go full screen with the controls still there. There is a filmstrip along the scrub bar so you can find a shot by looking at it.
 - **Trim before saving**: drag the yellow brackets at either end of the scrub bar, or press `I` and `O` on the playhead, and only that stretch is written to disk, sound included. The player keeps showing the whole clip with the rest dimmed, so you can always widen it again, and the `video` output stays whole. Double-click a bracket to send it back to its end.

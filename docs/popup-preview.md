@@ -20,6 +20,7 @@ The node passes `image` through untouched, so it can sit inline in a chain (say 
 
 - Double-click the node, press **Q**, or use the button in the node.
 - Turn on `open_on_run` to have it open by itself when the node produces an image. It is off by default.
+- Turn on `auto_save` to file every image in the project folder as soon as the run finishes. It is off by default.
 - It opens as a Picture-in-Picture window where the browser supports it, and as a floating panel otherwise. Drag it to any monitor, or pop it out into its own window. Its size and position are remembered.
 - With several Popup Preview nodes, **Q** and **Shift+Q** follow the one you have selected or ran last. Star a node to pin it.
 
@@ -52,7 +53,7 @@ Restore and Align are inspired by the Erase and Align modes of Image Compare A/B
 ## Batches
 
 - The thumbnail strip and the counter appear when a run produces more than one image.
-- **←** and **→** step through them, and Save and Copy act on the one you are looking at.
+- **←** and **→** step through them, Copy acts on the one you are looking at, and Save files them all, one after another.
 
 ## While it runs
 

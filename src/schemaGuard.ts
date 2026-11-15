@@ -29,6 +29,8 @@ export function guardWidgetOrder(nodeType: any, nodeName: string, version: numbe
     const r = origCreated?.apply(this, arguments as any);
     this.properties = this.properties || {};
     this.properties[PROP] = version;
+    // Creation values, for widgets a saved map does not name (added after that save).
+    this.__nkdDefaults = new Map((this.widgets ?? []).map((w: any) => [w.name, w.value]));
     return r;
   };
 
@@ -45,6 +47,13 @@ export function guardWidgetOrder(nodeType: any, nodeName: string, version: numbe
           w.value = val;
           w.callback?.(val);
         }
+      }
+      // A widget newer than the save is absent from the map, but the POSITIONAL restore
+      // still wrote whatever sat in its slot into it. Put it back to its default.
+      for (const w of this.widgets ?? []) {
+        if (w.name in named || !this.__nkdDefaults?.has(w.name)) continue;
+        const def = this.__nkdDefaults.get(w.name);
+        if (w.value !== def) { w.value = def; w.callback?.(def); }
       }
     } else if (version > 1
         && info?.properties?.[PROP] !== version

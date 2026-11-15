@@ -14,7 +14,7 @@
 import { api } from "../comfyRuntime";
 import { type MediaRef, ensureThumbnails, thumbnailAt, viewUrl } from "../timeline/media";
 import { type Popout, openPopout } from "./popout";
-import { projectChip } from "../projects";
+import { projectChip, shareCopy } from "../projects";
 import { trackedChip } from "../labels";
 
 export type CompareMode = "off" | "wipe" | "difference";
@@ -224,6 +224,8 @@ export class VideoViewer {
     this.link = el("a", "nkd-tl-btn", bar);
     this.link.title = "Save a copy";
     this.link.appendChild(el("i", "pi pi-download"));
+    button(bar, "pi pi-share-alt", "Save a copy without the workflow inside (_share), to post it",
+      () => void this.shareClean());
     this.chip = projectChip(bar);
     // Every mark in the graph, listed here so untracking never means hunting the node.
     this.labelsChip = trackedChip(bar);
@@ -347,6 +349,16 @@ export class VideoViewer {
   /** Nominate the render on screen as the reference, so the next run can be wiped
    *  against it. Without this you would have to re-queue the graph through a Reference
    *  node just to nominate the thing you are already looking at. */
+  async shareClean(): Promise<void> {
+    if (!this.ref) return;
+    try {
+      const saved = await shareCopy(this.ref);
+      this.flash(`share copy: ${saved.filename}`);
+    } catch {
+      this.flash("could not write the share copy");
+    }
+  }
+
   async setAsReference(): Promise<void> {
     if (!this.ref) return;
     try {
@@ -468,7 +480,7 @@ export class VideoViewer {
       if (wasPlaying) void this.video.play().catch(() => {});
       this.draw();
     };
-    this.popout = await openPopout(this.root, "😺NKD Video Viewer", restore);
+    this.popout = await openPopout(this.root, "😺NKD Video Viewer / Saver", restore);
     if (!this.popout) this.flash("the browser refused a floating window");
   }
 

@@ -7,7 +7,7 @@ Preview tools for [ComfyUI](https://github.com/comfyanonymous/ComfyUI):
 - **NKD Popup Preview** — preview generated images in a persistent floating popup window, ideal for multi-monitor setups.
 - **NKD Timeline** — lay several videos and audio tracks on a multi-track timeline and get fps, frame count and resolution back as connectable sockets.
 - **NKD Audio Timeline** — the same editor without the picture: cut and arrange sound, set a level and drag fades into the joins.
-- **NKD Video Viewer** — save your video in the format you need and watch it in a player you can actually scrub, loop and compare against a previous take.
+- **NKD Video Viewer / Saver** — save your video in the format you need and watch it in a player you can actually scrub, loop and compare against a previous take.
 - **NKD Freeze Frames** — pull individual frames out of a batch as stills, one per socket.
 - **NKD Reference** — set the image, mask or video the other nodes compare against.
 
@@ -30,7 +30,7 @@ viewing from now on.
 | [😺NKD Popup Preview](docs/popup-preview.md) | Preview images in a floating window that stays put, made for multi-monitor setups. |
 | [😺NKD Timeline](docs/timeline.md) | Lay videos and audio on a multi-track timeline and get fps, frame count and resolution back as sockets. |
 | [😺NKD Audio Timeline](docs/audio-timeline.md) | The same editor without the picture: cut and arrange sound, set a level, drag fades into the joins. |
-| [😺NKD Video Viewer](docs/video-viewer.md) | Save your video in the format you need and watch it in a player you can scrub, loop and compare. |
+| [😺NKD Video Viewer / Saver](docs/video-viewer.md) | Save your video in the format you need and watch it in a player you can scrub, loop and compare. |
 | [😺NKD Freeze Frames](docs/freeze-frames.md) | Pull individual frames out of a batch as stills, one per socket. |
 | [😺NKD Reference](docs/reference.md) | Sets the image, mask or video that the other nodes compare against. |
 
