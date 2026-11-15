@@ -1794,9 +1794,9 @@ class TimelineEditor {
               start = Math.abs(byHead - start) <= Math.abs(byTail - start) ? byHead : byTail;
             }
             const track = d.hit.lane === "video" ? Math.max(0, Math.min(this.trackCount - 1, this.trackOf(y))) : d.hit.lane === "audio" && this.audioOnly ? this.audioTrackOf(y) : 0;
-            const shift = start - d.origin.start;
+            const shift2 = start - d.origin.start;
             const lift = track - d.origin.track;
-            let allowed = shift;
+            let allowed = shift2;
             for (const { from } of d.origins.values()) {
               allowed = Math.max(allowed, -from.start);
             }
@@ -6192,6 +6192,7 @@ function registerVideoViewer() {
     }
   });
 }
+const shift = (c) => [-Math.round(c.dx), -Math.round(c.dy)];
 const SIZE_MAX = 400;
 const coreRadius = (r, hardness) => r * (0.5 + 0.5 * hardness);
 const fringeBlur = (r, hardness) => r * (1 - hardness) * 0.3;
@@ -6481,7 +6482,7 @@ class BrushLayer {
     const x = this.patch.getContext("2d");
     x.globalCompositeOperation = "source-over";
     x.clearRect(0, 0, this.width, this.height);
-    x.drawImage(c.src, -c.dx, -c.dy, this.width, this.height);
+    x.drawImage(c.src, ...shift(c), this.width, this.height);
     x.globalCompositeOperation = "destination-in";
     x.filter = this.blurFilter(p);
     x.drawImage(this.stroke, 0, 0);
@@ -6507,7 +6508,7 @@ class BrushLayer {
       x.drawImage(this.stroke, 0, 0);
       x.filter = "none";
     });
-    const s = grab(() => x.drawImage(c.src, -c.dx, -c.dy, this.width, this.height));
+    const s = grab(() => x.drawImage(c.src, ...shift(c), this.width, this.height));
     const d = grab(() => x.drawImage(c.src, 0, 0, this.width, this.height));
     const out = x.createImageData(w, h);
     out.data.set(healPatch(s, d, m, w, h));
@@ -6581,11 +6582,11 @@ function score(L, t, stride) {
   const cov = sab - sa * sb / n, va = saa - sa * sa / n, vb = sbb - sb * sb / n;
   return va > 0 && vb > 0 ? cov / Math.sqrt(va * vb) : -Infinity;
 }
-function refine(L, t, shift, shiftStep, scale2, scaleStep, stride) {
+function refine(L, t, shift2, shiftStep, scale2, scaleStep, stride) {
   let best = t, bestS = -Infinity;
   for (let s = t.s - scale2; s <= t.s + scale2 + 1e-9; s += scaleStep) {
-    for (let y = -shift; y <= shift + 1e-9; y += shiftStep) {
-      for (let x = -shift; x <= shift + 1e-9; x += shiftStep) {
+    for (let y = -shift2; y <= shift2 + 1e-9; y += shiftStep) {
+      for (let x = -shift2; x <= shift2 + 1e-9; x += shiftStep) {
         const c = { dx: t.dx + x / L.w, dy: t.dy + y / L.h, s };
         const v = score(L, c, stride);
         if (v > bestS) {

@@ -405,7 +405,7 @@ const VIEWER_CSS = `
 .nkd-pv-paint{position:absolute;top:0;left:0;transform-origin:0 0;pointer-events:none;z-index:3;}
 .nkd-pv-viewer-root.holding-ref .nkd-pv-paint{display:none}
 .nkd-pv-viewer-root.painting .nkd-pv-vwrap{cursor:none}
-.nkd-pv-brush{position:absolute;z-index:7;display:none;pointer-events:none;border-radius:50%;border:1px solid rgba(255,255,255,0.9);box-shadow:0 0 0 1px rgba(0,0,0,0.7);transform:translate(-50%,-50%);}
+.nkd-pv-brush{position:absolute;z-index:7;display:none;pointer-events:none;border-radius:50%;background-repeat:no-repeat;border:1px solid rgba(255,255,255,0.9);box-shadow:0 0 0 1px rgba(0,0,0,0.7);transform:translate(-50%,-50%);}
 .nkd-pv-brush.on{display:block}
 .nkd-pv-brush-core{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border-radius:50%;border:1px dashed rgba(255,255,255,0.7);}
 .nkd-pv-brush.nkd-pv-src{border-style:dashed;opacity:0.85}
@@ -611,6 +611,7 @@ function createViewerDOM(opts = {}) {
             paintCv.style.width  = img.naturalWidth + "px";
             paintCv.style.height = img.naturalHeight + "px";
             paintCv.style.transform = img.style.transform;
+            paintCv.style.imageRendering = rendering;
         }
         zoomBtn.textContent = Math.round(scale * 100) + "%";
     }
@@ -1077,6 +1078,15 @@ function createViewerDOM(opts = {}) {
         core.style.display = P.hardness < 0.99 ? "" : "none";
         core.style.width = core.style.height = Math.max(1, d * P.hardness) + "px";
         ring.classList.add("on");
+        // Clone: what the brush will copy, inside the ring, before the click (Affinity's preview).
+        const cl = layers.clone, peek = P.layer === "clone" && P.tool !== "eraser" && !cl.stroking && !liveFrame() && (cloneOff || cloneSrc);
+        if (peek) {
+            const [px, py] = toLayer(e), sx = cloneOff ? px + Math.round(cloneOff[0]) : cloneSrc[0], sy = cloneOff ? py + Math.round(cloneOff[1]) : cloneSrc[1];
+            ring.style.backgroundImage = `url("${img.src}")`;
+            ring.style.imageRendering = img.style.imageRendering;   // as the picture around it
+            ring.style.backgroundSize = `${img.naturalWidth * scale}px ${img.naturalHeight * scale}px`;
+            ring.style.backgroundPosition = `${d / 2 - sx * scale}px ${d / 2 - sy * scale}px`;
+        } else ring.style.backgroundImage = "";
         moveSrc(e, d);
     }
     /** The dashed ring where Clone copies from: follows the pointer once the offset is set. */
