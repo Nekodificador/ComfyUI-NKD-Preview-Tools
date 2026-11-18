@@ -1,5 +1,7 @@
 # 😺NKD Freeze Frames
 
+<img src="img/NKDFreezeFrames.png" alt="😺NKD Freeze Frames" align="left" width="30%">
+
 Holds individual frames of a batch as still images, one per socket.
 
 ```mermaid
@@ -20,6 +22,8 @@ flowchart LR
 - The `frames` field can just be typed instead: `0, 12, 47`. Any separator works,
   negatives count from the end, and repeats are kept.
 - `images` carries the same frames as one batch, and `count` how many there are.
+
+<br clear="left">
 
 ---
 

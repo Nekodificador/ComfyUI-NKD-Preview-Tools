@@ -1,5 +1,7 @@
 # 😺NKD Popup Preview
 
+<img src="img/NKDPopupPreviewNode.png" alt="😺NKD Popup Preview" align="left" width="30%">
+
 A floating viewer for an image, on top of your browser: pan and zoom, compare against a reference, step through a batch and file the result in your project without leaving it.
 
 ```mermaid
@@ -80,6 +82,8 @@ Shortcuts only act while the pointer is over the viewer.
 - **P**: paint. **L**: to Load Image. **Shift+L**: to Load Image and run.
 - **Shift+Q**: run this node.
 - **Esc**: close.
+
+<br clear="left">
 
 ---
 

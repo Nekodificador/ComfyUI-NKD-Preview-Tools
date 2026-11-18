@@ -1,5 +1,7 @@
 # 😺NKD Timeline
 
+<img src="img/NKDTimeline.png" alt="😺NKD Timeline" align="left" width="30%">
+
 - **Material comes in through the inputs**, not through a file browser. One growing list of sockets takes a video, an image sequence, a mask or audio — whatever you plug in lands on the lane it belongs to, and another slot appears.
 - **Multi-track**: place, trim and slip clips on a timeline; higher tracks sit on top.
 - **The numbers are sockets**: `fps`, `frame_count`, `duration`, `width`, `height` and `current_frame` come out as real outputs, so the rest of the graph can be coordinated with them. They are also normal widgets, so they can be driven *from* other nodes.
@@ -23,6 +25,8 @@
 9. Right-click a clip to reinterpret it as a mask, or to set a track's blend mode — stack a before and an after on two tracks, set the top one to `difference`, and everything that matches goes black.
 10. Changed a file upstream? A different file is picked up on its own; press **reload** if you overwrote one keeping its name.
 11. Wire `images` onward, `coverage` into whatever consumes a mask if you are filling the gaps, and `current_image` if you want scrubbing to drive the rest of the graph.
+
+<br clear="left">
 
 ---
 

@@ -1,5 +1,7 @@
 # 😺NKD Audio Timeline
 
+<img src="img/NKDAudioTimeline.png" alt="😺NKD Audio Timeline" align="left" width="30%">
+
 - **The same editor, without the picture**: drag, trim, blade, snap, undo, in/out points and the transport all work exactly as they do on video, in a node that stays small.
 - **Drop a video in and it takes the sound**: the socket accepts audio *or* video, and a video is read for its audio track alone. Pulling a voice out of a long take is instant, with no extractor node in the graph.
 - **A waveform you can actually work against**: peak and body, both channels side by side, and detail that follows the zoom right down to the individual sample. Switch to the dB scale and a quiet dialogue track becomes readable instead of a flat line.
@@ -18,6 +20,8 @@
 7. Press the **wave button** in the bar to switch the waveform to a dB scale when a track is too quiet to read.
 8. Set `import_mode` to `stack` if you want each new source on its own lane so two can overlap; a lane to drop onto appears while you drag.
 9. Wire `audio` onward, and `frame_count` / `duration` / `fps` if the sound is what should decide how long the video is.
+
+<br clear="left">
 
 ---
 
