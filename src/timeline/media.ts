@@ -589,7 +589,9 @@ export function thumbnailAt(ref: MediaRef, seconds: number): HTMLCanvasElement |
 
 // ── Audio: one decode serves both the waveform and playback ───────────────────
 
-const audioCache = new Map<string, AudioBuffer>();
+// `null` = settled with no usable audio (no track, or a codec the browser refuses). Kept so a
+// failed decode is not re-fetched - the whole file - on every render that asks for it.
+const audioCache = new Map<string, AudioBuffer | null>();
 const peakCache = new Map<string, ChannelEnvelope[]>();
 const audioJobs = new Map<string, Promise<AudioBuffer | null>>();
 let audioCtx: AudioContext | null = null;
@@ -635,7 +637,10 @@ export function ensureAudio(ref: MediaRef, onDone: () => void): void {
       peakCache.set(key, buildEnvelope(decoded));
       return decoded;
     })
-    .catch(() => null)               // no audio track, or a codec the browser refuses
+    .catch(() => {                   // no audio track, or a codec the browser refuses
+      audioCache.set(key, null);
+      return null;
+    })
     .finally(() => {
       audioJobs.delete(key);
       // Even on failure. A clip whose sound this browser cannot decode still has to
@@ -651,4 +656,13 @@ export const peaksFor = (ref: MediaRef): ChannelEnvelope[] | undefined =>
   peakCache.get(refKey(ref));
 
 export const audioBufferFor = (ref: MediaRef): AudioBuffer | undefined =>
-  audioCache.get(refKey(ref));
+  audioCache.get(refKey(ref)) ?? undefined;
+
+/**
+ * Has this source's decode SETTLED (decoded or failed)? Callers that re-enter from their
+ * own callback - a render, an audio re-schedule - must ask this before `ensureAudio`:
+ * its `onDone` fires synchronously once settled, so calling it unconditionally from a
+ * render requests the next render, forever. Measured: the timeline repainted every rAF
+ * (162/s) while idle, and Nodes 2.0 graph panning fell from 80 to 30 fps.
+ */
+export const audioSettled = (ref: MediaRef): boolean => audioCache.has(refKey(ref));

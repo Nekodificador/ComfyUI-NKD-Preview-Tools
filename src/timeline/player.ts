@@ -12,7 +12,7 @@
  * asks the pooled element for whatever clip is currently under the playhead.
  */
 import { type Timeline, gainAt } from "./model";
-import { audioBufferFor, audioContext, ensureAudio, type MediaRef } from "./media";
+import { audioBufferFor, audioContext, audioSettled, ensureAudio, type MediaRef } from "./media";
 
 /** J and L step through these. Index 0 is the resting speed for each direction. */
 const SHUTTLE = [1, 2, 4, 8];
@@ -222,8 +222,11 @@ export class Transport {
       const buf = audioBufferFor(ref);
       if (!buf) {
         // Not decoded yet: ask for it and re-schedule once it lands, so the very first
-        // play is not silent. ensureAudio is cached and deduped, so this cannot loop.
-        ensureAudio(ref, () => { if (this.speed === 1) this.restartAudio(); });
+        // play is not silent. Settled-without-audio (no track) is skipped outright: its
+        // onDone would fire synchronously and re-enter this very loop.
+        if (!audioSettled(ref)) {
+          ensureAudio(ref, () => { if (this.speed === 1) this.restartAudio(); });
+        }
         continue;
       }
       const clipEnd = Math.min(a.start + a.length, end);

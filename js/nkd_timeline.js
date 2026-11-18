@@ -1275,14 +1275,18 @@ function ensureAudio(ref, onDone) {
     audioCache.set(key, decoded);
     peakCache.set(key, buildEnvelope(decoded));
     return decoded;
-  }).catch(() => null).finally(() => {
+  }).catch(() => {
+    audioCache.set(key, null);
+    return null;
+  }).finally(() => {
     audioJobs.delete(key);
     onDone();
   });
   audioJobs.set(key, job);
 }
 const peaksFor = (ref) => peakCache.get(refKey(ref));
-const audioBufferFor = (ref) => audioCache.get(refKey(ref));
+const audioBufferFor = (ref) => audioCache.get(refKey(ref)) ?? void 0;
+const audioSettled = (ref) => audioCache.has(refKey(ref));
 const SHUTTLE$1 = [1, 2, 4, 8];
 let playing = null;
 function applyFades(param, c, startOff, endOff, when, fps) {
@@ -1432,9 +1436,11 @@ class Transport {
       if (!ref) continue;
       const buf = audioBufferFor(ref);
       if (!buf) {
-        ensureAudio(ref, () => {
-          if (this.speed === 1) this.restartAudio();
-        });
+        if (!audioSettled(ref)) {
+          ensureAudio(ref, () => {
+            if (this.speed === 1) this.restartAudio();
+          });
+        }
         continue;
       }
       const clipEnd = Math.min(a.start + a.length, end);
@@ -3630,7 +3636,7 @@ class TimelineEditor {
    *   source runs at another cadence slides the whole wave off the picture it belongs to.
    */
   drawWaveform(ctx, c, ref, x, y, w, h, trimRate) {
-    ensureAudio(ref, () => this.requestRender());
+    if (!audioSettled(ref)) ensureAudio(ref, () => this.requestRender());
     const env = peaksFor(ref);
     const buf = audioBufferFor(ref);
     if (!env || !buf) return;

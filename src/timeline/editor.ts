@@ -28,7 +28,7 @@ import {
 } from "./model";
 import {
   type MediaInfo, type MediaRef,
-  VideoPool, audioBufferFor, ensureAudio, ensureThumbnails, peaksFor, thumbnailAt,
+  VideoPool, audioBufferFor, audioSettled, ensureAudio, ensureThumbnails, peaksFor, thumbnailAt,
 } from "./media";
 import { drawWave, type WaveColors } from "./waveform";
 import { Transport } from "./player";
@@ -2531,7 +2531,9 @@ export class TimelineEditor {
   private drawWaveform(ctx: CanvasRenderingContext2D, c: Clip, ref: MediaRef,
                        x: number, y: number, w: number, h: number,
                        trimRate: number): void {
-    ensureAudio(ref, () => this.requestRender());
+    // Only while unsettled: once settled, onDone fires synchronously and this would
+    // request a render from inside every render. See `audioSettled`.
+    if (!audioSettled(ref)) ensureAudio(ref, () => this.requestRender());
     const env = peaksFor(ref);
     const buf = audioBufferFor(ref);
     if (!env || !buf) return;
