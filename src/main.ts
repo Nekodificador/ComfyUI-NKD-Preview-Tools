@@ -367,7 +367,7 @@ type TimelineVariant = {
 function registerTimelineNode(v: TimelineVariant): void {
 comfyApp.registerExtension({
   name: v.ext,
-  // Surfaced in ComfyUI's own Settings dialog under "NKD Timeline", so the shortcuts are
+  // Surfaced in ComfyUI's own Settings dialog under the shared "NKD" entry, so the shortcuts are
   // discoverable and rebindable in the place users already look for them.
   //
   // Declared by the VIDEO variant only. The ids are shared - both editors read the same
@@ -378,7 +378,7 @@ comfyApp.registerExtension({
     name: k.label,
     type: "text",
     defaultValue: k.def,
-    category: ["NKD Timeline", "Shortcuts", k.label],
+    category: ["NKD", "Timeline Shortcuts", k.label],
     tooltip: `Single key, lower-case. Default: ${k.def}`,
   })),
   async beforeRegisterNodeDef(nodeType: any, nodeData: any) {
