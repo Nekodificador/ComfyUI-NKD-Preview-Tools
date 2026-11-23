@@ -67,7 +67,9 @@ Restore and Align are inspired by the Erase and Align modes of Image Compare A/B
 
 - **Save** files the image in the active project's folder and switches to **Saved** with the path. `filename_prefix` and `filename` on the node override the project's folder and name.
 - **Copy** puts the image on the clipboard.
-- The **⋯** menu has Download, Fit Window and To Load.
+- The **⋯** menu has Share copy, Download and To Load.
+
+The buttons live in a solid bar under the picture, in three groups: compare (Paint, Hold, Flash, Align, Mask), view (Fit Image, 1:1, Fit Window) and output (Run, Copy, Save, ⋯). The bar never covers the image.
 
 ## Shortcuts
 

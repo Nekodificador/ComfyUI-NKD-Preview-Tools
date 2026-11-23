@@ -335,7 +335,7 @@ const VIEWER_CSS = `
 .nkd-pv-viewer-root.holding-ref .nkd-pv-refclip,.nkd-pv-viewer-root.cmp-wipe .nkd-pv-refclip,.nkd-pv-viewer-root.cmp-diff .nkd-pv-refclip{display:block}
 .nkd-pv-viewer-root.cmp-diff .nkd-pv-refclip{mix-blend-mode:difference}
 .nkd-pv-viewer-root.holding-ref .nkd-pv-refclip{clip-path:none !important;mix-blend-mode:normal !important}
-.nkd-pv-wipe{position:absolute;top:0;bottom:0;width:28px;margin-left:-14px;z-index:4;display:none;cursor:ew-resize;touch-action:none}
+.nkd-pv-wipe{position:absolute;top:0;bottom:var(--pv-dock);width:28px;margin-left:-14px;z-index:4;display:none;cursor:ew-resize;touch-action:none}
 .nkd-pv-wipe::before{content:"";position:absolute;left:13px;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.85);box-shadow:0 0 6px rgba(0,0,0,0.6)}
 .nkd-pv-wipe::after{content:"";position:absolute;left:6px;top:50%;margin-top:-8px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 0 6px rgba(0,0,0,0.6)}
 .nkd-pv-viewer-root.cmp-wipe .nkd-pv-wipe{display:block}
@@ -343,7 +343,7 @@ const VIEWER_CSS = `
 .nkd-pv-viewer-root:focus{outline:none}
 .nkd-pv-live-badge{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:7;display:none;padding:3px 10px;border-radius:10px;font:bold 11px monospace;letter-spacing:1px;color:#fff;background:rgba(180,32,48,0.92);pointer-events:none;}
 .nkd-pv-live-badge.on{display:block}.nkd-pv-live-badge.cancelled{background:rgba(120,120,120,0.92)}
-.nkd-pv-strip{position:absolute;left:50%;bottom:74px;transform:translateX(-50%);z-index:6;display:none;gap:6px;max-width:80%;overflow-x:auto;padding:5px;border-radius:8px;background:rgba(18,18,18,0.85);border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(6px);opacity:0;transition:opacity 0.25s;}
+.nkd-pv-strip{position:absolute;left:50%;bottom:calc(var(--pv-dock) + 10px);transform:translateX(-50%);z-index:6;display:none;gap:6px;max-width:80%;overflow-x:auto;padding:5px;border-radius:8px;background:rgba(18,18,18,0.85);border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(6px);opacity:0;transition:opacity 0.25s;}
 .nkd-pv-viewer-root:hover .nkd-pv-strip{opacity:1}
 .nkd-pv-strip.on{display:flex}
 .nkd-pv-strip img{height:46px;width:auto;border-radius:4px;border:2px solid transparent;cursor:pointer;flex:none;opacity:0.7}
@@ -364,25 +364,33 @@ const VIEWER_CSS = `
 .nkd-pv-mask-color::-webkit-color-swatch-wrapper{padding:0;}
 .nkd-pv-mask-color::-webkit-color-swatch{border:none;border-radius:5px;}
 .nkd-pv-mask-op{width:80px;height:30px;cursor:pointer;accent-color:#7dc97d;}
-.nkd-pv-bar,.nkd-pv-btn-close{opacity:0;transition:opacity 0.25s;}
-.nkd-pv-viewer-root:hover .nkd-pv-bar,.nkd-pv-viewer-root:hover .nkd-pv-btn-close,.nkd-pv-viewer-root:focus-within .nkd-pv-bar{opacity:1}
+.nkd-pv-btn-close{opacity:0;transition:opacity 0.25s;}
+.nkd-pv-viewer-root:hover .nkd-pv-btn-close{opacity:1}
 /* No hover on touch / PiP-without-pointer: hidden controls would be invisible controls. */
-@media (hover:none){.nkd-pv-bar,.nkd-pv-btn-close,.nkd-pv-strip{opacity:1}}
-/* One full-width bottom bar split into left (reference) + right (actions)
-   groups; space-between keeps them apart and each wraps on its own so the
-   clusters never overlap on narrow windows. */
-.nkd-pv-bar{position:absolute;left:18px;right:18px;bottom:18px;display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:8px 16px;z-index:6;}
-.nkd-pv-bar-group{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
-.nkd-pv-bar-right{display:flex;flex-direction:column;align-items:flex-end;gap:8px;margin-left:auto;}
-.nkd-pv-bar-row{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;}
+@media (hover:none){.nkd-pv-btn-close,.nkd-pv-strip{opacity:1}}
+/* Bottom DOCK: solid, always visible, and it RESERVES its height (--pv-dock, measured)
+   so no button ever sits over the picture -- the twin of the paint strip on top.
+   Three islands by family: compare / view / output. Each island is its own flex box,
+   so a narrow viewer wraps by island instead of splitting a family. */
+.nkd-pv-dock{position:absolute;left:0;right:0;bottom:0;z-index:8;display:flex;flex-wrap:nowrap;overflow:hidden;justify-content:space-between;align-items:center;gap:6px;padding:6px 10px;background:#141414;border-top:1px solid rgba(255,255,255,0.08);}
+.nkd-pv-island{flex:none;display:flex;flex-wrap:nowrap;align-items:center;gap:2px;padding:2px;border-radius:8px;background:#1d1d1d;border:1px solid rgba(255,255,255,0.08);}
+.nkd-pv-island .nkd-pv-vbtn{height:28px;padding:0 9px;font-size:12px;background:transparent;border-color:transparent;backdrop-filter:none}
+.nkd-pv-island .nkd-pv-vbtn:hover{background:rgba(255,255,255,0.08)}
+.nkd-pv-island-view .nkd-pv-lbl{display:none}
+.nkd-pv-island .nkd-pv-btn-run{color:#9fe09f}
 .nkd-pv-btn-close{position:absolute;top:14px;right:14px;z-index:6;}
 .nkd-pv-btn-hold{user-select:none;background:rgba(40,28,32,0.92);border-color:rgba(255,180,180,0.18);}
 .nkd-pv-btn-hold:hover{background:rgba(72,40,48,0.96);color:#fff}
 .nkd-pv-btn-hold.active{background:rgba(180,32,48,0.95);color:#fff}
 .nkd-pv-vbtn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;line-height:1;white-space:nowrap;background:rgba(28,28,28,0.92);border:1px solid rgba(255,255,255,0.12);color:#ccc;border-radius:6px;cursor:pointer;font-size:13px;backdrop-filter:blur(6px);transition:background 0.14s,color 0.14s;}
 .nkd-pv-vbtn svg{width:15px;height:15px;flex:none;display:block;}
-/* Narrow viewer → collapse buttons to icon-only (names stay in tooltips). */
-@container (max-width:470px){.nkd-pv-vbtn .nkd-pv-lbl{display:none;}.nkd-pv-vbtn{padding:0 9px;}}
+/* .compact is set by MEASURING (syncStrip): labels go when the dock or the paint strip
+   would not fit on one line. Never wraps -- the viewer's minimum width is the icon row. */
+.nkd-pv-viewer-root.compact .nkd-pv-vbtn .nkd-pv-lbl,.nkd-pv-viewer-root.compact :is(.nkd-pv-mask-color,.nkd-pv-mask-op),.nkd-pv-viewer-root.compact .nkd-pv-scrub i{display:none}
+.nkd-pv-viewer-root.compact :is(.nkd-pv-island,.nkd-pv-paint-row) .nkd-pv-vbtn{padding:0 7px}
+.nkd-pv-viewer-root.compact .nkd-pv-scrub{padding:0 5px}
+.nkd-pv-scrub i{font-style:normal}
+.nkd-pv-viewer-root.compact .nkd-pv-btn-heal .nkd-pv-lbl{display:inline}   /* no icon: the word IS the button */
 .nkd-pv-vbtn:hover{background:rgba(72,72,72,0.96);color:#fff}
 .nkd-pv-vbtn:active{transform:scale(0.97)}
 .nkd-pv-btn-run,.nkd-pv-btn-looprun{background:rgba(46,58,46,0.92);border-color:rgba(125,201,125,0.35);color:#9fe09f}
@@ -412,12 +420,12 @@ const VIEWER_CSS = `
 .nkd-pv-brush.nkd-pv-src{border-style:dashed;opacity:0.85}
 /* Paint mode: a SOLID strip on top, so no tool ever sits over the pixels being painted.
    The image area shrinks by its height and refits; the top overlays move down with it. */
-.nkd-pv-viewer-root{--pv-strip:0px}
+.nkd-pv-viewer-root{--pv-strip:0px;--pv-dock:42px}
 .nkd-pv-viewer-root.painting{--pv-strip:40px}
-.nkd-pv-viewer-root.painting .nkd-pv-vwrap{margin-top:var(--pv-strip);height:calc(100% - var(--pv-strip))}
+.nkd-pv-vwrap{margin-top:var(--pv-strip);height:calc(100% - var(--pv-strip) - var(--pv-dock))}
 .nkd-pv-viewer-root.painting :is(.nkd-pv-help,.nkd-pv-info,.nkd-pv-live-badge,.nkd-pv-count,.nkd-pv-ref-badge,.nkd-pv-cur-badge,.nkd-pv-btn-close){margin-top:var(--pv-strip)}
 .nkd-pv-viewer-root.painting .nkd-pv-wipe{top:var(--pv-strip)}
-.nkd-pv-paint-row{position:absolute;top:0;left:0;right:0;min-height:40px;z-index:8;display:none;flex-wrap:wrap;align-items:center;gap:6px;padding:6px 10px;background:#141414;border-bottom:1px solid rgba(255,255,255,0.08);}
+.nkd-pv-paint-row{position:absolute;top:0;left:0;right:0;min-height:40px;z-index:8;display:none;flex-wrap:nowrap;overflow:hidden;align-items:center;gap:6px;padding:6px 10px;background:#141414;border-bottom:1px solid rgba(255,255,255,0.08);}
 .nkd-pv-viewer-root.painting .nkd-pv-paint-row{display:flex}
 .nkd-pv-paint-row .nkd-pv-vbtn{height:28px;padding:0 9px;font-size:12px;flex:none}
 .nkd-pv-paint-row .nkd-pv-sep{width:1px;height:20px;background:rgba(255,255,255,0.1);flex:none;margin:0 2px}
@@ -547,8 +555,8 @@ function createViewerDOM(opts = {}) {
                 <button class="nkd-pv-btn-terase nkd-pv-vbtn" title="Eraser (E)">${ICON.eraser}</button>
             </span>
             <span class="nkd-pv-sep"></span>
-            <span class="nkd-pv-scrub nkd-pv-sc-size" title="Brush size in image pixels - drag, Shift for fine ([ ])">Size <b></b></span>
-            <span class="nkd-pv-scrub nkd-pv-sc-hard" title="Hardness - drag, Shift for fine (Alt + right drag on the picture)">Hard <b></b></span>
+            <span class="nkd-pv-scrub nkd-pv-sc-size" title="Brush size in image pixels - drag, Shift for fine ([ ])">S<i>ize</i> <b></b></span>
+            <span class="nkd-pv-scrub nkd-pv-sc-hard" title="Hardness - drag, Shift for fine (Alt + right drag on the picture)">H<i>ard</i> <b></b></span>
             <span class="nkd-pv-sep"></span>
             <button class="nkd-pv-btn-pundo nkd-pv-vbtn" title="Undo stroke (Ctrl+Z)">${ICON.undo}</button>
             <button class="nkd-pv-btn-pclear nkd-pv-vbtn" title="Clear the active layer">${ICON.trash}</button>
@@ -557,8 +565,8 @@ function createViewerDOM(opts = {}) {
                 <button class="nkd-pv-btn-looprun nkd-pv-vbtn" title="Send to the Load Image and run this preview's branch (Shift+L)" style="display:${onSendToLoad && onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-pv-lbl">Load &amp; Run</span></button>
             </span>
         </div>
-        <div class="nkd-pv-bar">
-            <div class="nkd-pv-bar-group nkd-pv-bar-left">
+        <div class="nkd-pv-dock">
+            <div class="nkd-pv-island nkd-pv-island-cmp">
                 <button class="nkd-pv-btn-paint nkd-pv-vbtn" title="Paint the previous render back in, or a mask to regenerate (P)">${ICON.brush}<span class="nkd-pv-lbl">Paint</span></button>
                 <button class="nkd-pv-btn-hold nkd-pv-vbtn" title="Hold to show reference image (Space)" style="display:${refUrl ? '' : 'none'}">${ICON.swap}<span class="nkd-pv-lbl">Hold for Ref</span></button>
                 <button class="nkd-pv-btn-cmp nkd-pv-vbtn" title="Compare mode (V): Flash / Wipe / Diff" style="display:none">${ICON.cmp}<span class="nkd-pv-lbl">Flash</span></button>
@@ -569,17 +577,16 @@ function createViewerDOM(opts = {}) {
                     <input type="range" class="nkd-pv-mask-op" min="5" max="100" title="Overlay opacity">
                 </span>
             </div>
-            <div class="nkd-pv-bar-right">
-                <div class="nkd-pv-bar-row">
-                    <button class="nkd-pv-btn-fit nkd-pv-vbtn" title="Fit image to window (0)">${ICON.fit}<span class="nkd-pv-lbl">Fit Image</span></button>
-                    <button class="nkd-pv-btn-100 nkd-pv-vbtn" title="Actual size (1)">${ICON.pixel}<span class="nkd-pv-lbl">1:1 Pixel</span></button>
-                </div>
-                <div class="nkd-pv-bar-row">
-                    <button class="nkd-pv-btn-run nkd-pv-vbtn" title="Queue this node (Shift+Q)" style="display:${onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-pv-lbl">Run</span></button>
-                    <button class="nkd-pv-btn-copy nkd-pv-vbtn" title="Copy image to clipboard (C)">${ICON.copy}<span class="nkd-pv-lbl">Copy</span></button>
-                    <button class="nkd-pv-btn-save nkd-pv-vbtn" title="Save into the active project's folder (S)">${ICON.folder}<span class="nkd-pv-lbl">Save</span></button>
-                    <span class="nkd-pv-more"><button class="nkd-pv-btn-more nkd-pv-vbtn" title="More">${ICON.more}</button><div class="nkd-pv-more-menu"><button class="nkd-pv-btn-adj nkd-pv-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-pv-lbl">Fit Window</span></button><button class="nkd-pv-btn-share nkd-pv-vbtn" title="Save a copy without the workflow inside (_share), to post it" style="display:${onShare ? '' : 'none'}">${ICON.save}<span class="nkd-pv-lbl">Share copy</span></button><button class="nkd-pv-btn-dl nkd-pv-vbtn" title="Download a copy through the browser">${ICON.save}<span class="nkd-pv-lbl">Download</span></button><button class="nkd-pv-btn-load nkd-pv-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-pv-lbl">To Load</span></button></div></span>
-                </div>
+            <div class="nkd-pv-island nkd-pv-island-view">
+                <button class="nkd-pv-btn-fit nkd-pv-vbtn" title="Fit image to window (0)">${ICON.fit}<span class="nkd-pv-lbl">Fit Image</span></button>
+                <button class="nkd-pv-btn-100 nkd-pv-vbtn" title="Actual size (1)">${ICON.pixel}<span class="nkd-pv-lbl">1:1 Pixel</span></button>
+                <button class="nkd-pv-btn-adj nkd-pv-vbtn" title="Fit window to image">${ICON.win}<span class="nkd-pv-lbl">Fit Window</span></button>
+            </div>
+            <div class="nkd-pv-island nkd-pv-island-out">
+                <button class="nkd-pv-btn-run nkd-pv-vbtn" title="Queue this node (Shift+Q)" style="display:${onQueue ? '' : 'none'}">${ICON.run}<span class="nkd-pv-lbl">Run</span></button>
+                <button class="nkd-pv-btn-copy nkd-pv-vbtn" title="Copy image to clipboard (C)">${ICON.copy}<span class="nkd-pv-lbl">Copy</span></button>
+                <button class="nkd-pv-btn-save nkd-pv-vbtn" title="Save into the active project's folder (S)">${ICON.folder}<span class="nkd-pv-lbl">Save</span></button>
+                <span class="nkd-pv-more"><button class="nkd-pv-btn-more nkd-pv-vbtn" title="More">${ICON.more}</button><div class="nkd-pv-more-menu"><button class="nkd-pv-btn-share nkd-pv-vbtn" title="Save a copy without the workflow inside (_share), to post it" style="display:${onShare ? '' : 'none'}">${ICON.save}<span class="nkd-pv-lbl">Share copy</span></button><button class="nkd-pv-btn-dl nkd-pv-vbtn" title="Download a copy through the browser">${ICON.save}<span class="nkd-pv-lbl">Download</span></button><button class="nkd-pv-btn-load nkd-pv-vbtn" title="Send image to the target Load Image node" style="display:${onSendToLoad ? '' : 'none'}">${ICON.load}<span class="nkd-pv-lbl">To Load</span></button></div></span>
             </div>
         </div>`;
 
@@ -658,10 +665,22 @@ function createViewerDOM(opts = {}) {
         refImg.style.imageRendering = rendering;
     }
 
+    // 1:1 HOLDS through the resizes it triggers: a window resizes a frame or more later, and
+    // every refit in between (the resize hook, the observer) re-centres at 100 % instead of
+    // fitting. Any pan / zoom / Fit releases it.
+    let hold11 = false;
+    function oneToOne() {
+        const nw = img.naturalWidth, nh = img.naturalHeight;
+        if (!nw || !nh) return;
+        hold11 = true; userView = true; scale = 1.0;
+        fitScale = Math.min(wrap.clientWidth / nw, wrap.clientHeight / nh);
+        tx = (wrap.clientWidth - nw) / 2; ty = (wrap.clientHeight - nh) / 2; apply();
+    }
     function fit() {
         const ww = wrap.clientWidth, wh = wrap.clientHeight;
         const nw = img.naturalWidth, nh = img.naturalHeight;
         if (!nw || !nh) return;
+        if (hold11) return oneToOne();
         userView = false; lastNW = nw;
         fitScale = Math.min(ww / nw, wh / nh);
         scale = fitScale;
@@ -1026,7 +1045,37 @@ function createViewerDOM(opts = {}) {
     };
     // On a narrow viewer the strip wraps to two rows: the image starts below its REAL height.
     const paintRow = root.querySelector(".nkd-pv-paint-row");
-    function syncStrip() { root.style.setProperty("--pv-strip", paintOn ? paintRow.offsetHeight + "px" : "0px"); }
+    const dock = root.querySelector(".nkd-pv-dock");
+    // Width a no-wrap flex row needs: its visible children + gaps + padding/border.
+    const rowNeed = (el) => {
+        const cs = getComputedStyle(el), kids = [...el.children].filter(k => k.offsetWidth);
+        const w = kids.reduce((a, k) => { const m = getComputedStyle(k); return a + k.getBoundingClientRect().width + (parseFloat(m.marginLeft) || 0) + (parseFloat(m.marginRight) || 0); }, 0);
+        return Math.ceil(w + (parseFloat(cs.columnGap) || 0) * Math.max(0, kids.length - 1)
+            + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth));
+    };
+    const barsNeed = () => Math.max(rowNeed(dock), paintOn ? rowNeed(paintRow) : 0);
+    function syncStrip() {
+        dock.style.zoom = paintRow.style.zoom = "";   // measure at real size
+        // Minimum = everything as icons on ONE line. Labels only while they fit too.
+        root.classList.add("compact");
+        const minW = barsNeed();
+        root.classList.remove("compact");
+        if (barsNeed() > root.clientWidth) root.classList.add("compact");
+        root._nkdMinW = minW;
+        // Too narrow (a PiP / OS window dragged small, or the paint strip just appeared): grow.
+        const short = minW - root.clientWidth;
+        if (short > 0 && root.clientWidth) {   // 0 = not laid out yet, nothing to grow from
+            const win = root.ownerDocument.defaultView;
+            if (root._nkdGrow) root._nkdGrow(short);
+            else if (win && win !== window) try { win.resizeBy(short, 0); } catch { /* PiP refuses without a gesture */ }
+        }
+        // Still short (a Document PiP can't be resized from script; a popup grows a frame later):
+        // shrink the bars instead of hiding buttons off the edge. The next resize re-measures.
+        const z = root.clientWidth && minW > root.clientWidth ? root.clientWidth / minW : 1;
+        if (z < 1) dock.style.zoom = paintRow.style.zoom = String(z);
+        root.style.setProperty("--pv-strip", paintOn ? paintRow.getBoundingClientRect().height + "px" : "0px");
+        root.style.setProperty("--pv-dock", dock.getBoundingClientRect().height + "px");
+    }
     const setPaint = (on) => { paintOn = on; syncPaint(); syncStrip(); };
     const undoPaint = () => { const n = undoOrder.pop(); if (n) { layers[n].undo(); redoOrder.push(n); } syncPaint(); };
     const redoPaint = () => { const n = redoOrder.pop(); if (n) { layers[n].redo(); undoOrder.push(n); } syncPaint(); };
@@ -1262,11 +1311,15 @@ function createViewerDOM(opts = {}) {
     function fitWindow() {
         const nw = img.naturalWidth, nh = img.naturalHeight;
         if (!nw || !nh) return;
+        hold11 = false;
         const maxW = Math.round(screen.availWidth  * 0.9);
         const maxH = Math.round(screen.availHeight * 0.9);
-        // Resize panel to match the image at current zoom level.
-        const w = Math.max(320, Math.min(Math.round(nw * scale), maxW));
-        const h = Math.max(240, Math.min(Math.round(nh * scale), maxH));
+        // Window = the image at the current zoom, scaled down AS A WHOLE if the screen caps it:
+        // capping each side on its own changes the aspect and leaves bands at the sides.
+        const chrome = root.clientHeight - wrap.clientHeight;   // paint strip + dock
+        const s = Math.min(scale, maxW / nw, (maxH - chrome) / nh);
+        const w = Math.max(320, root._nkdMinW || 0, Math.round(nw * s));
+        const h = Math.max(240, Math.round(nh * s) + chrome);
         if (typeof root._nkdResizeTo === "function") {
             root._nkdResizeTo(w, h, { center: false });
         } else {
@@ -1285,25 +1338,23 @@ function createViewerDOM(opts = {}) {
     root.querySelector(".nkd-pv-btn-copy").addEventListener("click", () => copyImageToClipboard(img.src, root.ownerDocument.defaultView || window));
     if (onSendToLoad) root.querySelector(".nkd-pv-btn-load").addEventListener("click", () => sendLoop(false));
 
-    root.querySelector(".nkd-pv-btn-fit").addEventListener("click", fit);
+    root.querySelector(".nkd-pv-btn-fit").addEventListener("click", () => { hold11 = false; fit(); });
     root.querySelector(".nkd-pv-btn-100").addEventListener("click", () => {
-        // If in panel mode, resize panel to image size and center it, then fit zoom.
-        if (typeof root._nkdResizeTo === "function") {
-            const nw = img.naturalWidth, nh = img.naturalHeight;
-            if (nw && nh) {
-                const maxW = Math.round(window.innerWidth  * 0.9);
-                const maxH = Math.round(window.innerHeight * 0.9);
-                const w = Math.min(nw, maxW);
-                const h = Math.min(nh, maxH);
-                root._nkdResizeTo(w, h, { center: true });
-                return;
-            }
+        // 1:1 = actual pixels. The window takes the image size (capped by the screen) and
+        // the image is shown at 100 %, centred: a capped big image fills the window instead
+        // of being FIT inside a window of another aspect (the old side bands).
+        const nw = img.naturalWidth, nh = img.naturalHeight;
+        if (typeof root._nkdResizeTo === "function" && nw && nh) {
+            const scr = (root.ownerDocument.defaultView || window).screen;
+            const inPage = root.ownerDocument === document;   // floating panel: capped by the page
+            const maxW = Math.round((inPage ? window.innerWidth  : scr.availWidth)  * 0.9);
+            const maxH = Math.round((inPage ? window.innerHeight : scr.availHeight) * 0.9);
+            const w = Math.max(root._nkdMinW || 0, Math.min(nw, maxW));
+            const h = Math.min(nh + root.clientHeight - wrap.clientHeight, maxH);
+            hold11 = true;   // the resize hook's refit lands on 1:1, now and when the window settles
+            root._nkdResizeTo(w, h, { center: true });
         }
-        // Popup / PiP mode: pan to center at 1:1.
-        const rect = wrap.getBoundingClientRect();
-        const cx = rect.width / 2, cy = rect.height / 2;
-        const r = 1.0 / scale;
-        tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = 1.0; userView = true; apply();
+        oneToOne();
     });
 
     // Download — a browser download of the file that already exists. Uses api.apiURL,
@@ -1358,7 +1409,7 @@ function createViewerDOM(opts = {}) {
         const factor = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.001));
         const ns = Math.max(fitScale * 0.1, Math.min(scale * factor, fitScale * 32));
         const r = ns / scale;
-        tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = ns; userView = true; apply();
+        tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = ns; hold11 = false; userView = true; apply();
     }, { passive: false });
 
     // Left or middle drag pans the image (consistent with the PiP viewer).
@@ -1399,12 +1450,12 @@ function createViewerDOM(opts = {}) {
         }
         if (paintOn && !panning) { paintMove(e); return; }
         if (!panning) return;
-        tx = stx + (e.clientX - sx); ty = sty + (e.clientY - sy); userView = true; apply();
+        tx = stx + (e.clientX - sx); ty = sty + (e.clientY - sy); hold11 = false; userView = true; apply();
     });
     wrap.addEventListener("pointerleave", () => { pxEl.textContent = ""; });
     zoomBtn.addEventListener("click", () => {
         const rc = wrap.getBoundingClientRect(), cx = rc.width / 2, cy = rc.height / 2, r = 1 / scale;
-        tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = 1; userView = true; apply();
+        tx = cx - (cx - tx) * r; ty = cy - (cy - ty) * r; scale = 1; hold11 = false; userView = true; apply();
     });
     const endPan = () => { paintUp(); panning = false; root.classList.remove("panning"); };
     wrap.addEventListener("pointerup", endPan);
@@ -1417,7 +1468,7 @@ function createViewerDOM(opts = {}) {
             const ns = 1.0, r = ns / scale;
             tx = (e.clientX - rect.left) - (e.clientX - rect.left - tx) * r;
             ty = (e.clientY - rect.top)  - (e.clientY - rect.top  - ty) * r;
-            scale = ns; userView = true; apply();
+            scale = ns; hold11 = false; userView = true; apply();
         }
     });
 
@@ -1425,17 +1476,19 @@ function createViewerDOM(opts = {}) {
     const onSize = () => {
         syncStrip();
         if (!img.naturalWidth) return;
+        if (hold11) return oneToOne();
         if (!userView) fit();
         else { fitScale = Math.min(wrap.clientWidth / img.naturalWidth, wrap.clientHeight / img.naturalHeight); apply(); }
     };
+    const watched = () => [wrap, ...dock.children, ...paintRow.children];
     let ro = new ResizeObserver(onSize);
-    ro.observe(wrap);
+    watched().forEach(el => ro.observe(el));
     // An observer belongs to the window that made it; once the viewer moves into a PiP / OS
     // window it must be re-created from THAT window or its rendering loop never notifies us.
     root._nkdRebind = (w) => {
         ro.disconnect();
         ro = new (w.ResizeObserver || ResizeObserver)(onSize);
-        ro.observe(wrap);
+        watched().forEach(el => ro.observe(el));
     };
     root._nkdDispose = () => ro.disconnect();
 
@@ -1452,11 +1505,11 @@ function createViewerDOM(opts = {}) {
             if (e.key === "ArrowLeft")  tx += step;
             if (e.key === "ArrowDown")  ty -= step;
             if (e.key === "ArrowUp")    ty += step;
-            userView = true; apply();
+            hold11 = false; userView = true; apply();
         } else if (e.key === "ArrowRight") { e.preventDefault(); stepBatch(1); }
         else if (e.key === "ArrowLeft")    { e.preventDefault(); stepBatch(-1); }
         // F, not R: plain R is ComfyUI's "refresh node definitions".
-        if (e.key === "0" || e.key === "f" || e.key === "F") fit();
+        if (e.key === "0" || e.key === "f" || e.key === "F") { hold11 = false; fit(); }
         if (e.key === "1") root.querySelector(".nkd-pv-btn-100").click();
         if (e.key === "s" || e.key === "S") root.querySelector(".nkd-pv-btn-save").click();
         if (e.key === "c" || e.key === "C") root.querySelector(".nkd-pv-btn-copy").click();
@@ -1796,7 +1849,7 @@ class PopupWin {
                     w: panel.offsetWidth, h: panel.offsetHeight,
                     l: panel.offsetLeft,  t: panel.offsetTop,
                 };
-                const minW = 320, minH = 200 + TITLEBAR_H;
+                const minW = Math.max(320, (container._nkdMinW || 0) + 2), minH = 200 + TITLEBAR_H;
 
                 const onMove = ev => {
                     const dx = ev.clientX - start.x;
@@ -1841,7 +1894,9 @@ class PopupWin {
 
         // Fit Window resizes the panel keeping its current position.
         // center=true forces re-centering (used by 1:1 Pixel).
+        container._nkdGrow = (d) => { panel.style.width = (panel.offsetWidth + d) + "px"; };
         container._nkdResizeTo = (w, h, { center = false } = {}) => {
+            w = Math.max(w, container._nkdMinW || 0);
             if (center) {
                 panel.style.left = Math.round((window.innerWidth  - w) / 2) + "px";
                 panel.style.top  = Math.round((window.innerHeight - h - TITLEBAR_H) / 2) + "px";
@@ -1950,6 +2005,8 @@ class PopupWin {
 
             // Fit Window now resizes the OS window
             container._nkdResizeTo = (w, h, opts = {}) => {
+                // resizeTo is the OUTER size: add the frame, or the viewer ends up short
+                w += win.outerWidth - win.innerWidth; h += win.outerHeight - win.innerHeight;
                 win.resizeTo(w, h);
                 if (opts.center) win.moveTo(Math.round((screen.availWidth - w) / 2), Math.round((screen.availHeight - h) / 2));
                 container._nkdFit?.();
